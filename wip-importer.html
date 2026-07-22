@@ -1,0 +1,1659 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WIP Importer — Business Central → Weldcell Scheduler</title>
+<!--
+  ============================================================================
+  OFFLINE BY CONSTRUCTION
+  ============================================================================
+  This file makes NO network requests. There is no <script src>, no <link href>,
+  no CDN, no fetch/XHR to any server, no analytics, no fonts loaded remotely.
+  Everything below is inline and runs entirely in your browser.
+
+  Your WIP file is read via the browser's local FileReader. It is never
+  uploaded anywhere. You can verify this yourself:
+    - Search this file for "http" — the only matches are XML namespace
+      identifiers (which are labels, not addresses; nothing is fetched from
+      them) and this comment.
+    - Open DevTools > Network, load a file, and watch: zero requests.
+    - Disconnect from the network entirely. It still works.
+
+  XLSX parsing is done natively: an .xlsx is a ZIP archive of XML files. We
+  unzip it using the browser's built-in DecompressionStream API and parse the
+  XML with the built-in DOMParser. No SheetJS, no third-party library.
+
+  Settings (your keyword list, column mapping) are saved to this browser's
+  localStorage only.
+  ============================================================================
+-->
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #121820;
+    --panel-2: #171f2a;
+    --line: #263241;
+    --line-soft: #1c2531;
+    --text: #e6edf5;
+    --text-dim: #8fa3b8;
+    --text-faint: #5c6f85;
+    --amber: #f0a318;
+    --amber-dim: #8a5e0d;
+    --green: #35c08a;
+    --red: #e5544b;
+    --blue: #4aa3df;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Roboto Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
+  body { padding: 0 0 80px; -webkit-font-smoothing: antialiased; }
+
+  header {
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #131a23, #0d131a);
+    padding: 18px 24px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .mark {
+    width: 34px; height: 34px; border-radius: 6px; background: var(--amber);
+    color: #10151b; font-weight: 800; display: grid; place-items: center;
+    font-size: 15px; letter-spacing: -0.5px; flex: none;
+  }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: 0.02em; font-weight: 700; }
+  header p { margin: 2px 0 0; font-size: 12px; color: var(--text-dim); }
+  .offline-badge {
+    margin-left: auto; font-size: 11px; font-family: var(--mono);
+    border: 1px solid var(--green); color: var(--green);
+    padding: 5px 10px; border-radius: 999px; white-space: nowrap;
+  }
+
+  main { max-width: 1500px; margin: 0 auto; padding: 22px 24px; }
+
+  .step { margin-bottom: 26px; }
+  .step-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+  .step-num {
+    font-family: var(--mono); font-size: 11px; color: var(--amber);
+    border: 1px solid var(--amber-dim); border-radius: 4px; padding: 2px 6px;
+  }
+  .step-head h2 { font-size: 14px; margin: 0; font-weight: 650; letter-spacing: 0.01em; }
+  .step-head .hint { font-size: 12px; color: var(--text-faint); margin-left: 4px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+
+  /* Drop zone */
+  #drop {
+    border: 1.5px dashed var(--line); border-radius: 10px; padding: 34px 20px;
+    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+    background: var(--panel);
+  }
+  #drop:hover, #drop.over { border-color: var(--amber); background: #151d27; }
+  #drop strong { display: block; font-size: 14px; margin-bottom: 5px; }
+  #drop span { font-size: 12px; color: var(--text-dim); }
+  #fileInput { display: none; }
+  .file-meta { margin-top: 10px; font-family: var(--mono); font-size: 12px; color: var(--green); }
+
+  /* Keywords */
+  .kw-row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  input[type=text], select {
+    background: #0d131a; border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: var(--sans);
+    outline: none;
+  }
+  input[type=text]:focus, select:focus { border-color: var(--amber); }
+  input[type=text]::placeholder { color: var(--text-faint); }
+  .kw-input { flex: 1; min-width: 220px; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #1d2836; border: 1px solid var(--line); color: var(--text);
+    border-radius: 999px; padding: 4px 6px 4px 11px; font-size: 12px;
+  }
+  .chip.exclude { border-color: #5a2b28; background: #2a1a19; color: #f0b3ae; }
+  .chip b { font-weight: 600; }
+  .chip button {
+    background: none; border: none; color: var(--text-faint); cursor: pointer;
+    font-size: 15px; line-height: 1; padding: 0 2px;
+  }
+  .chip button:hover { color: var(--red); }
+  .chips-empty { font-size: 12px; color: var(--text-faint); font-style: italic; }
+
+  .sub { font-size: 11px; color: var(--text-faint); margin: 10px 0 6px; text-transform: uppercase; letter-spacing: 0.06em; }
+
+  /* Buttons */
+  button.btn {
+    background: #1d2836; border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 8px 12px; font-size: 13px; cursor: pointer;
+    font-family: var(--sans); display: inline-flex; align-items: center; gap: 6px;
+  }
+  button.btn:hover { background: #263241; }
+  button.btn.primary { background: var(--amber); border-color: var(--amber); color: #10151b; font-weight: 650; }
+  button.btn.primary:hover { background: #ffb42a; }
+  button.btn.primary:disabled { background: #3a3527; border-color: #3a3527; color: #7a7259; cursor: not-allowed; }
+  button.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* Mapping grid */
+  .map-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .map-item label { display: block; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+  .map-item label em { color: var(--text-faint); font-style: normal; }
+  .map-item select { width: 100%; }
+
+  /* Stats */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px; }
+  .stat .n { font-family: var(--mono); font-size: 21px; font-weight: 600; }
+  .stat .l { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .stat.keep .n { color: var(--green); }
+  .stat.dupe .n { color: var(--blue); }
+  .stat.skip .n { color: var(--text-faint); }
+  .stat.warn .n { color: var(--amber); }
+
+  /* Table */
+  .table-wrap { border: 1px solid var(--line); border-radius: 8px; overflow: auto; max-height: 460px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  thead th {
+    position: sticky; top: 0; background: var(--panel-2); text-align: left;
+    padding: 9px 10px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-dim); border-bottom: 1px solid var(--line); white-space: nowrap; font-weight: 600;
+  }
+  tbody td { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  tbody tr:hover { background: #151d27; }
+  tbody tr.excluded { opacity: 0.42; }
+  tbody tr.excluded .jobname { text-decoration: line-through; }
+  .num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+  .jobno { font-family: var(--mono); color: var(--text-dim); white-space: nowrap; }
+  .why { font-size: 11px; color: var(--text-faint); }
+  .why mark { background: rgba(240,163,24,.22); color: var(--amber); padding: 0 2px; border-radius: 2px; }
+  .tag {
+    display: inline-block; font-size: 10px; padding: 1.5px 6px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--text-dim); white-space: nowrap;
+  }
+  .tag.dupe { border-color: #2c4a63; color: var(--blue); background: #131f2b; }
+  .tag.nomatch { border-color: var(--line); color: var(--text-faint); }
+  .tag.excl { border-color: #5a2b28; color: #f0b3ae; background: #2a1a19; }
+  .tag.matched { border-color: #2a5c46; color: var(--green); background: #12241d; }
+  .tag.review { border-color: #6b4a12; color: var(--amber); background: #241c0e; }
+  .tag.done { border-color: #2c4a63; color: var(--text-dim); background: #131f2b; }
+
+  /* Combination rules */
+  .rule {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    background: #1a2331; border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; margin-bottom: 6px;
+  }
+  .rule .words { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .rule .w {
+    background: #24344a; border: 1px solid #354a66; color: #cfe2f5;
+    border-radius: 4px; padding: 2px 8px; font-size: 12px; font-family: var(--mono);
+  }
+  .rule .amp { color: var(--text-faint); font-size: 11px; }
+  .rule .arrow { color: var(--amber); font-size: 11px; margin-left: 2px; }
+  .rule .del {
+    margin-left: auto; background: none; border: none; color: var(--text-faint);
+    cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px;
+  }
+  .rule .del:hover { color: var(--red); }
+  .rule-empty { font-size: 12px; color: var(--text-faint); font-style: italic; }
+  .warncell { color: var(--amber); font-size: 11px; }
+  input[type=checkbox] { accent-color: var(--amber); width: 15px; height: 15px; cursor: pointer; }
+
+  .filters { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; align-items: center; }
+  .filters .spacer { flex: 1; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    background: transparent; border: none; color: var(--text-dim); padding: 6px 11px;
+    font-size: 12px; cursor: pointer; font-family: var(--sans);
+  }
+  .seg button.on { background: var(--amber); color: #10151b; font-weight: 600; }
+
+  .notice {
+    border-left: 2px solid var(--amber); background: #1a1610; padding: 10px 12px;
+    border-radius: 0 6px 6px 0; font-size: 12px; color: #e8d5a8; margin-bottom: 12px; line-height: 1.5;
+  }
+  .notice.err { border-color: var(--red); background: #1e1312; color: #f0b3ae; }
+  .notice.info { border-color: var(--blue); background: #101a22; color: #b9d8ec; }
+
+  .export-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .export-bar .count { font-size: 12.5px; color: var(--text-dim); }
+  .export-bar .count b { color: var(--green); font-family: var(--mono); }
+
+  footer { max-width: 1500px; margin: 0 auto; padding: 0 24px; font-size: 11.5px; color: var(--text-faint); line-height: 1.6; }
+  code { font-family: var(--mono); background: #0d131a; padding: 1px 5px; border-radius: 3px; border: 1px solid var(--line-soft); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="mark">W</div>
+  <div>
+    <h1>WIP IMPORTER</h1>
+    <p>Business Central WIP export → Weldcell Scheduler jobs</p>
+  </div>
+  <div class="offline-badge" id="offlineBadge">◈ Offline · nothing leaves this machine</div>
+</header>
+
+<main>
+
+  <!-- STEP 1 -->
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">01</span>
+      <h2>Load the WIP export</h2>
+      <span class="hint">.xlsx from Business Central</span>
+    </div>
+    <div id="drop">
+      <strong>Drop the WIP worksheet here, or click to choose</strong>
+      <span>Read locally in your browser. No upload, no network.</span>
+      <div class="file-meta hidden" id="fileMeta"></div>
+    </div>
+    <input type="file" id="fileInput" accept=".xlsx" />
+    <div id="loadErr"></div>
+  </section>
+
+  <!-- STEP 2 -->
+  <section class="step hidden" id="step2">
+    <div class="step-head">
+      <span class="step-num">02</span>
+      <h2>Match your department's work</h2>
+      <span class="hint">keywords are matched against the Description column</span>
+    </div>
+    <div class="panel">
+      <div class="sub">Include if Description contains any of these</div>
+      <div class="kw-row">
+        <input type="text" class="kw-input" id="kwInput" placeholder="e.g. weld, hvof, spray, clad…  (Enter to add)" />
+        <button class="btn" id="kwAdd">Add keyword</button>
+      </div>
+      <div class="chips" id="kwChips"></div>
+
+      <div class="sub" style="margin-top:16px">But exclude if Description contains any of these <em style="text-transform:none;letter-spacing:0;font-style:normal;color:var(--text-faint)">— optional, wins over include</em></div>
+      <div class="kw-row">
+        <input type="text" class="kw-input" id="exInput" placeholder="e.g. paint, machining…  (Enter to add)" />
+        <button class="btn" id="exAdd">Add exclusion</button>
+      </div>
+      <div class="chips" id="exChips"></div>
+
+      <div class="sub" style="margin-top:16px">Combination rules <em style="text-transform:none;letter-spacing:0;font-style:normal;color:var(--text-faint)">— when all these words appear together, hold the job for review</em></div>
+      <div class="kw-row">
+        <input type="text" class="kw-input" id="comboInput" placeholder="e.g. body, elbow  —  two or more words, comma separated" />
+        <button class="btn" id="comboAdd">Add rule</button>
+      </div>
+      <div id="comboList"></div>
+      <p style="font-size:11.5px;color:var(--text-faint);margin:8px 0 0;line-height:1.5">
+        Each word on its own still matches normally. The rule only fires when <b>every</b> word in it appears in the same
+        Description — that job is then held back and listed under <b>Not matched</b> for you to decide on, rather than being
+        auto-included or thrown away. Words are matched whole, so <code>body</code> will not fire on <code>bodywork</code>.
+      </p>
+
+      <div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <button class="btn" id="kwReset">Reset to defaults</button>
+        <button class="btn" id="settingsExport">Save settings to file</button>
+        <button class="btn" id="settingsImport">Load settings from file</button>
+        <input type="file" id="settingsFile" accept=".json" style="display:none" />
+        <span style="font-size:11.5px;color:var(--text-faint)">Saved in this browser automatically. Use the buttons to move them to another browser or machine.</span>
+      </div>
+      <div id="settingsMsg"></div>
+    </div>
+  </section>
+
+  <!-- STEP 3 -->
+  <section class="step hidden" id="step3">
+    <div class="step-head">
+      <span class="step-num">03</span>
+      <h2>Column mapping</h2>
+      <span class="hint">detected from your file — change any that look wrong</span>
+    </div>
+    <div class="panel">
+      <div class="map-grid" id="mapGrid"></div>
+    </div>
+  </section>
+
+  <!-- STEP 4 -->
+  <section class="step hidden" id="step4">
+    <div class="step-head">
+      <span class="step-num">04</span>
+      <h2>Review before export</h2>
+      <span class="hint">tick or untick anything — nothing is dropped silently</span>
+    </div>
+
+    <div class="stats" id="stats"></div>
+    <div id="warnBox"></div>
+
+    <div class="filters">
+      <div class="seg" id="viewSeg">
+        <button data-v="matched" class="on">Matched</button>
+        <button data-v="all">All rows</button>
+        <button data-v="dupes">Duplicates</button>
+        <button data-v="unmatched">Not matched</button>
+      </div>
+      <input type="text" id="search" placeholder="Search job no. or description…" style="min-width:240px" />
+      <div class="spacer"></div>
+      <button class="btn" id="selAll">Select all shown</button>
+      <button class="btn" id="selNone">Deselect all shown</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:34px"></th>
+            <th>Job No.</th>
+            <th>Task</th>
+            <th>Description</th>
+            <th>Why</th>
+            <th class="num">Value</th>
+            <th class="num">Qty</th>
+            <th>Target</th>
+            <th>Status</th>
+            <th>Flags</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- STEP 5 -->
+  <section class="step hidden" id="step5">
+    <div class="step-head">
+      <span class="step-num">05</span>
+      <h2>Export for the scheduler</h2>
+    </div>
+    <div class="panel">
+      <div class="notice info" id="valueNote"></div>
+      <div class="export-bar">
+        <button class="btn primary" id="exportJson">Download scheduler jobs (.json)</button>
+        <button class="btn" id="exportCsv">Download review copy (.csv)</button>
+        <span class="count" id="exportCount"></span>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <p>
+    <b style="color:var(--text-dim)">How matching works.</b> A row is proposed when any include keyword appears in the
+    <code>Description</code> column. <code>Job Task Description</code> is not searched — in BC it holds progress text like
+    "WIP 50%" rather than what the work is — but it is carried through to the review table and the export notes.
+    Exclusions override includes. <b style="color:var(--text-dim)">Combination rules</b> sit between the two: when every word
+    in a rule appears in the same Description, that job is held back and listed under <code>Not matched</code> tagged
+    "needs review" — so a job that is yours when it says "body", and yours when it says "elbow", but something else when it
+    says both, lands in front of you rather than being guessed at. Duplicates are detected on
+    <code>Job No.</code> — the row with the most complete data is kept and the rest are set aside, not deleted. Everything is
+    reviewable above, and nothing is exported unless it is ticked.
+  </p>
+  <p>
+    <b style="color:var(--text-dim)">Actual Completion Date is only trusted when corroborated.</b> Business Central has been
+    observed filling this column on jobs that have not started, so a date alone is never enough. A job counts as finished — and
+    is unticked automatically — only when a completion date appears <b>together with</b> a status of
+    <code>ready for dispatch</code>, <code>ready for invoicing</code>, <code>finance to invoice</code> or <code>complete</code>.
+    A date with any other status is flagged for you to check, and a date on an <code>on order</code> job is called out as a
+    direct contradiction. Nothing is ever hidden — unticked jobs stay visible and tickable, and the count appears in the
+    summary above. Every job still exports as active, with the BC date recorded in notes marked unverified.
+  </p>
+  <p>
+    <b style="color:var(--text-dim)">Where your settings live.</b> Your keyword lists and combination rules are saved in this
+    browser's local storage — nothing else is stored, and no WIP data is ever written to disk. That storage is tied to this
+    browser on this machine, and browsers can clear it (or lose track of it when the file moves), so use
+    <b>Save settings to file</b> to keep a copy or carry your setup to another browser or computer, and <b>Load settings from
+    file</b> at the other end. The settings file contains only keywords and rules, so it is safe to share or store.
+  </p>
+  <p>
+    <b style="color:var(--text-dim)">Department value.</b> Business Central's <code>Total Contract Value (LCY)</code> is the value of the
+    whole job to the company, not your department's share. The export carries it through as <code>totalValue</code> and leaves
+    <code>departmentValue</code> at 0 for you to fill in — the scheduler's value report depends on that distinction, so it is not guessed here.
+  </p>
+</footer>
+
+<script>
+"use strict";
+
+/* ============================================================================
+   STATE
+   ============================================================================ */
+const state = {
+  fileName: null,
+  headers: [],
+  rows: [],          // array of objects keyed by header
+  mapping: {},       // logical field -> header name
+  analysed: [],      // enriched row records
+  selected: new Set(),// row ids ticked for export
+  view: 'matched',
+  search: '',
+};
+
+const DEFAULT_INCLUDE = ['weld', 'welding', 'mig', 'tig', 'spray', 'hvof', 'plasma', 'arc spray', 'clad', 'cladding', 'coating', 'overlay'];
+const DEFAULT_EXCLUDE = [];
+
+/* ----------------------------------------------------------------------------
+   Operational statuses that genuinely mean "this job is finished".
+   ----------------------------------------------------------------------------
+   BC's Actual Completion Date is unreliable on its own (it turns up on jobs that
+   have not started). But when it appears ALONGSIDE one of these statuses, the two
+   corroborate each other and the job can be treated as done without a human
+   double-check. Matched loosely (case-insensitive substring) so minor wording
+   differences in BC still land — e.g. "Ready For Invoicing" vs "READY FOR INVOICE".
+   ---------------------------------------------------------------------------- */
+const DONE_STATUSES = [
+  'ready for dispatch',
+  'ready for invoicing',
+  'ready for invoice',
+  'finance to invoice',
+  'complete',
+];
+
+// Statuses that positively indicate work has NOT started. A completion date on
+// one of these is a direct contradiction and always worth surfacing.
+const UNSTARTED_STATUSES = [
+  'on order',
+  'not started',
+  'planned',
+  'quote',
+];
+
+function statusMatches(status, list) {
+  const s = (status || '').trim().toLowerCase();
+  if (!s) return false;
+  return list.some(k => s.includes(k));
+}
+function isDoneStatus(status) { return statusMatches(status, DONE_STATUSES); }
+function isUnstartedStatus(status) { return statusMatches(status, UNSTARTED_STATUSES); }
+
+let includeKw = [];
+let excludeKw = [];
+// Combination rules: each is a list of words that must ALL appear in the
+// Description for the rule to fire. When one fires the row is held back for
+// review (shown under "Not matched") rather than auto-included or discarded —
+// e.g. "body" alone is ours and "elbow" alone is ours, but a description with
+// both is a different part that needs a human decision.
+let comboRules = [];
+const DEFAULT_COMBOS = [];
+
+/* ============================================================================
+   LOCAL SETTINGS (this browser only)
+   ============================================================================ */
+const LS = {
+  get(k, fb) { try { const v = localStorage.getItem('wipimp::' + k); return v ? JSON.parse(v) : fb; } catch (e) { return fb; } },
+  set(k, v) { try { localStorage.setItem('wipimp::' + k, JSON.stringify(v)); } catch (e) { /* private mode; ignore */ } },
+};
+
+/* ============================================================================
+   XLSX READER  (no library — an .xlsx is a ZIP of XML)
+   ----------------------------------------------------------------------------
+   We implement just enough of the ZIP container to pull out the few XML parts
+   we need, then parse them with the browser's DOMParser. Deflate is handled by
+   the browser's native DecompressionStream.
+   ============================================================================ */
+
+async function inflateRaw(bytes) {
+  // Native raw-deflate via DecompressionStream (Chrome/Edge 80+, FF 113+, Safari 16.4+)
+  const ds = new DecompressionStream('deflate-raw');
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function unzip(arrayBuffer) {
+  const view = new DataView(arrayBuffer);
+  const bytes = new Uint8Array(arrayBuffer);
+  const files = {};
+
+  // Locate End Of Central Directory record (scan back from the tail)
+  let eocd = -1;
+  const maxBack = Math.min(bytes.length, 66000);
+  for (let i = bytes.length - 22; i >= bytes.length - maxBack && i >= 0; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('Not a valid .xlsx (no ZIP end record found).');
+
+  const entryCount = view.getUint16(eocd + 10, true);
+  let p = view.getUint32(eocd + 16, true); // start of central directory
+
+  for (let n = 0; n < entryCount; n++) {
+    if (view.getUint32(p, true) !== 0x02014b50) break;
+    const method   = view.getUint16(p + 10, true);
+    const compSize = view.getUint32(p + 20, true);
+    const nameLen  = view.getUint16(p + 28, true);
+    const extraLen = view.getUint16(p + 30, true);
+    const cmtLen   = view.getUint16(p + 32, true);
+    const lho      = view.getUint32(p + 42, true); // local header offset
+    const name     = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nameLen));
+
+    // Read the local header to find where the data actually starts
+    const lnLen = view.getUint16(lho + 26, true);
+    const leLen = view.getUint16(lho + 28, true);
+    const dataStart = lho + 30 + lnLen + leLen;
+    const raw = bytes.subarray(dataStart, dataStart + compSize);
+
+    files[name] = { method, raw };
+    p += 46 + nameLen + extraLen + cmtLen;
+  }
+
+  // Decompress only the parts we care about, lazily
+  return {
+    async read(name) {
+      const f = files[name];
+      if (!f) return null;
+      const out = f.method === 0 ? f.raw : await inflateRaw(f.raw);
+      return new TextDecoder().decode(out);
+    },
+    names: Object.keys(files),
+  };
+}
+
+function colToIndex(ref) {
+  // "BC12" -> 54 (0-based column index)
+  let s = 0;
+  for (let i = 0; i < ref.length; i++) {
+    const c = ref.charCodeAt(i);
+    if (c >= 65 && c <= 90) s = s * 26 + (c - 64);
+    else break;
+  }
+  return s - 1;
+}
+
+// Excel serial date -> ISO yyyy-mm-dd. Excel's epoch is 1899-12-30 (accounts for
+// the historical 1900 leap-year bug).
+// IMPORTANT: serial 0 is NOT a date — it is how Business Central (and Excel)
+// represent an EMPTY date field. Naively converting it yields "1899-12-30",
+// which is truthy and makes empty dates look like real ones. Anything at or
+// below 0, or absurdly small, is treated as "no date".
+const MIN_SERIAL = 1;      // 1899-12-31; anything below this is an empty/invalid date
+const MAX_SERIAL = 2958465; // 9999-12-31, Excel's ceiling
+function serialToISO(n) {
+  if (typeof n !== 'number' || !isFinite(n)) return null;
+  if (n < MIN_SERIAL || n > MAX_SERIAL) return null;
+  const ms = Math.round((n - 25569) * 86400 * 1000);
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function isDateFormat(fmt) {
+  if (!fmt) return false;
+  const f = fmt.toLowerCase();
+  if (/(^|[^\]])[dmy]/.test(f.replace(/\[[^\]]*\]/g, '')) && /[dmy]/.test(f)) {
+    // crude but effective: has d/m/y tokens outside bracketed sections
+    return !/^[#0.,%\s]*$/.test(f);
+  }
+  return false;
+}
+
+/* ----------------------------------------------------------------------------
+   Namespace-agnostic element lookup.
+   ----------------------------------------------------------------------------
+   getElementsByTagName() matches the literal tag name, so it finds <row> but
+   NOT <x:row>. Both are valid OOXML: Excel writes the unprefixed form, while
+   Business Central and other generators often declare the spreadsheet namespace
+   with a prefix and write <x:row>/<x:c>. Matching on localName handles either.
+   getElementsByTagNameNS('*', name) does this natively and is well supported.
+   ---------------------------------------------------------------------------- */
+function els(parent, localName) {
+  if (!parent) return [];
+  let out = parent.getElementsByTagNameNS('*', localName);
+  if (out && out.length) return Array.from(out);
+  // Fallback for parsers/documents where NS lookup yields nothing
+  out = parent.getElementsByTagName(localName);
+  if (out && out.length) return Array.from(out);
+  return [];
+}
+function firstEl(parent, localName) {
+  const a = els(parent, localName);
+  return a.length ? a[0] : null;
+}
+// Attributes can be prefixed too (e.g. r:id). Try plain, then any namespace.
+function attr(el, name) {
+  if (!el) return null;
+  const v = el.getAttribute(name);
+  if (v != null) return v;
+  for (const a of Array.from(el.attributes || [])) {
+    if (a.localName === name || a.name === name) return a.value;
+  }
+  return null;
+}
+
+async function parseXlsx(arrayBuffer) {
+  const zip = await unzip(arrayBuffer);
+  const parser = new DOMParser();
+
+  // --- shared strings ---
+  const sstXml = await zip.read('xl/sharedStrings.xml');
+  const sst = [];
+  if (sstXml) {
+    const doc = parser.parseFromString(sstXml, 'application/xml');
+    for (const si of els(doc, 'si')) {
+      // concatenate all text nodes, skipping ruby/phonetic annotations
+      let txt = '';
+      for (const t of els(si, 't')) {
+        const pn = t.parentNode;
+        if (pn && (pn.localName === 'rPh' || pn.nodeName === 'rPh')) continue;
+        txt += t.textContent;
+      }
+      sst.push(txt);
+    }
+  }
+
+  // --- number formats, so we can tell dates from plain numbers ---
+  const styXml = await zip.read('xl/styles.xml');
+  const cellIsDate = [];
+  if (styXml) {
+    const doc = parser.parseFromString(styXml, 'application/xml');
+    const custom = {};
+    for (const nf of els(doc, 'numFmt')) {
+      custom[attr(nf, 'numFmtId')] = attr(nf, 'formatCode') || '';
+    }
+    // Built-in date format ids per ECMA-376
+    const builtinDates = new Set(['14','15','16','17','18','19','20','21','22','45','46','47']);
+    const xfs = firstEl(doc, 'cellXfs');
+    if (xfs) {
+      let i = 0;
+      for (const xf of els(xfs, 'xf')) {
+        const id = attr(xf, 'numFmtId') || '0';
+        cellIsDate[i] = builtinDates.has(id) || isDateFormat(custom[id]);
+        i++;
+      }
+    }
+  }
+
+  // --- find the first worksheet via the workbook rels ---
+  const wbXml = await zip.read('xl/workbook.xml');
+  const relsXml = await zip.read('xl/_rels/workbook.xml.rels');
+  let sheetPath = 'xl/worksheets/sheet1.xml';
+  let sheetName = 'Sheet1';
+  if (wbXml && relsXml) {
+    const wbDoc = parser.parseFromString(wbXml, 'application/xml');
+    const relDoc = parser.parseFromString(relsXml, 'application/xml');
+    const first = els(wbDoc, 'sheet')[0];
+    if (first) {
+      sheetName = attr(first, 'name') || sheetName;
+      const rid = attr(first, 'id'); // matches r:id or id, any prefix
+      for (const rel of els(relDoc, 'Relationship')) {
+        if (attr(rel, 'Id') === rid) {
+          let t = attr(rel, 'Target') || '';
+          if (t.startsWith('/')) t = t.slice(1);
+          else if (!t.startsWith('xl/')) t = 'xl/' + t;
+          sheetPath = t;
+        }
+      }
+    }
+  }
+
+  const sheetXml = await zip.read(sheetPath);
+  if (!sheetXml) throw new Error('Could not find a worksheet inside the file.');
+  const sheet = parser.parseFromString(sheetXml, 'application/xml');
+
+  // DOMParser reports XML syntax errors as a <parsererror> element rather than
+  // throwing, so check explicitly instead of silently reading an empty document.
+  const perr = sheet.getElementsByTagName('parsererror')[0];
+  if (perr) throw new Error('The worksheet XML could not be parsed: ' + (perr.textContent || '').trim().slice(0, 160));
+
+  if (els(sheet, 'row').length === 0) {
+    throw new Error('The worksheet contains no rows at all (empty sheetData). Check that the export actually produced data.');
+  }
+
+  // --- read cells into a grid, indexed by the row's REAL row number ---
+  // Excel omits empty rows from the XML entirely, so we honour each row's `r`
+  // attribute rather than pushing sequentially. But not every writer emits `r`:
+  // Business Central and other server-side generators often omit it on <row>
+  // and/or <c> and rely purely on document order. Both must work, so we fall
+  // back to positional counting whenever `r` is missing.
+  const grid = [];
+  let seqRow = 0;
+  for (const row of els(sheet, 'row')) {
+    const rAttr = attr(row, 'r');
+    const rowIdx = rAttr ? parseInt(rAttr, 10) - 1 : seqRow;
+    seqRow = rowIdx + 1;
+
+    const cells = [];
+    let maxCi = -1;
+    let seqCol = 0;
+    for (const c of els(row, 'c')) {
+      const ref = attr(c, 'r') || '';
+      // colToIndex returns -1 for a missing/unparseable ref; fall back to the
+      // cell's position in the row, which is what writers that omit `r` intend.
+      const parsed = ref ? colToIndex(ref) : -1;
+      const ci = parsed >= 0 ? parsed : seqCol;
+      seqCol = ci + 1;
+
+      const t = attr(c, 't');
+      const s = attr(c, 's');
+      const vEl = firstEl(c, 'v');
+      const isEl = firstEl(c, 'is');
+      let val = null;
+
+      if (t === 'inlineStr' && isEl) {
+        val = els(isEl, 't').map(x => x.textContent).join('');
+      } else if (vEl) {
+        const raw = vEl.textContent;
+        if (t === 's') {
+          // Shared-string index. If sharedStrings.xml was missing or the index
+          // is out of range, keep the raw value rather than yielding undefined,
+          // which would make the whole row look empty.
+          const idx = parseInt(raw, 10);
+          const hit = Number.isFinite(idx) ? sst[idx] : undefined;
+          val = (hit !== undefined && hit !== null) ? hit : raw;
+        }
+        else if (t === 'b') val = raw === '1';
+        else if (t === 'str' || t === 'e') val = raw;
+        else {
+          const num = parseFloat(raw);
+          const styleIsDate = s != null && cellIsDate[parseInt(s, 10)];
+          val = styleIsDate ? (serialToISO(num) ?? num) : num;
+        }
+      }
+      cells[ci] = val;
+      if (ci > maxCi) maxCi = ci;
+    }
+    // Fill holes with null so the array is dense. Sparse arrays are a trap:
+    // Array.prototype.every/filter SKIP holes, so a row whose first cell is in
+    // column C would look "empty" and be discarded.
+    for (let k = 0; k <= maxCi; k++) if (cells[k] === undefined) cells[k] = null;
+
+    grid[rowIdx] = cells;
+  }
+  // Densify the outer grid too, for the same reason.
+  for (let k = 0; k < grid.length; k++) if (grid[k] === undefined) grid[k] = [];
+
+  // --- find the header row: first row with >=3 non-empty cells ---
+  // Use Array.from to guarantee holes become undefined rather than being skipped.
+  const nonEmptyCount = (arr) =>
+    Array.from(arr || []).filter(v => v !== null && v !== undefined && String(v).trim() !== '').length;
+
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(grid.length, 30); i++) {
+    const cells = Array.from(grid[i] || []);
+    const strCells = cells.filter(v => typeof v === 'string' && v.trim() !== '').length;
+    if (strCells >= 3) { headerIdx = i; break; }
+  }
+  // Fallback: some writers emit headers as numbers or typed values. If no row
+  // had 3+ text cells, accept the first row with 3+ non-empty cells of any type.
+  if (headerIdx === -1) {
+    for (let i = 0; i < Math.min(grid.length, 30); i++) {
+      if (nonEmptyCount(grid[i]) >= 3) { headerIdx = i; break; }
+    }
+  }
+  if (headerIdx === -1) {
+    // Report what we actually saw, so the failure is diagnosable rather than opaque.
+    const sample = [];
+    for (let i = 0; i < Math.min(grid.length, 5); i++) {
+      const cells = Array.from(grid[i] || []);
+      sample.push(`row ${i + 1}: ${cells.length} cells [${cells.slice(0, 6).map(v => JSON.stringify(v)).join(', ')}]`);
+    }
+    throw new Error(
+      `No header row found. The sheet parsed to ${grid.length} row(s) but none had 3+ filled cells. ` +
+      `First rows seen — ${sample.join(' · ') || '(none)'}`
+    );
+  }
+
+  const rawHeaders = Array.from(grid[headerIdx] || []).map((h, i) =>
+    (h !== null && h !== undefined && String(h).trim()) ? String(h).trim() : `Column ${i + 1}`
+  );
+  // de-duplicate repeated header names so keys don't collide
+  const seen = {};
+  const headers = rawHeaders.map(h => {
+    if (seen[h] == null) { seen[h] = 0; return h; }
+    seen[h]++; return `${h} (${seen[h] + 1})`;
+  });
+
+  const rows = [];
+  for (let i = headerIdx + 1; i < grid.length; i++) {
+    const cells = Array.from(grid[i] || []);
+    if (nonEmptyCount(cells) === 0) continue; // genuinely blank row
+    const obj = {};
+    headers.forEach((h, ci) => {
+      const v = cells[ci];
+      obj[h] = (v === null || v === undefined) ? '' : v;
+    });
+    rows.push(obj);
+  }
+
+  if (!rows.length) {
+    throw new Error(
+      `Found a header row at row ${headerIdx + 1} with ${headers.length} columns, but no data rows beneath it. ` +
+      `The sheet reports ${grid.length} rows total.`
+    );
+  }
+
+  return { headers, rows, sheetName, headerRowNumber: headerIdx + 1 };
+}
+
+/* ============================================================================
+   FIELD DETECTION
+   ============================================================================ */
+const FIELDS = [
+  { key: 'jobNo',       label: 'Job No.',            need: true,  pats: [/^job\s*no/i, /job\s*number/i] },
+  { key: 'taskNo',      label: 'Job Task No.',       need: false, pats: [/job\s*task\s*no/i, /task\s*no/i] },
+  { key: 'desc',        label: 'Description · matched for keywords', need: true, pats: [/^description$/i, /^desc(ription)?\.?$/i] },
+  { key: 'taskDesc',    label: 'Job Task Description',need: false, pats: [/job\s*task\s*desc/i, /task\s*desc/i] },
+  { key: 'value',       label: 'Total value',        need: false, pats: [/total\s*contract\s*value/i, /contract\s*value/i, /value.*lcy/i, /^value$/i] },
+  { key: 'qty',         label: 'Quantity',           need: false, pats: [/^quantity$/i, /^qty$/i] },
+  { key: 'target',      label: 'Target completion',  need: false, pats: [/target\s*completion/i, /planned\s*end/i] },
+  { key: 'status',      label: 'Operational status', need: false, pats: [/operational\s*status/i, /job\s*task\s*status/i, /posting\s*status/i] },
+  { key: 'customer',    label: 'Customer',           need: false, pats: [/bill.?to\s*name/i, /end\s*customer\s*name/i, /customer/i] },
+  { key: 'actualDone',  label: 'Actual completion',  need: false, pats: [/actual\s*completion/i] },
+];
+
+function autoMap(headers) {
+  const m = {};
+  for (const f of FIELDS) {
+    for (const p of f.pats) {
+      const hit = headers.find(h => p.test(h));
+      if (hit && !Object.values(m).includes(hit)) { m[f.key] = hit; break; }
+    }
+    if (!m[f.key]) m[f.key] = '';
+  }
+  return m;
+}
+
+/* ============================================================================
+   ANALYSIS: match, dedupe, flag
+   ============================================================================ */
+function textOf(row, key) {
+  const h = state.mapping[key];
+  if (!h) return '';
+  const v = row[h];
+  return v == null ? '' : String(v);
+}
+function numOf(row, key) {
+  const h = state.mapping[key];
+  if (!h) return null;
+  const v = row[h];
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
+    const cleaned = v.replace(/[^0-9.\-]/g, '');
+    if (cleaned === '' || cleaned === '-' || cleaned === '.') return null;
+    const n = parseFloat(cleaned);
+    return isFinite(n) ? n : null;
+  }
+  return null;
+}
+function dateOf(row, key) {
+  const h = state.mapping[key];
+  if (!h) return null;
+  const v = row[h];
+  if (v === null || v === undefined || v === '') return null;
+  // Business Central writes an empty date as 0. serialToISO rejects that, but
+  // guard here too in case the value arrived as a string "0" or a stray 0 date.
+  if (typeof v === 'number') return serialToISO(v);
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (s === '' || s === '0') return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      // Reject the Excel zero-date and anything before it — these are "empty",
+      // not real completion dates.
+      return s <= '1899-12-31' ? null : s;
+    }
+    // A bare number in a text cell (some writers do this)
+    if (/^\d+(\.\d+)?$/.test(s)) return serialToISO(parseFloat(s));
+  }
+  return null;
+}
+
+function findHits(haystack, words) {
+  const low = haystack.toLowerCase();
+  return words.filter(w => w && low.includes(w.toLowerCase()));
+}
+
+// Escape a user-supplied word for safe use inside a RegExp.
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Whole-word test, used by combination rules. Substring matching is too blunt
+// here: a rule on "body" should not be triggered by "bodywork", because the
+// whole point of a combination rule is precision about which words co-occur.
+function hasWord(haystack, word) {
+  if (!word) return false;
+  const re = new RegExp('(^|[^a-z0-9])' + escapeRe(word.toLowerCase()) + '($|[^a-z0-9])', 'i');
+  return re.test(haystack.toLowerCase());
+}
+
+// Returns the rules whose every word appears in the text.
+function firedCombos(haystack, rules) {
+  return rules.filter(rule =>
+    rule.words.length >= 2 && rule.words.every(w => hasWord(haystack, w))
+  );
+}
+
+function completeness(row, mapping) {
+  // Counts how many fields a row actually has, used to pick which duplicate to
+  // keep. The Actual Completion Date column is excluded: it is unreliable (BC
+  // populates it on unstarted jobs), so counting it would let a row win purely
+  // because it carries a bogus date.
+  const skip = mapping && mapping.actualDone ? mapping.actualDone : null;
+  let n = 0;
+  for (const k in row) {
+    if (k === skip) continue;
+    if (row[k] !== '' && row[k] != null) n++;
+  }
+  return n;
+}
+
+function analyse() {
+  const recs = state.rows.map((row, i) => {
+    const jobNo = textOf(row, 'jobNo').trim();
+    const taskDesc = textOf(row, 'taskDesc');
+    const desc = textOf(row, 'desc');
+    // Keywords are matched against the Description column only. Job Task
+    // Description in BC holds WIP/progress text (e.g. "WIP 50%"), not what the
+    // work actually is, so it is carried through for reference but not searched.
+    const hay = desc.trim();
+
+    const incHits = findHits(hay, includeKw);
+    const excHits = findHits(hay, excludeKw);
+    const combos = firedCombos(hay, comboRules);
+    // Precedence: a hard exclusion wins outright; then a fired combination rule
+    // holds the row back for review (it is NOT auto-included and NOT discarded);
+    // otherwise an include keyword matches it in.
+    const matched = incHits.length > 0 && excHits.length === 0 && combos.length === 0;
+
+    return {
+      id: i,
+      row,
+      jobNo,
+      taskNo: textOf(row, 'taskNo'),
+      taskDesc, desc, hay,
+      customer: textOf(row, 'customer'),
+      value: numOf(row, 'value'),
+      qty: numOf(row, 'qty'),
+      target: dateOf(row, 'target'),
+      actualDone: dateOf(row, 'actualDone'),
+      status: textOf(row, 'status'),
+      incHits, excHits, combos, matched,
+      // A job is treated as genuinely finished only when BOTH a completion date
+      // and a corroborating "done" status are present. Either alone is not
+      // sufficient: the date is unreliable, and a status can be set ahead of the
+      // work actually finishing.
+      doneConfirmed: false, // set just below, once status/date are both known
+
+      isDupe: false, dupeOf: null,
+      warnings: [],
+      completeness: completeness(row, state.mapping),
+    };
+  });
+
+  // --- resolve genuine completion (date corroborated by a "done" status) ---
+  for (const r of recs) {
+    r.doneConfirmed = !!(r.actualDone && isDoneStatus(r.status));
+  }
+
+  // --- duplicates on Job No. (keep the most complete row) ---
+  const byJob = {};
+  for (const r of recs) {
+    if (!r.jobNo) continue;
+    (byJob[r.jobNo] = byJob[r.jobNo] || []).push(r);
+  }
+  for (const jobNo in byJob) {
+    const group = byJob[jobNo];
+    if (group.length < 2) continue;
+    // prefer a matched row, then the most complete
+    const sorted = [...group].sort((a, b) =>
+      (b.matched - a.matched) || (b.completeness - a.completeness) || (a.id - b.id));
+    const keeper = sorted[0];
+    for (const r of group) {
+      if (r !== keeper) { r.isDupe = true; r.dupeOf = keeper.id; }
+    }
+  }
+
+  // --- per-row warnings ---
+  for (const r of recs) {
+    if (!r.jobNo) r.warnings.push('No job number');
+    if (r.matched && (r.value == null || r.value === 0)) r.warnings.push('No value');
+    if (r.matched && !r.target) r.warnings.push('No target date');
+    // BC's Actual Completion Date is not reliable on its own — it has been seen
+    // populated on jobs that have not started. How we treat it depends on whether
+    // the operational status corroborates it:
+    //   - a "done" status (ready for dispatch/invoicing, complete) confirms it,
+    //     so the job is treated as genuinely finished and needs no review;
+    //   - an "unstarted" status directly contradicts it -> always flag;
+    //   - anything else is ambiguous -> flag for a look.
+    if (r.matched && r.actualDone) {
+      if (r.doneConfirmed) {
+        // Corroborated. Noted for context, not raised as a problem.
+      } else if (isUnstartedStatus(r.status)) {
+        r.warnings.push(`Has completion date ${r.actualDone} but status is "${r.status}" — check`);
+      } else {
+        r.warnings.push(`BC completion date ${r.actualDone} — check if really done`);
+      }
+    }
+    if (r.matched && r.qty != null && r.qty === 0) r.warnings.push('Qty 0');
+  }
+
+  state.analysed = recs;
+
+  // Default selection: matched, non-duplicate rows, minus jobs whose completion
+  // is corroborated by BOTH a completion date AND a "done" status. A completion
+  // date alone never deselects — it has proven unreliable, and silently dropping
+  // a live job is far worse than including one that is finished. Anything
+  // deselected here is still visible and tickable in the Matched view.
+  state.selected = new Set(
+    recs.filter(r => r.matched && !r.isDupe && !r.doneConfirmed).map(r => r.id)
+  );
+}
+
+/* ============================================================================
+   RENDER
+   ============================================================================ */
+const $ = id => document.getElementById(id);
+
+function renderCombos() {
+  const box = $('comboList');
+  box.innerHTML = '';
+  if (!comboRules.length) {
+    const e = document.createElement('div');
+    e.className = 'rule-empty';
+    e.textContent = 'No combination rules.';
+    box.appendChild(e);
+    return;
+  }
+  comboRules.forEach((rule, i) => {
+    const el = document.createElement('div');
+    el.className = 'rule';
+    const words = document.createElement('div');
+    words.className = 'words';
+    rule.words.forEach((w, wi) => {
+      if (wi) {
+        const amp = document.createElement('span');
+        amp.className = 'amp'; amp.textContent = 'AND';
+        words.appendChild(amp);
+      }
+      const s = document.createElement('span');
+      s.className = 'w'; s.textContent = w;
+      words.appendChild(s);
+    });
+    const arrow = document.createElement('span');
+    arrow.className = 'arrow'; arrow.textContent = '→ hold for review';
+    words.appendChild(arrow);
+    const del = document.createElement('button');
+    del.className = 'del'; del.title = 'Remove rule'; del.textContent = '×';
+    del.onclick = () => { comboRules.splice(i, 1); saveKw(); if (state.rows.length) refresh(); else renderCombos(); };
+    el.appendChild(words); el.appendChild(del);
+    box.appendChild(el);
+  });
+}
+
+function renderChips() {
+  const inc = $('kwChips'), exc = $('exChips');
+  inc.innerHTML = includeKw.length ? '' : '<span class="chips-empty">No keywords — nothing will match.</span>';
+  includeKw.forEach((w, i) => {
+    const el = document.createElement('span');
+    el.className = 'chip';
+    el.innerHTML = `<b></b><button title="Remove">×</button>`;
+    el.querySelector('b').textContent = w;
+    el.querySelector('button').onclick = () => { includeKw.splice(i, 1); saveKw(); refresh(); };
+    inc.appendChild(el);
+  });
+  exc.innerHTML = excludeKw.length ? '' : '<span class="chips-empty">None.</span>';
+  excludeKw.forEach((w, i) => {
+    const el = document.createElement('span');
+    el.className = 'chip exclude';
+    el.innerHTML = `<b></b><button title="Remove">×</button>`;
+    el.querySelector('b').textContent = w;
+    el.querySelector('button').onclick = () => { excludeKw.splice(i, 1); saveKw(); refresh(); };
+    exc.appendChild(el);
+  });
+}
+
+function renderMapping() {
+  const grid = $('mapGrid');
+  grid.innerHTML = '';
+  for (const f of FIELDS) {
+    const wrap = document.createElement('div');
+    wrap.className = 'map-item';
+    const lab = document.createElement('label');
+    lab.innerHTML = f.need ? `${f.label} <em>· required</em>` : f.label;
+    const sel = document.createElement('select');
+    sel.innerHTML = '<option value="">— not mapped —</option>' +
+      state.headers.map(h => `<option${state.mapping[f.key] === h ? ' selected' : ''}></option>`).join('');
+    // set option text safely (headers come from the user's file)
+    Array.from(sel.options).forEach((o, i) => { if (i > 0) { o.value = state.headers[i - 1]; o.textContent = state.headers[i - 1]; } });
+    sel.value = state.mapping[f.key] || '';
+    sel.onchange = () => { state.mapping[f.key] = sel.value; refresh(); };
+    wrap.appendChild(lab); wrap.appendChild(sel);
+    grid.appendChild(wrap);
+  }
+}
+
+function highlight(text, hits) {
+  if (!text) return '';
+  const el = document.createElement('span');
+  if (!hits.length) { el.textContent = text; return el.innerHTML; }
+  // Build with DOM nodes so file content is never treated as HTML
+  const low = text.toLowerCase();
+  const ranges = [];
+  for (const h of hits) {
+    let from = 0, idx;
+    const hl = h.toLowerCase();
+    while ((idx = low.indexOf(hl, from)) !== -1) { ranges.push([idx, idx + hl.length]); from = idx + hl.length; }
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const r of ranges) {
+    if (merged.length && r[0] <= merged[merged.length - 1][1]) merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], r[1]);
+    else merged.push([...r]);
+  }
+  let pos = 0;
+  for (const [a, b] of merged) {
+    el.appendChild(document.createTextNode(text.slice(pos, a)));
+    const m = document.createElement('mark');
+    m.textContent = text.slice(a, b);
+    el.appendChild(m);
+    pos = b;
+  }
+  el.appendChild(document.createTextNode(text.slice(pos)));
+  return el.innerHTML;
+}
+
+function visibleRecs() {
+  let recs = state.analysed;
+  if (state.view === 'matched') recs = recs.filter(r => r.matched && !r.isDupe);
+  else if (state.view === 'dupes') recs = recs.filter(r => r.isDupe);
+  // "Not matched" excludes duplicates: a duplicate row is already accounted for
+  // by its keeper in the Duplicates view, so showing it here would pad the list
+  // with noise when the point of this view is auditing keyword coverage.
+  else if (state.view === 'unmatched') recs = recs.filter(r => !r.matched && !r.isDupe);
+  const q = state.search.trim().toLowerCase();
+  if (q) recs = recs.filter(r => (r.jobNo + ' ' + r.hay + ' ' + r.customer).toLowerCase().includes(q));
+  return recs;
+}
+
+function renderStats() {
+  const a = state.analysed;
+  const matched = a.filter(r => r.matched && !r.isDupe);
+  const dupes = a.filter(r => r.isDupe);
+  const unmatched = a.filter(r => !r.matched && !r.isDupe);
+  const held = a.filter(r => r.combos.length && !r.isDupe);
+  const doneJobs = a.filter(r => r.matched && !r.isDupe && r.doneConfirmed);
+  const warned = matched.filter(r => r.warnings.length);
+  const selValue = a.filter(r => state.selected.has(r.id)).reduce((s, r) => s + (r.value || 0), 0);
+
+  $('stats').innerHTML = '';
+  const mk = (cls, n, l) => {
+    const d = document.createElement('div');
+    d.className = 'stat ' + cls;
+    const nn = document.createElement('div'); nn.className = 'n'; nn.textContent = n;
+    const ll = document.createElement('div'); ll.className = 'l'; ll.textContent = l;
+    d.appendChild(nn); d.appendChild(ll); $('stats').appendChild(d);
+  };
+  mk('', a.length, 'Rows in file');
+  mk('keep', matched.length, 'Match your keywords');
+  mk('dupe', dupes.length, 'Duplicate job no.');
+  mk('skip', unmatched.length, 'No keyword match');
+  if (held.length) mk('warn', held.length, 'Held by a combo rule');
+  if (doneJobs.length) mk('dupe', doneJobs.length, 'Already complete (unticked)');
+  mk('warn', warned.length, 'Matched, needs a look');
+  mk('keep', '$' + Math.round(selValue).toLocaleString(), 'Value of selection');
+
+  const warnBox = $('warnBox');
+  warnBox.innerHTML = '';
+  if (matched.length === 0 && a.length > 0) {
+    const d = document.createElement('div');
+    d.className = 'notice';
+    d.textContent = 'No rows matched. Check your keywords in step 2, and confirm the description column is mapped correctly in step 3.';
+    warnBox.appendChild(d);
+  }
+}
+
+function renderTable() {
+  const tb = $('tbody');
+  tb.innerHTML = '';
+  const recs = visibleRecs();
+
+  if (!recs.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 10; td.style.textAlign = 'center'; td.style.padding = '28px';
+    td.style.color = 'var(--text-faint)';
+    td.textContent = 'Nothing in this view.';
+    tr.appendChild(td); tb.appendChild(tr);
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (const r of recs) {
+    const tr = document.createElement('tr');
+    const on = state.selected.has(r.id);
+    if (!on) tr.className = 'excluded';
+
+    // checkbox
+    const tdC = document.createElement('td');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = on;
+    cb.onchange = () => { cb.checked ? state.selected.add(r.id) : state.selected.delete(r.id); renderTable(); renderStats(); renderExport(); };
+    tdC.appendChild(cb); tr.appendChild(tdC);
+
+    const tdJ = document.createElement('td'); tdJ.className = 'jobno'; tdJ.textContent = r.jobNo || '—'; tr.appendChild(tdJ);
+    const tdT = document.createElement('td'); tdT.className = 'jobno'; tdT.textContent = r.taskNo || '—'; tr.appendChild(tdT);
+
+    const tdN = document.createElement('td');
+    tdN.className = 'jobname';
+    tdN.style.minWidth = '190px';
+    tdN.innerHTML = highlight(r.desc || '(no description)', r.incHits);
+    const sub = [r.customer, r.taskDesc].filter(Boolean).join(' · ');
+    if (sub) {
+      const s = document.createElement('div');
+      s.style.cssText = 'font-size:11px;color:var(--text-faint);margin-top:2px';
+      s.textContent = sub;
+      tdN.appendChild(s);
+    }
+    tr.appendChild(tdN);
+
+    const tdW = document.createElement('td'); tdW.className = 'why';
+    if (r.excHits.length) tdW.textContent = 'excluded by: ' + r.excHits.join(', ');
+    else if (r.combos.length) {
+      tdW.textContent = 'held for review — has ' +
+        r.combos.map(c => c.words.join(' + ')).join('; and ') +
+        (r.incHits.length ? ' (would otherwise match: ' + r.incHits.join(', ') + ')' : '');
+    }
+    else if (r.doneConfirmed) {
+      tdW.textContent = `complete — finished ${r.actualDone}, status "${r.status}"`;
+    }
+    else if (r.incHits.length) tdW.textContent = 'matched: ' + r.incHits.join(', ');
+    else tdW.textContent = 'no keyword found';
+    tr.appendChild(tdW);
+
+    const tdV = document.createElement('td'); tdV.className = 'num';
+    tdV.textContent = r.value == null ? '—' : '$' + r.value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    tr.appendChild(tdV);
+
+    const tdQ = document.createElement('td'); tdQ.className = 'num'; tdQ.textContent = r.qty == null ? '—' : r.qty; tr.appendChild(tdQ);
+    const tdD = document.createElement('td'); tdD.textContent = r.target || '—'; tr.appendChild(tdD);
+    const tdS = document.createElement('td'); tdS.style.fontSize = '11.5px'; tdS.textContent = r.status || '—'; tr.appendChild(tdS);
+
+    const tdF = document.createElement('td');
+    const tags = [];
+    if (r.isDupe) tags.push(['dupe', 'duplicate']);
+    else if (r.excHits.length) tags.push(['excl', 'excluded']);
+    else if (r.combos.length) tags.push(['review', 'needs review']);
+    else if (r.doneConfirmed) tags.push(['done', 'complete']);
+    else if (r.matched) tags.push(['matched', 'match']);
+    else tags.push(['nomatch', 'no match']);
+    for (const [cls, txt] of tags) {
+      const t = document.createElement('span'); t.className = 'tag ' + cls; t.textContent = txt;
+      tdF.appendChild(t);
+    }
+    if (r.warnings.length) {
+      const w = document.createElement('div'); w.className = 'warncell'; w.style.marginTop = '3px';
+      w.textContent = r.warnings.join(' · ');
+      tdF.appendChild(w);
+    }
+    tr.appendChild(tdF);
+
+    frag.appendChild(tr);
+  }
+  tb.appendChild(frag);
+}
+
+function renderExport() {
+  const n = state.selected.size;
+  const val = state.analysed.filter(r => state.selected.has(r.id)).reduce((s, r) => s + (r.value || 0), 0);
+  $('exportCount').innerHTML = '';
+  const b = document.createElement('b'); b.textContent = n;
+  $('exportCount').append(b, document.createTextNode(` job${n === 1 ? '' : 's'} selected · $${Math.round(val).toLocaleString()} total contract value`));
+  $('exportJson').disabled = n === 0;
+  $('exportCsv').disabled = n === 0;
+
+  $('valueNote').textContent =
+    'Total value comes straight from Business Central and represents the whole job to the company. Department value is exported as 0 — set it per job in the scheduler, or it will not show in your value report.';
+}
+
+function refresh() {
+  analyse();
+  renderStats();
+  renderTable();
+  renderExport();
+}
+
+/* ============================================================================
+   EXPORT
+   ============================================================================ */
+function download(filename, text, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function todayISO() { return new Date().toISOString().slice(0, 10); }
+function addDaysISO(iso, n) {
+  const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+function buildSchedulerJobs() {
+  const picked = state.analysed.filter(r => state.selected.has(r.id));
+  return picked.map(r => {
+    const qty = (r.qty != null && r.qty > 0) ? r.qty : 1;
+    return {
+      // Matches the scheduler's job shape. hoursTotal is intentionally left at 0:
+      // BC's WIP has no shop-floor hours, so this must come from a template or be
+      // entered per job. The scheduler cannot plan a job at 0 hours.
+      name: (r.desc || r.taskDesc || 'Untitled job').trim(),
+      process: '',
+      quantity: qty,
+      hoursTotal: 0,
+      readyDate: todayISO(),
+      dueDate: r.target || addDaysISO(todayISO(), 14),
+      templateId: null,
+      notes: [
+        r.customer ? `Customer: ${r.customer}` : '',
+        r.status ? `BC status: ${r.status}` : '',
+        r.taskDesc ? `BC task: ${r.taskDesc}` : '',
+        // Recorded for traceability only. This is NOT mapped to the scheduler's
+        // completedDate, because BC populates it on jobs that have not started.
+        r.actualDone ? `BC actual completion date: ${r.actualDone} (unverified)` : '',
+      ].filter(Boolean).join(' · '),
+      totalValue: r.value || 0,
+      departmentValue: 0,
+      percentComplete: 0,
+      status: 'active',
+      completedDate: null,
+      bcJobNo: r.jobNo || '',
+      bcJobTaskNo: r.taskNo || '',
+      updatedAt: new Date().toISOString(),
+      assignment: null,
+    };
+  });
+}
+
+function exportJson() {
+  const jobs = buildSchedulerJobs();
+  const payload = {
+    source: 'BC WIP import',
+    sourceFile: state.fileName,
+    exportedAt: new Date().toISOString(),
+    jobCount: jobs.length,
+    note: 'hoursTotal and process are blank — set them from a template or per job in the scheduler. departmentValue is 0 by design. Every job is exported as status "active" with completedDate null: BC\'s Actual Completion Date is not trusted (it has been seen populated on unstarted jobs) and is recorded in notes only.',
+    jobs,
+  };
+  download(`scheduler-jobs-${todayISO()}.json`, JSON.stringify(payload, null, 2), 'application/json');
+}
+
+function csvCell(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function exportCsv() {
+  const picked = state.analysed.filter(r => state.selected.has(r.id));
+  const head = ['Job No.','Task No.','Description (matched)','BC task description','Customer','Total value','Department value','Quantity','Target date','BC status','BC actual completion (unverified)','Matched on','Warnings'];
+  const lines = [head.map(csvCell).join(',')];
+  for (const r of picked) {
+    lines.push([
+      r.jobNo, r.taskNo, r.desc, r.taskDesc, r.customer,
+      r.value == null ? '' : r.value, 0,
+      r.qty == null ? '' : r.qty, r.target || '', r.status,
+      r.actualDone || '',
+      r.incHits.join(' '), r.warnings.join(' '),
+    ].map(csvCell).join(','));
+  }
+  download(`wip-review-${todayISO()}.csv`, lines.join('\n'), 'text/csv');
+}
+
+/* ============================================================================
+   SETTINGS PORTABILITY
+   ----------------------------------------------------------------------------
+   Settings live in this browser's localStorage, which is per-origin and can be
+   cleared by the browser (or lost when the file moves, since browsers treat
+   file:// origins inconsistently). These let you carry your keyword lists and
+   rules to another browser or machine deliberately, rather than relying on
+   storage that may not survive.
+
+   Only settings travel — no WIP data is ever written to disk by this tool.
+   ============================================================================ */
+
+const SETTINGS_FORMAT = 'wip-importer-settings';
+
+function settingsMsg(text, kind) {
+  const box = $('settingsMsg');
+  box.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'notice' + (kind === 'err' ? ' err' : kind === 'ok' ? ' info' : '');
+  d.style.marginTop = '10px';
+  d.textContent = text;
+  box.appendChild(d);
+  if (kind === 'ok') setTimeout(() => { if (box.contains(d)) box.removeChild(d); }, 6000);
+}
+
+function exportSettings() {
+  const payload = {
+    format: SETTINGS_FORMAT,
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    include: includeKw,
+    exclude: excludeKw,
+    combos: comboRules,
+  };
+  download(`wip-importer-settings-${todayISO()}.json`, JSON.stringify(payload, null, 2), 'application/json');
+  settingsMsg('Settings saved. Open this file on the other browser or machine using "Load settings from file".', 'ok');
+}
+
+// Validate defensively: an imported file is untrusted input, and silently
+// accepting malformed data would corrupt the lists you rely on.
+function coerceWordList(v) {
+  if (!Array.isArray(v)) return null;
+  const out = [];
+  for (const item of v) {
+    if (typeof item !== 'string') continue;
+    const w = item.trim();
+    if (w && !out.some(x => x.toLowerCase() === w.toLowerCase())) out.push(w);
+  }
+  return out;
+}
+function coerceCombos(v) {
+  if (!Array.isArray(v)) return null;
+  const out = [];
+  for (const rule of v) {
+    if (!rule || !Array.isArray(rule.words)) continue;
+    const words = [];
+    for (const w of rule.words) {
+      if (typeof w !== 'string') continue;
+      const t = w.trim();
+      if (t && !words.some(x => x.toLowerCase() === t.toLowerCase())) words.push(t);
+    }
+    if (words.length >= 2) out.push({ words });
+  }
+  return out;
+}
+
+async function importSettings(file) {
+  try {
+    const text = await file.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch (e) { throw new Error('That file is not valid JSON.'); }
+
+    if (!data || data.format !== SETTINGS_FORMAT) {
+      throw new Error('That does not look like a settings file from this tool. Expected a file saved with "Save settings to file".');
+    }
+    const inc = coerceWordList(data.include);
+    const exc = coerceWordList(data.exclude);
+    const cmb = coerceCombos(data.combos);
+    if (inc === null && exc === null && cmb === null) {
+      throw new Error('The settings file contains no usable keyword lists or rules.');
+    }
+
+    includeKw = inc || [];
+    excludeKw = exc || [];
+    comboRules = cmb || [];
+    saveKw();
+    if (state.rows.length) refresh();
+
+    settingsMsg(
+      `Loaded ${includeKw.length} keyword(s), ${excludeKw.length} exclusion(s) and ${comboRules.length} combination rule(s)` +
+      (data.exportedAt ? ` saved ${String(data.exportedAt).slice(0, 10)}.` : '.'),
+      'ok'
+    );
+  } catch (err) {
+    settingsMsg('Could not load settings: ' + err.message, 'err');
+  }
+}
+/* ============================================================================
+   KEYWORDS
+   ============================================================================ */
+function saveKw() {
+  LS.set('include', includeKw);
+  LS.set('exclude', excludeKw);
+  LS.set('combos', comboRules);
+  renderChips();
+  renderCombos();
+}
+
+function addCombo() {
+  const input = $('comboInput');
+  const words = input.value.split(',').map(w => w.trim()).filter(Boolean);
+  const err = $('comboErr');
+  if (err) err.remove();
+  if (words.length < 2) {
+    const e = document.createElement('div');
+    e.id = 'comboErr';
+    e.style.cssText = 'font-size:11.5px;color:#f0b3ae;margin-top:6px';
+    e.textContent = 'A combination rule needs at least two words, separated by commas — e.g. "body, elbow".';
+    input.parentNode.insertAdjacentElement('afterend', e);
+    return;
+  }
+  // Ignore an exact duplicate rule (same words, any order)
+  const key = words.map(w => w.toLowerCase()).sort().join('|');
+  const exists = comboRules.some(r => r.words.map(w => w.toLowerCase()).sort().join('|') === key);
+  if (!exists) comboRules.push({ words });
+  input.value = '';
+  saveKw();
+  if (state.rows.length) refresh();
+}
+function addKw(which) {
+  const input = which === 'inc' ? $('kwInput') : $('exInput');
+  const list = which === 'inc' ? includeKw : excludeKw;
+  const raw = input.value.trim();
+  if (!raw) return;
+  // allow comma-separated entry
+  for (const part of raw.split(',')) {
+    const w = part.trim();
+    if (w && !list.some(x => x.toLowerCase() === w.toLowerCase())) list.push(w);
+  }
+  input.value = '';
+  saveKw();
+  if (state.rows.length) refresh();
+}
+
+/* ============================================================================
+   FILE LOAD
+   ============================================================================ */
+async function handleFile(file) {
+  $('loadErr').innerHTML = '';
+  if (!file.name.toLowerCase().endsWith('.xlsx')) {
+    const d = document.createElement('div');
+    d.className = 'notice err';
+    d.textContent = 'That is not an .xlsx file. Export the WIP worksheet from Business Central as Excel and try again.';
+    $('loadErr').appendChild(d);
+    return;
+  }
+  try {
+    const buf = await file.arrayBuffer();
+    const { headers, rows, sheetName, headerRowNumber } = await parseXlsx(buf);
+
+    state.fileName = file.name;
+    state.headers = headers;
+    state.rows = rows;
+    state.mapping = autoMap(headers);
+
+    const meta = $('fileMeta');
+    meta.classList.remove('hidden');
+    meta.textContent = `✓ ${file.name} · sheet "${sheetName}" · header on row ${headerRowNumber} · ${rows.length} rows · ${headers.length} columns · read locally`;
+
+    $('step2').classList.remove('hidden');
+    $('step3').classList.remove('hidden');
+    $('step4').classList.remove('hidden');
+    $('step5').classList.remove('hidden');
+
+    renderMapping();
+    refresh();
+
+    const missing = FIELDS.filter(f => f.need && !state.mapping[f.key]);
+    if (missing.length) {
+      const d = document.createElement('div');
+      d.className = 'notice';
+      d.textContent = 'Could not auto-detect: ' + missing.map(f => f.label).join(', ') + '. Set them in step 3.';
+      $('loadErr').appendChild(d);
+    }
+  } catch (err) {
+    const d = document.createElement('div');
+    d.className = 'notice err';
+    d.textContent = 'Could not read that file: ' + err.message;
+    $('loadErr').appendChild(d);
+    console.error(err);
+  }
+}
+
+/* ============================================================================
+   WIRE UP
+   ============================================================================ */
+(function init() {
+  includeKw = LS.get('include', DEFAULT_INCLUDE.slice());
+  excludeKw = LS.get('exclude', DEFAULT_EXCLUDE.slice());
+  comboRules = LS.get('combos', DEFAULT_COMBOS.slice());
+  renderChips();
+  renderCombos();
+
+  const drop = $('drop'), input = $('fileInput');
+  drop.onclick = () => input.click();
+  input.onchange = e => { if (e.target.files[0]) handleFile(e.target.files[0]); };
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault(); drop.classList.remove('over');
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+
+  $('kwAdd').onclick = () => addKw('inc');
+  $('exAdd').onclick = () => addKw('exc');
+  $('kwInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addKw('inc'); } });
+  $('exInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addKw('exc'); } });
+  $('comboAdd').onclick = addCombo;
+  $('comboInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addCombo(); } });
+  $('settingsExport').onclick = exportSettings;
+  $('settingsImport').onclick = () => $('settingsFile').click();
+  $('settingsFile').onchange = e => {
+    if (e.target.files[0]) importSettings(e.target.files[0]);
+    e.target.value = ''; // allow re-importing the same file
+  };
+  $('kwReset').onclick = () => {
+    includeKw = DEFAULT_INCLUDE.slice(); excludeKw = DEFAULT_EXCLUDE.slice();
+    comboRules = DEFAULT_COMBOS.slice();
+    saveKw(); if (state.rows.length) refresh();
+  };
+
+  document.querySelectorAll('#viewSeg button').forEach(b => {
+    b.onclick = () => {
+      document.querySelectorAll('#viewSeg button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      state.view = b.dataset.v;
+      renderTable();
+    };
+  });
+  $('search').addEventListener('input', e => { state.search = e.target.value; renderTable(); });
+
+  $('selAll').onclick = () => { visibleRecs().forEach(r => state.selected.add(r.id)); renderTable(); renderStats(); renderExport(); };
+  $('selNone').onclick = () => { visibleRecs().forEach(r => state.selected.delete(r.id)); renderTable(); renderStats(); renderExport(); };
+
+  $('exportJson').onclick = exportJson;
+  $('exportCsv').onclick = exportCsv;
+
+  // Honest offline indicator: this file makes no requests either way, but if the
+  // browser reports being offline we say so explicitly, as a live demonstration.
+  const badge = $('offlineBadge');
+  const setBadge = () => {
+    badge.textContent = navigator.onLine
+      ? '◈ Offline by design · nothing leaves this machine'
+      : '◈ Network disconnected · still working';
+  };
+  setBadge();
+  window.addEventListener('online', setBadge);
+  window.addEventListener('offline', setBadge);
+})();
+</script>
+</body>
+</html>
