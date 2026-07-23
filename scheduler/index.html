@@ -4,6 +4,154 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Weldcell Scheduler</title>
+    <!--
+      Shared-storage adapter. This runs before the app module loads and, when
+      the page is served by serve.py / serve.js (which expose a small /api
+      store), makes the app read and write the SHARED schedule on the server
+      so every computer sees the same data. If that API isn't reachable it
+      falls back to this browser's local storage, so the app still works
+      standalone. It also polls for changes other people make and refreshes
+      the view — but never while a dialog is open or a field is focused.
+    -->
+    <script>
+      (function () {
+        var PREFIX = "wf::";
+        var KV = "/api/kv/";
+        var lastKnown = null;
+        var apiOk = false;
+
+        function lsGet(k) { try { var v = localStorage.getItem(PREFIX + k); return v === null ? null : { key: k, value: v, shared: false }; } catch (e) { return null; } }
+        function lsSet(k, v) { try { localStorage.setItem(PREFIX + k, v); return { key: k, value: v, shared: false }; } catch (e) { return null; } }
+        function lsDel(k) { try { localStorage.removeItem(PREFIX + k); return { key: k, deleted: true, shared: false }; } catch (e) { return null; } }
+        function lsList(p) { p = p || ""; var out = []; try { for (var i = 0; i < localStorage.length; i++) { var key = localStorage.key(i); if (key && key.indexOf(PREFIX) === 0) { var s = key.slice(PREFIX.length); if (s.indexOf(p) === 0) out.push(s); } } } catch (e) {} return { keys: out, prefix: p, shared: false }; }
+
+        function noteOwnWrite(v) {
+          if (typeof v !== "number") return;
+          // If this write was the very next version, we're up to date and don't
+          // need to refresh ourselves. Otherwise someone else also changed
+          // something; leave lastKnown so the next poll detects it and refreshes.
+          if (lastKnown === null || v === lastKnown + 1) lastKnown = v;
+        }
+
+        // Probe once whether the shared API is actually here. Every method
+        // waits on this, so "API absent" (use localStorage) is never confused
+        // with "that key doesn't exist yet" (a real 404 from a present API).
+        var apiReady = (async function () {
+          try {
+            var r = await fetch("/api/version", { cache: "no-store" });
+            if (!r.ok) return false;
+            var j = await r.json();
+            if (typeof j.version !== "number") return false;
+            lastKnown = j.version;
+            apiOk = true;
+            return true;
+          } catch (e) { return false; }
+        })();
+
+        window.storage = {
+          async get(k) {
+            if (!(await apiReady)) return lsGet(k);
+            try {
+              var r = await fetch(KV + encodeURIComponent(k), { cache: "no-store" });
+              if (r.status === 404) return null; // key genuinely absent
+              if (!r.ok) throw 0;
+              var j = await r.json();
+              return { key: k, value: j.value, shared: true };
+            } catch (e) { return lsGet(k); }
+          },
+          async set(k, v) {
+            if (!(await apiReady)) return lsSet(k, v);
+            try {
+              var r = await fetch(KV + encodeURIComponent(k), { method: "PUT", headers: { "Content-Type": "text/plain" }, body: v });
+              if (!r.ok) throw 0;
+              var j = await r.json();
+              noteOwnWrite(j.version);
+              return { key: k, value: v, shared: true };
+            } catch (e) { return lsSet(k, v); }
+          },
+          async delete(k) {
+            if (!(await apiReady)) return lsDel(k);
+            try {
+              var r = await fetch(KV + encodeURIComponent(k), { method: "DELETE" });
+              if (!r.ok) throw 0;
+              var j = await r.json();
+              noteOwnWrite(j.version);
+              return { key: k, deleted: true, shared: true };
+            } catch (e) { return lsDel(k); }
+          },
+          async list(p) {
+            if (!(await apiReady)) return lsList(p);
+            try {
+              var r = await fetch("/api/keys?prefix=" + encodeURIComponent(p || ""), { cache: "no-store" });
+              if (!r.ok) throw 0;
+              var j = await r.json();
+              return { keys: j.keys, prefix: j.prefix, shared: true };
+            } catch (e) { return lsList(p); }
+          },
+        };
+
+        // ---- live refresh when someone else changes the schedule ----
+        function activeTabLabel() {
+          try {
+            var btns = document.querySelectorAll("nav button");
+            for (var i = 0; i < btns.length; i++) if (btns[i].className.indexOf("bg-amber-500") !== -1) return btns[i].textContent.trim();
+          } catch (e) {}
+          return null;
+        }
+        function restoreUi() {
+          var raw = null;
+          try { raw = sessionStorage.getItem("wf_ui"); } catch (e) {}
+          if (!raw) return;
+          try { sessionStorage.removeItem("wf_ui"); } catch (e) {}
+          var ui;
+          try { ui = JSON.parse(raw); } catch (e) { return; }
+          // The app renders after its module loads, so the nav may not exist
+          // yet — retry briefly until it does, then restore tab and scroll.
+          var tries = 0;
+          (function attempt() {
+            tries++;
+            var btns = document.querySelectorAll("nav button");
+            if (btns.length) {
+              if (ui.tab) {
+                for (var i = 0; i < btns.length; i++) if (btns[i].textContent.trim() === ui.tab) { btns[i].click(); break; }
+              }
+              if (typeof ui.y === "number") setTimeout(function () { window.scrollTo(0, ui.y); }, 60);
+              return;
+            }
+            if (tries < 40) setTimeout(attempt, 100); // up to ~4s
+          })();
+        }
+        function safeToRefresh() {
+          if (document.hidden) return false;
+          if (document.querySelector(".fixed.inset-0")) return false; // a dialog is open
+          var el = document.activeElement;
+          if (el) { var t = (el.tagName || "").toLowerCase(); if (t === "input" || t === "textarea" || t === "select") return false; }
+          return true;
+        }
+        var refreshWanted = false;
+        function refreshNow() {
+          try { sessionStorage.setItem("wf_ui", JSON.stringify({ tab: activeTabLabel(), y: window.scrollY })); } catch (e) {}
+          location.reload();
+        }
+        async function poll() {
+          try {
+            var r = await fetch("/api/version", { cache: "no-store" });
+            if (r.ok) {
+              apiOk = true;
+              var v = (await r.json()).version;
+              if (lastKnown === null) lastKnown = v;
+              else if (v > lastKnown) { lastKnown = v; refreshWanted = true; }
+            }
+          } catch (e) { apiOk = false; }
+          if (refreshWanted && safeToRefresh()) { refreshWanted = false; refreshNow(); }
+        }
+        window.addEventListener("DOMContentLoaded", restoreUi);
+        // when a dialog closes or a field is blurred, take a deferred refresh
+        document.addEventListener("click", function () { if (refreshWanted && safeToRefresh()) { refreshWanted = false; refreshNow(); } }, true);
+        setInterval(poll, 4000);
+        poll();
+      })();
+    </script>
     <script type="module" crossorigin src="/assets/index-CiuD7jB0.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-BibRJW5M.css">
   </head>
