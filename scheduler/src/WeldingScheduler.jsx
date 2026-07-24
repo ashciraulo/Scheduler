@@ -816,6 +816,113 @@ const EQUIP_COLOR = {
    MAIN APP
    ============================================================ */
 
+/* ============================================================
+   COSTING VIEW — cost centres + procedures with $/hr breakdown
+   ============================================================ */
+
+function CostingView({ procedures, costCentres, processes, readOnly, onImport, onNewProcedure, onEditProcedure, onNewCentre, onEditCentre }) {
+  const fileRef = useRef(null);
+  const byProcess = {};
+  (procedures || []).forEach((p) => {
+    const key = p.process || '(no process assigned)';
+    (byProcess[key] = byProcess[key] || []).push(p);
+  });
+  const groups = Object.keys(byProcess).sort();
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div>
+          <h2 className="text-lg font-bold text-slate-100">Costing</h2>
+          <p className="text-xs text-slate-500 mt-0.5">Hourly operating cost per procedure, built from your cost calculator. A template's procedure sets the $/hr used to cost its jobs.</p>
+        </div>
+        {!readOnly && (
+          <div className="flex items-center gap-2">
+            <button className={btnPrimary} onClick={onNewProcedure}><Plus size={15} /> New procedure</button>
+            <button className={btnGhost} onClick={onNewCentre}><Plus size={14} /> New cost centre</button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json"
+              style={{ display: 'none' }}
+              onChange={(e) => { const f = e.target.files && e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { try { onImport(JSON.parse(rd.result)); } catch (x) { onImport(null); } }; rd.readAsText(f); e.target.value = ''; }}
+            />
+            <button className={btnGhost} onClick={() => fileRef.current && fileRef.current.click()}><Upload size={15} /> Import from cost calculator</button>
+          </div>
+        )}
+      </div>
+
+      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Cost centres (shared capital)</h3>
+      {(costCentres || []).length === 0 && <p className="text-xs text-slate-600 mb-4">No cost centres yet.</p>}
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+        {(costCentres || []).map((c) => (
+          <div
+            key={c.id}
+            className={`border border-slate-800 bg-slate-900 rounded-lg p-3 ${!readOnly ? 'cursor-pointer hover:border-slate-600' : ''}`}
+            onClick={() => !readOnly && onEditCentre(c)}
+          >
+            <div className="font-semibold text-slate-100 text-sm">{c.name || '(unnamed)'}</div>
+            <div className="text-[11px] text-slate-500 mt-0.5">{c.interestRate}% interest · {(Number(c.annualHours) || 0).toLocaleString()} hr/yr</div>
+            <div className="text-amber-300 font-mono text-sm mt-1">{fmtMoney(costCentrePerHr(c))} /hr dep+interest</div>
+            <div className="mt-2 space-y-0.5">
+              {(c.assets || []).map((r, i) => (
+                <div key={i} className="text-[11px] text-slate-400 flex justify-between gap-2">
+                  <span className="truncate">{r.name || '—'}</span>
+                  <span className="font-mono shrink-0">${(Number(r.capital) || 0).toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Procedures</h3>
+      {groups.length === 0 && <p className="text-xs text-slate-600">No procedures yet — import from your cost calculator.</p>}
+      {groups.map((gk) => (
+        <div key={gk} className="mb-5">
+          <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">{gk}</div>
+          <div className="grid lg:grid-cols-2 gap-3">
+            {byProcess[gk].map((p) => {
+              const parts = procedureParts(p, costCentres);
+              const cc = (costCentres || []).find((c) => c.id === p.costCentreId);
+              const rows = [
+                ['Powder', parts.powder], ['Process gas', parts.gas], ['Electricity', parts.electricity],
+                ['Spares', parts.spares], ['Maintenance', parts.maintenance], ['Consumables', parts.consumables],
+                ['Depreciation + interest', parts.depreciation], ['Labour', parts.labour], ['QA', parts.qa],
+              ];
+              return (
+                <div
+                  key={p.id}
+                  className={`border border-slate-800 bg-slate-900 rounded-lg p-4 ${!readOnly ? 'cursor-pointer hover:border-slate-600' : ''}`}
+                  onClick={() => !readOnly && onEditProcedure(p)}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-slate-100 text-sm truncate">{p.name || '(unnamed)'}</div>
+                      <div className="text-[11px] text-slate-500">{cc ? cc.name : 'no cost centre'}{p.substrate ? ` · ${p.substrate}` : ''}</div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-amber-300 font-mono text-lg font-semibold">{fmtMoney(parts.total)}</div>
+                      <div className="text-[10px] text-slate-500">per hour</div>
+                    </div>
+                  </div>
+                  <div className="mt-2 space-y-0.5">
+                    {rows.map(([label, val], i) => (
+                      <div key={i} className={`text-[11px] flex justify-between gap-2 ${val > 0 ? 'text-slate-400' : 'text-slate-600'}`}>
+                        <span>{label}</span>
+                        <span className="font-mono">{fmtMoney(val)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function WeldingScheduler() {
   const [loaded, setLoaded] = useState(false);
   const [equipment, setEquipment] = useState([]);
@@ -823,6 +930,8 @@ export default function WeldingScheduler() {
   const [templates, setTemplates] = useState([]);
   const [processes, setProcesses] = useState(DEFAULT_PROCESSES);
   const [jobs, setJobs] = useState([]);
+  const [costCentres, setCostCentres] = useState([]);
+  const [procedures, setProcedures] = useState([]);
 
   const [tab, setTab] = useState('schedule');
   const [readOnly, setReadOnly] = useState(false);
@@ -833,6 +942,9 @@ export default function WeldingScheduler() {
   const [editingTemplate, setEditingTemplate] = useState(null);
   const [editingEquipment, setEditingEquipment] = useState(null);
   const [editingStaff, setEditingStaff] = useState(null);
+  const [editingProcedure, setEditingProcedure] = useState(null); // procedure object or 'new' or null
+  const [editingCentre, setEditingCentre] = useState(null);       // cost-centre object or 'new' or null
+  const [pendingComplete, setPendingComplete] = useState(null);   // job awaiting actual-hours entry
   const [confirmDelete, setConfirmDelete] = useState(null); // {type, id, name}
 
   const [dragJobId, setDragJobId] = useState(null);
@@ -857,23 +969,29 @@ export default function WeldingScheduler() {
   // ---------- initial load ----------
   useEffect(() => {
     (async () => {
-      const [eq, st, tp, pr, jb] = await Promise.all([
+      const [eq, st, tp, pr, jb, cc, pc] = await Promise.all([
         loadKey('wf_equipment', null),
         loadKey('wf_staff', null),
         loadKey('wf_templates', null),
         loadKey('wf_processes', null),
         loadKey('wf_jobs', null),
+        loadKey('wf_costcentres', null),
+        loadKey('wf_procedures', null),
       ]);
       const finalEq = eq || seedEquipment();
       const finalSt = (st || seedStaff()).map(normalizeStaff);
       const finalTp = tp || seedTemplates();
       const finalPr = pr || DEFAULT_PROCESSES;
       const finalJb = jb || seedJobs();
+      const finalCc = cc || seedCostCentres();
+      const finalPc = pc || seedProcedures();
 
       setEquipment(finalEq);
       setStaff(finalSt);
       setTemplates(finalTp);
       setProcesses(finalPr);
+      setCostCentres(finalCc);
+      setProcedures(finalPc);
 
       const wd = generateCalendarDays(isoDate(new Date()), HORIZON_DAYS);
       const scheduled = runScheduler(finalJb, finalEq, finalSt, wd);
@@ -884,6 +1002,8 @@ export default function WeldingScheduler() {
       if (!tp) saveKey('wf_templates', finalTp);
       if (!pr) saveKey('wf_processes', finalPr);
       saveKey('wf_jobs', scheduled);
+      if (!cc) saveKey('wf_costcentres', finalCc);
+      if (!pc) saveKey('wf_procedures', finalPc);
 
       setLoaded(true);
     })();
@@ -1051,8 +1171,41 @@ export default function WeldingScheduler() {
     saveKey('wf_processes', list);
   }
 
+  // ---------- costing: cost centres + procedures ----------
+  function saveCostCentres(list) { setCostCentres(list); saveKey('wf_costcentres', list); }
+  function saveProceduresList(list) { setProcedures(list); saveKey('wf_procedures', list); }
+  function saveCentre(cc) {
+    const map = Object.fromEntries(costCentres.map((x) => [x.id, x]));
+    map[cc.id] = cc;
+    saveCostCentres(Object.values(map));
+    setEditingCentre(null);
+    showToast(`Saved cost centre ${cc.name}.`);
+  }
+  function deleteCentre(id) { saveCostCentres(costCentres.filter((x) => x.id !== id)); setEditingCentre(null); }
+  function saveProcedure(p) {
+    const map = Object.fromEntries(procedures.map((x) => [x.id, x]));
+    map[p.id] = p;
+    saveProceduresList(Object.values(map));
+    setEditingProcedure(null);
+    showToast(`Saved procedure ${p.name}.`);
+  }
+  function deleteProcedure(id) { saveProceduresList(procedures.filter((x) => x.id !== id)); setEditingProcedure(null); }
+  function importCosting(data) {
+    const parsed = parseCostingImport(data, processes);
+    if (!parsed) { showToast("That file doesn't look like a cost-calculator export."); return; }
+    const ccMap = Object.fromEntries(costCentres.map((x) => [x.id, x]));
+    parsed.costCentres.forEach((c) => { ccMap[c.id] = c; });
+    const pMap = Object.fromEntries(procedures.map((x) => [x.id, x]));
+    parsed.procedures.forEach((p) => { pMap[p.id] = p; });
+    saveCostCentres(Object.values(ccMap));
+    saveProceduresList(Object.values(pMap));
+    showToast(`Imported ${parsed.procedures.length} procedure(s) and ${parsed.costCentres.length} cost centre(s).`);
+  }
+
   const staffById = useMemo(() => Object.fromEntries(staff.map((s) => [s.id, s])), [staff]);
   const equipById = useMemo(() => Object.fromEntries(equipment.map((e) => [e.id, e])), [equipment]);
+  const allTags = useMemo(() => [...new Set([...equipment.flatMap((e) => e.tags || []), ...templates.flatMap((t) => t.tags || [])])].sort(), [equipment, templates]);
+  const templateCategories = useMemo(() => [...new Set(templates.map((t) => t.category).filter(Boolean))], [templates]);
 
   // Flattened to part level (not just job level) so a split job's specific
   // unscheduled/conflicted part can be dragged onto the schedule on its own.
@@ -1071,6 +1224,7 @@ export default function WeldingScheduler() {
           readyDate: j.readyDate,
           dueDate: j.dueDate,
           assignment: p.assignment,
+          unschedReason: p.unschedReason,
           _parentJob: j,
         };
         if (!p.assignment) unscheduledJobs.push(unit);
@@ -1098,13 +1252,13 @@ export default function WeldingScheduler() {
         </div>
       )}
       {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-950/95 sticky top-0 z-30 backdrop-blur">
+      <header className="bg-slate-950/95 sticky top-0 z-30 backdrop-blur" style={{ borderBottom: '2px solid #253646' }}>
         <div className="px-4 sm:px-6 py-3 flex flex-wrap items-center gap-3 justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded bg-amber-500 flex items-center justify-center text-slate-950 font-bold text-sm">W</div>
             <div>
-              <h1 className="font-bold text-slate-100 text-sm leading-tight tracking-tight">WELDCELL SCHEDULER</h1>
-              <p className="text-[11px] text-slate-500 leading-tight">Production planning · shared &amp; synced</p>
+              <h1 className="font-bold text-slate-100 text-lg leading-tight tracking-tight">WELDCELL SCHEDULER</h1>
+              <p className="text-[10px] text-slate-500 leading-tight uppercase" style={{ letterSpacing: '0.13em' }}>Production planning · shared &amp; synced</p>
             </div>
           </div>
           {!displayMode && (
@@ -1115,6 +1269,7 @@ export default function WeldingScheduler() {
                 { id: 'roster', label: 'Roster', icon: Clock },
                 { id: 'templates', label: 'Templates', icon: Calendar },
                 { id: 'resources', label: 'Equipment & Staff', icon: Wrench },
+                { id: 'costing', label: 'Costing', icon: DollarSign },
                 { id: 'reports', label: 'Value Reports', icon: DollarSign },
               ].map((t) => (
                 <button
@@ -1210,8 +1365,22 @@ export default function WeldingScheduler() {
           />
         )}
 
+        {tab === 'costing' && !displayMode && (
+          <CostingView
+            procedures={procedures}
+            costCentres={costCentres}
+            processes={processes}
+            readOnly={readOnly}
+            onImport={importCosting}
+            onNewProcedure={() => setEditingProcedure('new')}
+            onEditProcedure={(p) => setEditingProcedure(p)}
+            onNewCentre={() => setEditingCentre('new')}
+            onEditCentre={(c) => setEditingCentre(c)}
+          />
+        )}
+
         {tab === 'reports' && !displayMode && (
-          <ReportsView jobs={jobs} equipment={equipment} staff={staff} />
+          <ReportsView jobs={jobs} equipment={equipment} staff={staff} procedures={procedures} costCentres={costCentres} />
         )}
 
         {tab === 'resources' && !displayMode && (
@@ -1263,6 +1432,10 @@ export default function WeldingScheduler() {
           template={editingTemplate === 'new' ? null : editingTemplate}
           equipment={equipment}
           processes={processes}
+          procedures={procedures}
+          costCentres={costCentres}
+          allTags={allTags}
+          categorySuggestions={templateCategories}
           onClose={() => setEditingTemplate(null)}
           onSave={(data) => saveTemplate(data, editingTemplate === 'new')}
         />
@@ -1272,6 +1445,7 @@ export default function WeldingScheduler() {
         <EquipmentModal
           item={editingEquipment === 'new' ? null : editingEquipment}
           processes={processes}
+          allTags={allTags}
           onClose={() => setEditingEquipment(null)}
           onSave={(data) => saveEquipment(data, editingEquipment === 'new')}
         />
