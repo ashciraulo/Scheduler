@@ -27,12 +27,18 @@ local Vite + React project. Most of the app is one large component file.
 ```
 index.html
 src/
-  main.jsx            # entry; installs storage shim, mounts <App/>
+  main.jsx            # entry; installs window.storage, mounts <App/>
   App.jsx             # renders <WeldingScheduler/>
-  WeldingScheduler.jsx# the entire application (large; ~2000 lines)
+  WeldingScheduler.jsx# the entire application (large; ~3900 lines)
   wipImport.js        # BC .xlsx reader + keyword/dupe analysis (see below)
-  storage.js          # localStorage-backed window.storage shim
-  index.css           # Tailwind directives + dark base background
+  storage.js          # window.storage: shared /api store, else localStorage
+  liveSync.js         # polls for other people's changes (shared mode)
+  index.css           # Tailwind directives + light company theme
+deploy/               # hand-written pieces of the deployable (SOURCE)
+  serve.py serve.js   # the little host server + /api key-value store
+  start-*.bat/.command# double-click launchers for the host PC
+  README.txt          # end-user instructions, ships at the package root
+scripts/package.mjs   # assembles ../offline-package from dist/ + deploy/
 tailwind.config.js
 postcss.config.js
 vite.config.js
@@ -44,6 +50,20 @@ vite.config.js
 - `npm run dev` — start the dev server (http://localhost:5173)
 - `npm run build` — production build to `dist/`
 - `npm run preview` — preview the production build
+- `npm run package` — build, then assemble `../offline-package/` (the folder
+  that gets copied to the host PC)
+
+### offline-package is BUILD OUTPUT
+
+Everything in `../offline-package/` comes from `dist/` or `deploy/`. **Never
+edit it directly — `npm run package` overwrites it.** Edit `deploy/` for the
+server, launchers or end-user README; edit `src/` for the app.
+
+It used to require hand-editing: after each build you copied `dist/` across and
+re-injected a shared-storage adapter into `index.html` against Vite's freshly
+content-hashed asset filenames. That adapter is now `src/storage.js`, built
+into the bundle, so `dist/` is the deployable verbatim. The script preserves
+`scheduler-data.json` (the live schedule on a host machine) if present.
 
 ## How WeldingScheduler.jsx is organised
 
@@ -239,26 +259,52 @@ gets `job.parts = [{ id, hoursTotal, percentComplete, status, assignment },
 ## Persistence — IMPORTANT
 
 The app calls `window.storage.get/set/delete/list` (async). That global only
-exists inside a Claude artifact. Locally, `src/storage.js` installs a
-**localStorage-backed shim** with the same interface, activated in `main.jsx`
-before mount. The component code is unchanged and should stay that way — treat
-`window.storage` as the persistence seam.
+exists inside a Claude artifact; `src/storage.js` provides the same interface
+everywhere else, installed by `main.jsx` before mount. **Treat `window.storage`
+as the persistence seam** — component code should never touch localStorage or
+`fetch` a data endpoint directly.
 
-### Known limitation to solve next: multi-user sync
+`src/storage.js` picks one of two backends at startup by probing the server:
 
-In the artifact the storage was **shared**, so the office view and the
-read-only workshop-monitor view saw the same live data. localStorage is
-per-browser, so that shared behaviour is currently lost — each browser has its
-own copy.
+- **Shared** — when served by `deploy/serve.py` / `serve.js`, a small key/value
+  API lives at `/api`. Everyone on the network reads and writes ONE schedule on
+  the host PC. This is the normal deployment.
+- **Local** — otherwise (vite dev, a plain static host), this browser's
+  localStorage, namespaced `wf::`. Per-browser, no sharing.
 
-When the user wants real shared/live data:
-- Build a small backend (e.g. Node/Express + SQLite/Postgres, or a hosted DB).
-- Replace the body of `src/storage.js` with calls to that backend, keeping the
-  same `get/set/delete/list` async interface so nothing else changes.
-- Consider websockets / polling so the workshop monitor updates live.
-- Data keys currently used: `wf_equipment`, `wf_staff`, `wf_templates`,
-  `wf_processes`, `wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`,
-  `wf_wipsettings` (each a JSON blob).
+**The probe is load-bearing.** Without it, "no API here" and "that key doesn't
+exist yet" both look like a failed request, and a shared host would silently
+fall back to localStorage — everyone quietly editing their own private copy,
+with nothing visibly wrong. It runs once; every method awaits it. Note that a
+static host with SPA fallback answers `/api/version` with 200 + HTML, so the
+probe requires a numeric `version` field, not just a 2xx.
+
+Anything needing to know the mode must `await storageReady()`, **not** read
+`isShared()` — the probe is a real network round trip, so the synchronous flag
+reads false until it lands. That exact mistake made live sync silently never
+start.
+
+Data keys: `wf_equipment`, `wf_staff`, `wf_templates`, `wf_processes`,
+`wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`
+(each a JSON blob).
+
+### Live sync (shared mode)
+
+The server bumps a version counter on every write. `src/liveSync.js` polls
+`/api/version` every 4s and calls back when it moves past what we know about;
+`WeldingScheduler` responds by **re-reading the data keys into state**
+(`reloadFromStore`). It deliberately does **not** save afterwards — a save
+would bump the version, which every other screen would see as a change, and
+so on around the loop forever.
+
+The update is held back while `busyEditing` (any modal open, or a drag in
+progress) and applied as soon as the user is done, so a dialog's in-progress
+edits aren't pulled out from under them.
+
+This used to `location.reload()` instead, which re-downloaded the bundle,
+flickered shop-floor displays, and lost the active tab — hence a sessionStorage
+dance to save and restore tab + scroll position. All of that is gone. Don't
+reintroduce a reload here.
 
 ## Future: Business Central integration (not built yet)
 

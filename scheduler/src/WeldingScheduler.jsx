@@ -9,6 +9,7 @@ import {
   parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
   DEFAULT_INCLUDE, DEFAULT_EXCLUDE, DEFAULT_COMBOS,
 } from './wipImport';
+import { startLiveSync } from './liveSync.js';
 
 /* ============================================================
    SHIFTS & ROSTER CONSTANTS
@@ -1156,6 +1157,52 @@ export default function WeldingScheduler() {
       setLoaded(true);
     })();
   }, []);
+
+  // ---------- live sync with other people (shared deployment only) ----------
+  // Latest values, for reloadFromStore to fall back on without making itself
+  // depend on (and be rebuilt by) every state change.
+  const latest = useRef({ equipment, staff });
+  latest.current = { equipment, staff };
+
+  // Re-read everything someone else may have changed. Deliberately does NOT
+  // write anything back: a save would bump the server's version and every
+  // other screen would see *that* as a change, and so on around the loop.
+  const reloadFromStore = useCallback(async () => {
+    const [eq, st, tp, pr, jb, cc, pc] = await Promise.all([
+      loadKey('wf_equipment', null),
+      loadKey('wf_staff', null),
+      loadKey('wf_templates', null),
+      loadKey('wf_processes', null),
+      loadKey('wf_jobs', null),
+      loadKey('wf_costcentres', null),
+      loadKey('wf_procedures', null),
+    ]);
+    const nextEq = eq || latest.current.equipment;
+    const nextSt = st ? st.map(normalizeStaff) : latest.current.staff;
+    if (eq) setEquipment(nextEq);
+    if (st) setStaff(nextSt);
+    if (tp) setTemplates(tp);
+    if (pr) setProcesses(pr);
+    if (cc) setCostCentres(cc);
+    if (pc) setProcedures(pc);
+    if (jb) setJobs(runScheduler(jb, nextEq, nextSt, workingDays));
+  }, [workingDays]);
+
+  const [remoteChange, setRemoteChange] = useState(false);
+  useEffect(() => startLiveSync(() => setRemoteChange(true)), []);
+
+  // Hold the update back until the user isn't in the middle of something —
+  // an open dialog holds its own copy of a record, and a drag in progress
+  // would jump under the cursor. It applies as soon as they're done.
+  const busyEditing = !!(
+    editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
+    || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
+  );
+  useEffect(() => {
+    if (!remoteChange || !loaded || busyEditing) return;
+    setRemoteChange(false);
+    reloadFromStore();
+  }, [remoteChange, loaded, busyEditing, reloadFromStore]);
 
   const recompute = useCallback((jobsList, eqList, stList) => {
     const result = runScheduler(jobsList, eqList, stList, workingDays);

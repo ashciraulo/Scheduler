@@ -14,10 +14,14 @@ value report. It also reads Business Central WIP exports (`.xlsx`) directly.
 See `scheduler/CLAUDE.md`.
 
 ### `offline-package/` — the deployable
-A snapshot of the built app plus a small dependency-free server (`serve.py` /
-`serve.js`) so one PC on the local network hosts the shared schedule and
-everyone else just opens a browser. **Generated from `scheduler/` — treat it as
-build output, not source.**
+The built app plus a small dependency-free server (`serve.py` / `serve.js`) so
+one PC on the local network hosts the shared schedule and everyone else just
+opens a browser.
+
+**It is entirely build output. Never edit it — run `npm run package` in
+`scheduler/`, which overwrites it from `dist/` + `scheduler/deploy/`.** The
+server, launchers and end-user README are source and live in
+`scheduler/deploy/`.
 
 ## Importing from Business Central
 
@@ -55,7 +59,7 @@ must not be regressed**:
 ## Working here
 
 - Nearly all work is in `scheduler/` — honour `scheduler/CLAUDE.md`.
-- Never hand-edit `offline-package/`'s built assets; regenerate them.
+- Never hand-edit `offline-package/`; run `npm run package` to regenerate it.
 - Use Git branches and commit checkpoints before large changes.
 
 ## Background
