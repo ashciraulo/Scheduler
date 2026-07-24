@@ -766,6 +766,7 @@ const inputCls = "w-full bg-slate-900 border border-slate-700 rounded-md px-3 py
 const btnPrimary = "inline-flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-sm px-3 py-2 rounded-md transition-colors";
 const btnGhost = "inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm px-3 py-2 rounded-md transition-colors border border-slate-700";
 const btnDanger = "inline-flex items-center gap-1.5 bg-red-950 hover:bg-red-900 text-red-300 text-sm px-3 py-2 rounded-md transition-colors border border-red-900";
+const smallInput = "w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-amber-500/60";
 
 function Modal({ title, onClose, children, wide }) {
   return (
@@ -819,6 +820,149 @@ const EQUIP_COLOR = {
 /* ============================================================
    COSTING VIEW — cost centres + procedures with $/hr breakdown
    ============================================================ */
+
+function CostCentreEditor({ centre, onClose, onSave, onDelete }) {
+  const isNew = !centre;
+  const [d, setD] = useState(() => (centre ? JSON.parse(JSON.stringify(centre)) : { id: uid('cc'), name: '', interestRate: 10, annualHours: 3800, assets: [{ name: '', capital: 0, salvage: 0, life: 0 }] }));
+  const set = (patch) => setD((x) => ({ ...x, ...patch }));
+  const setAsset = (i, k, v, text) => setD((x) => { const a = x.assets.slice(); a[i] = { ...a[i], [k]: text ? v : (Number(v) || 0) }; return { ...x, assets: a }; });
+  const addAsset = () => setD((x) => ({ ...x, assets: [...x.assets, { name: '', capital: 0, salvage: 0, life: 0 }] }));
+  const delAsset = (i) => setD((x) => ({ ...x, assets: x.assets.filter((_, j) => j !== i) }));
+  const grid = 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 20px';
+  return (
+    <Modal title={isNew ? 'New cost centre' : 'Edit cost centre'} onClose={onClose}>
+      <Field label="Name"><input className={inputCls} value={d.name} onChange={(e) => set({ name: e.target.value })} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Interest rate (%)"><input type="number" step="any" className={inputCls} value={d.interestRate} onChange={(e) => set({ interestRate: Number(e.target.value) || 0 })} /></Field>
+        <Field label="Annual operating hours"><input type="number" step="any" className={inputCls} value={d.annualHours} onChange={(e) => set({ annualHours: Number(e.target.value) || 0 })} /></Field>
+      </div>
+      <div className="mb-3">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Capital assets</span>
+          <span className="text-[11px] text-amber-300 font-mono">{fmtMoney(costCentrePerHr(d))} /hr dep+interest</span>
+        </div>
+        <div className="grid gap-1 mb-1" style={{ gridTemplateColumns: grid }}>
+          <span className="text-[10px] text-slate-500 uppercase">Asset</span><span className="text-[10px] text-slate-500 uppercase">Capital</span><span className="text-[10px] text-slate-500 uppercase">Salvage</span><span className="text-[10px] text-slate-500 uppercase">Life hr</span><span />
+        </div>
+        {d.assets.map((r, i) => (
+          <div key={i} className="grid gap-1 mb-1 items-center" style={{ gridTemplateColumns: grid }}>
+            <input className={smallInput} value={r.name} placeholder="Asset" onChange={(e) => setAsset(i, 'name', e.target.value, true)} />
+            <input className={smallInput} type="number" step="any" value={r.capital} onChange={(e) => setAsset(i, 'capital', e.target.value)} />
+            <input className={smallInput} type="number" step="any" value={r.salvage} onChange={(e) => setAsset(i, 'salvage', e.target.value)} />
+            <input className={smallInput} type="number" step="any" value={r.life} onChange={(e) => setAsset(i, 'life', e.target.value)} />
+            <button type="button" className="text-slate-500 hover:text-red-400" onClick={() => delAsset(i)}>×</button>
+          </div>
+        ))}
+        <button type="button" className="text-[11px] text-amber-400 hover:underline mt-0.5" onClick={addAsset}>+ Add asset</button>
+      </div>
+      <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800 mt-2">
+        {isNew ? <span /> : <button className={btnDanger} onClick={() => onDelete(d.id)}>Delete</button>}
+        <div className="flex gap-2">
+          <button className={btnGhost} onClick={onClose}>Cancel</button>
+          <button className={btnPrimary} onClick={() => onSave({ ...d, name: (d.name || '').trim() || 'Untitled cost centre' })}>Save</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, onDelete }) {
+  const isNew = !procedure;
+  const [d, setD] = useState(() => (procedure ? JSON.parse(JSON.stringify(procedure)) : {
+    id: uid('proc'), name: '', process: processes[0] || '', costCentreId: (costCentres[0] && costCentres[0].id) || '', substrate: '', notes: '',
+    powder: { material: '', pricePerKg: 0, gPerMin: 0 }, gases: [], electricity: { kw: 0, tariff: 0.28 }, spares: [], maintenance: [], consumables: [], labour: [], qa: [],
+  }));
+  const set = (patch) => setD((x) => ({ ...x, ...patch }));
+  const setArr = (k, i, f, v, text) => setD((x) => { const a = x[k].slice(); a[i] = { ...a[i], [f]: text ? v : (Number(v) || 0) }; return { ...x, [k]: a }; });
+  const addRow = (k, tpl) => setD((x) => ({ ...x, [k]: [...x[k], JSON.parse(JSON.stringify(tpl))] }));
+  const delRow = (k, i) => setD((x) => ({ ...x, [k]: x[k].filter((_, j) => j !== i) }));
+  const setPw = (f, v, text) => setD((x) => ({ ...x, powder: { ...x.powder, [f]: text ? v : (Number(v) || 0) } }));
+  const setEl = (f, v) => setD((x) => ({ ...x, electricity: { ...x.electricity, [f]: Number(v) || 0 } }));
+  const parts = procedureParts(d, costCentres);
+  // Plain function (not a nested component) so inputs keep focus across renders.
+  const sec = (k, legend, grid, cols, tpl, subKey) => (
+    <div className="mb-3">
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">{legend}</span>
+        <span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts[subKey])} /hr</span>
+      </div>
+      {d[k].map((r, i) => (
+        <div key={i} className="grid gap-1.5 mb-1 items-center" style={{ gridTemplateColumns: grid }}>
+          {cols.map((c) => (c.sel
+            ? <select key={c.k} className={smallInput} value={r[c.k]} onChange={(e) => setArr(k, i, c.k, e.target.value, true)}>{c.opts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+            : <input key={c.k} className={smallInput} type={c.text ? 'text' : 'number'} step={c.text ? undefined : 'any'} placeholder={c.ph} value={r[c.k]} onChange={(e) => setArr(k, i, c.k, e.target.value, !!c.text)} />
+          ))}
+          <button type="button" className="text-slate-500 hover:text-red-400 shrink-0" onClick={() => delRow(k, i)}>×</button>
+        </div>
+      ))}
+      <button type="button" className="text-[11px] text-amber-400 hover:underline" onClick={() => addRow(k, tpl)}>+ Add {legend.toLowerCase()}</button>
+    </div>
+  );
+  return (
+    <Modal title={isNew ? 'New procedure' : 'Edit procedure'} onClose={onClose} wide>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Procedure name"><input className={inputCls} value={d.name} onChange={(e) => set({ name: e.target.value })} /></Field>
+        <Field label="Substrate (optional)"><input className={inputCls} value={d.substrate} onChange={(e) => set({ substrate: e.target.value })} /></Field>
+        <Field label="Process"><select className={inputCls} value={d.process} onChange={(e) => set({ process: e.target.value })}>{processes.map((p) => <option key={p} value={p}>{p}</option>)}</select></Field>
+        <Field label="Cost centre"><select className={inputCls} value={d.costCentreId} onChange={(e) => set({ costCentreId: e.target.value })}><option value="">— none —</option>{costCentres.map((c) => <option key={c.id} value={c.id}>{c.name || '(unnamed)'}</option>)}</select></Field>
+      </div>
+      <div className="flex items-center justify-between rounded-md bg-slate-800/60 border border-slate-700 px-3 py-2 my-3">
+        <span className="text-xs text-slate-400 uppercase tracking-wide">Total hourly operating cost</span>
+        <span className="text-lg font-bold font-mono text-amber-300">{fmtMoney(parts.total)} /hr</span>
+      </div>
+      <div className="mb-3">
+        <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Powder</span><span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts.powder)} /hr</span></div>
+        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)' }}>
+          <input className={smallInput} placeholder="Material" value={d.powder.material} onChange={(e) => setPw('material', e.target.value, true)} />
+          <input className={smallInput} type="number" step="any" placeholder="$/kg" value={d.powder.pricePerKg} onChange={(e) => setPw('pricePerKg', e.target.value)} />
+          <input className={smallInput} type="number" step="any" placeholder="g/min" value={d.powder.gPerMin} onChange={(e) => setPw('gPerMin', e.target.value)} />
+        </div>
+      </div>
+      {sec('gases', 'Process gas', 'minmax(0,1.4fr) 104px minmax(0,.9fr) minmax(0,.9fr) 60px 16px', [{ k: 'name', text: true, ph: 'Gas' }, { k: 'role', sel: true, opts: ['primary', 'secondary', 'carrier'] }, { k: 'pricePerUnit', ph: '$/unit' }, { k: 'lPerMin', ph: 'L/min' }, { k: 'unit', text: true, ph: 'm³' }], { name: '', role: 'primary', unit: 'm³', pricePerUnit: 0, lPerMin: 0 }, 'gas')}
+      <div className="mb-3">
+        <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Electricity</span><span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts.electricity)} /hr</span></div>
+        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)' }}>
+          <input className={smallInput} type="number" step="any" placeholder="kW" value={d.electricity.kw} onChange={(e) => setEl('kw', e.target.value)} />
+          <input className={smallInput} type="number" step="any" placeholder="$/kWh" value={d.electricity.tariff} onChange={(e) => setEl('tariff', e.target.value)} />
+        </div>
+      </div>
+      {sec('spares', 'Spares', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Part' }, { k: 'cost', ph: 'Cost $' }, { k: 'life', ph: 'Life hr' }], { name: '', cost: 0, life: 0 }, 'spares')}
+      {sec('maintenance', 'Maintenance', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Item' }, { k: 'cost', ph: 'Cost $' }, { k: 'interval', ph: 'Interval hr' }], { name: '', cost: 0, interval: 0 }, 'maintenance')}
+      {sec('consumables', 'Consumables', 'minmax(0,2fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Item' }, { k: 'costPerHour', ph: '$/hr' }], { name: '', costPerHour: 0 }, 'consumables')}
+      {sec('labour', 'Labour', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Role' }, { k: 'rate', ph: '$/hr' }, { k: 'count', ph: 'FTE' }], { name: '', rate: 0, count: 1 }, 'labour')}
+      {sec('qa', 'QA', 'minmax(0,2fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Activity' }, { k: 'costPerHour', ph: '$/hr' }], { name: '', costPerHour: 0 }, 'qa')}
+      <Field label="Notes (optional)"><input className={inputCls} value={d.notes} onChange={(e) => set({ notes: e.target.value })} /></Field>
+      <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800 mt-2">
+        {isNew ? <span /> : <button className={btnDanger} onClick={() => onDelete(d.id)}>Delete</button>}
+        <div className="flex gap-2">
+          <button className={btnGhost} onClick={onClose}>Cancel</button>
+          <button className={btnPrimary} onClick={() => onSave({ ...d, name: (d.name || '').trim() || 'Untitled procedure' })}>Save</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ActualHoursModal({ job, onCancel, onConfirm }) {
+  const [hours, setHours] = useState(String(job.actualHours ?? job.hoursTotal ?? ''));
+  return (
+    <Modal title="Job complete — record actual hours" onClose={onCancel}>
+      <p className="text-sm text-slate-300 mb-3"><span className="font-semibold text-slate-100">{job.name}</span> is being marked complete.</p>
+      <Field label={`Actual hours taken — estimated ${job.hoursTotal}h${job.quantity > 1 ? ` for ${job.quantity} units` : ''}`}>
+        <input type="number" min={0} step={0.25} className={inputCls} value={hours} onChange={(e) => setHours(e.target.value)} autoFocus />
+      </Field>
+      <p className="text-xs text-slate-500 mb-3">
+        {job.templateId
+          ? "Saved to the job history — the template's hours-per-unit becomes the average of actual hours across its completed jobs."
+          : 'Saved to the job history. This job has no template, so no hours-per-unit figure is updated.'}
+      </p>
+      <div className="flex items-center justify-end gap-2">
+        <button className={btnGhost} onClick={onCancel}>Cancel</button>
+        <button className={btnPrimary} onClick={() => onConfirm(Math.max(0, Number(hours) || 0) || job.hoursTotal)}>Save &amp; complete</button>
+      </div>
+    </Modal>
+  );
+}
 
 function CostingView({ procedures, costCentres, processes, readOnly, onImport, onNewProcedure, onEditProcedure, onNewCentre, onEditCentre }) {
   const fileRef = useRef(null);
@@ -1040,16 +1184,48 @@ export default function WeldingScheduler() {
     setConfirmDelete(null);
     setEditingJob(null);
   }
+  // Recompute a template's hours-per-unit as the average of actual-hours-per-unit
+  // across its completed jobs recorded in wf_actuals.
+  function reaverageTemplate(templateId, actualsArr) {
+    if (!templateId) return;
+    const rs = actualsArr.filter((r) => r.templateId === templateId && r.quantity > 0 && r.actualHours > 0);
+    if (!rs.length) return;
+    const avg = Math.round((rs.reduce((s, r) => s + r.actualHours / r.quantity, 0) / rs.length) * 100) / 100;
+    setTemplates((ts) => {
+      const next = ts.map((t) => (t.id === templateId ? { ...t, hoursPerUnit: avg } : t));
+      saveKey('wf_templates', next);
+      return next;
+    });
+  }
   function toggleComplete(job) {
-    const nowComplete = job.status !== 'complete';
-    const updated = {
-      ...job,
-      status: nowComplete ? 'complete' : 'active',
-      completedDate: nowComplete ? isoDate(new Date()) : null,
-      percentComplete: nowComplete ? 100 : job.percentComplete,
-      updatedAt: new Date().toISOString(),
-    };
+    if (job.status !== 'complete') {
+      // Marking complete → capture actual hours first (see ActualHoursModal).
+      setPendingComplete(job);
+      return;
+    }
+    // Un-completing → revert directly and drop its history record.
+    const updated = { ...job, status: 'active', completedDate: null, updatedAt: new Date().toISOString() };
     recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
+    (async () => {
+      const arr = await loadKey('wf_actuals', []);
+      const next = arr.filter((r) => r.jobId !== job.id);
+      if (next.length !== arr.length) { await saveKey('wf_actuals', next); reaverageTemplate(job.templateId, next); }
+    })();
+  }
+  function completeWithHours(hours) {
+    const job = pendingComplete;
+    if (!job) return;
+    const cd = isoDate(new Date());
+    const updated = { ...job, status: 'complete', completedDate: cd, percentComplete: 100, actualHours: hours, updatedAt: new Date().toISOString() };
+    recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
+    setPendingComplete(null);
+    (async () => {
+      const arr = (await loadKey('wf_actuals', [])).filter((r) => r.jobId !== job.id);
+      arr.push({ jobId: job.id, templateId: job.templateId || null, name: job.name, process: job.process, quantity: job.quantity || 1, estHours: job.hoursTotal, actualHours: hours, completedDate: cd });
+      await saveKey('wf_actuals', arr);
+      reaverageTemplate(job.templateId, arr);
+    })();
+    showToast(`${job.name} marked complete — ${hours}h recorded.`);
   }
   function unpinJob(job) {
     const updated = { ...job, assignment: job.assignment ? { ...job.assignment, pinned: false } : null, updatedAt: new Date().toISOString() };
@@ -1112,6 +1288,11 @@ export default function WeldingScheduler() {
     const eq = equipment.find((e) => e.id === equipId);
     if (!eq || !eq.processes.includes(job.process)) {
       showToast(`${eq ? eq.name : 'That equipment'} can't run ${job.process} — drop rejected.`);
+      return;
+    }
+    const missingTags = (job.tags || []).filter((t) => !(eq.tags || []).includes(t));
+    if (missingTags.length) {
+      showToast(`${eq.name} doesn't have: ${missingTags.join(', ')} — drop rejected.`);
       return;
     }
     if (job.readyDate && date < job.readyDate) {
@@ -1406,6 +1587,9 @@ export default function WeldingScheduler() {
           templates={templates}
           processes={processes}
           staff={staff}
+          equipment={equipment}
+          procedures={procedures}
+          costCentres={costCentres}
           onClose={() => setEditingJob(null)}
           onSave={(data) => addOrUpdateJob(data, editingJob === 'new')}
           onDelete={editingJob !== 'new' ? () => setConfirmDelete({ type: 'job', id: editingJob.id, name: editingJob.name }) : null}
@@ -1457,6 +1641,34 @@ export default function WeldingScheduler() {
           processes={processes}
           onClose={() => setEditingStaff(null)}
           onSave={(data) => saveStaff(data, editingStaff === 'new')}
+        />
+      )}
+
+      {editingProcedure && (
+        <ProcedureEditor
+          procedure={editingProcedure === 'new' ? null : editingProcedure}
+          processes={processes}
+          costCentres={costCentres}
+          onClose={() => setEditingProcedure(null)}
+          onSave={saveProcedure}
+          onDelete={deleteProcedure}
+        />
+      )}
+
+      {editingCentre && (
+        <CostCentreEditor
+          centre={editingCentre === 'new' ? null : editingCentre}
+          onClose={() => setEditingCentre(null)}
+          onSave={saveCentre}
+          onDelete={deleteCentre}
+        />
+      )}
+
+      {pendingComplete && (
+        <ActualHoursModal
+          job={pendingComplete}
+          onCancel={() => setPendingComplete(null)}
+          onConfirm={completeWithHours}
         />
       )}
 
@@ -2268,7 +2480,7 @@ function ResourcesView({ equipment, staff, processes, readOnly, onAddEquip, onEd
    JOB MODAL
    ============================================================ */
 
-function JobModal({ job, templates, processes, staff, onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart }) {
+function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costCentres = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart }) {
   const isNew = !job;
   const [parts, setParts] = useState(job?.parts ? job.parts.map((p) => ({ ...p })) : null);
   const [showSplit, setShowSplit] = useState(false);
@@ -2288,14 +2500,31 @@ function JobModal({ job, templates, processes, staff, onClose, onSave, onDelete,
   const [bcJobNo, setBcJobNo] = useState(job?.bcJobNo || '');
   const [bcJobTaskNo, setBcJobTaskNo] = useState(job?.bcJobTaskNo || '');
   const [showBcLink, setShowBcLink] = useState(!!(job?.bcJobNo || job?.bcJobTaskNo));
+  const [search, setSearch] = useState('');
+  const [category, setCategory] = useState((templates.find((t) => t.id === templateId) || {}).category || 'Uncategorised');
+  const [tags, setTags] = useState(job?.tags || (job ? [] : (templates.find((t) => t.id === templateId) || {}).tags) || []);
+  const [procedureId, setProcedureId] = useState(job?.procedureId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).procedureId) || '');
+
+  const templateCategories = () => { const s = new Set(); templates.forEach((t) => s.add(t.category || 'Uncategorised')); return [...s].sort(); };
+  const matchTemplates = (q) => {
+    const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    return templates.filter((t) => { const hay = `${t.name} ${t.category || ''} ${t.process || ''}`.toLowerCase(); return words.every((w) => hay.includes(w)); });
+  };
 
   function applyTemplate(id) {
+    const prevTemplate = templates.find((x) => x.id === templateId);
     setTemplateId(id);
     const t = templates.find((x) => x.id === id);
     if (t) {
-      setName(t.name);
+      // Only fill the name for a NEW job whose name is still untouched (empty
+      // or still the previously selected template's name) — never rename an
+      // existing job or clobber a customised description.
+      if (isNew && (!name.trim() || name === (prevTemplate?.name || ''))) setName(t.name);
       setProcess(t.process);
       setHoursPerUnit(t.hoursPerUnit);
+      setTags(t.tags || []);
+      setProcedureId(t.procedureId || '');
       if (t.totalValuePerUnit) setTotalValue(Math.round(t.totalValuePerUnit * quantity * 100) / 100);
       if (t.departmentValuePerUnit) setDepartmentValue(Math.round(t.departmentValuePerUnit * quantity * 100) / 100);
     }
@@ -2325,6 +2554,9 @@ function JobModal({ job, templates, processes, staff, onClose, onSave, onDelete,
       notes,
       totalValue: Number(totalValue) || 0,
       departmentValue: Number(departmentValue) || 0,
+      tags,
+      procedureId,
+      actualHours: job?.actualHours,
       bcJobNo: bcJobNo.trim(),
       bcJobTaskNo: bcJobTaskNo.trim(),
       completedDate: job?.completedDate || null,
@@ -2345,11 +2577,46 @@ function JobModal({ job, templates, processes, staff, onClose, onSave, onDelete,
   return (
     <Modal title={isNew ? 'New job' : 'Edit job'} onClose={onClose}>
       {!parts && !custom && templates.length > 0 && (
-        <Field label="Template">
-          <select className={inputCls} value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
-            {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
-        </Field>
+        <div>
+          <Field label="Search templates">
+            <input
+              className={inputCls}
+              value={search}
+              onChange={(e) => {
+                const v = e.target.value; setSearch(v);
+                if (v.trim()) { const m = matchTemplates(v); if (m.length && !m.some((t) => t.id === templateId)) applyTemplate(m[0].id); }
+                else setCategory((templates.find((t) => t.id === templateId) || {}).category || 'Uncategorised');
+              }}
+              placeholder="Keyword search across name, category and process…"
+            />
+          </Field>
+          {search.trim() ? (
+            matchTemplates(search).length ? (
+              <Field label={`Matching templates (${matchTemplates(search).length})`}>
+                <select className={inputCls} value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
+                  {matchTemplates(search).map((t) => <option key={t.id} value={t.id}>{t.name} — {t.category || 'Uncategorised'}</option>)}
+                </select>
+              </Field>
+            ) : <p className="text-xs text-slate-500 mb-3">No templates match that search.</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Category">
+                <select className={inputCls} value={category} onChange={(e) => {
+                  const c = e.target.value; setCategory(c);
+                  const ts = templates.filter((t) => (t.category || 'Uncategorised') === c);
+                  if (ts.length && !ts.some((t) => t.id === templateId)) applyTemplate(ts[0].id);
+                }}>
+                  {templateCategories().map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </Field>
+              <Field label="Template">
+                <select className={inputCls} value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
+                  {templates.filter((t) => (t.category || 'Uncategorised') === category).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </Field>
+            </div>
+          )}
+        </div>
       )}
       {!parts && templates.length > 0 && (
         <button type="button" className="text-xs text-amber-400 mb-3 hover:underline" onClick={() => setCustom((c) => !c)}>
@@ -2359,6 +2626,11 @@ function JobModal({ job, templates, processes, staff, onClose, onSave, onDelete,
 
       <Field label="Job name">
         <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
+      </Field>
+
+      <Field label="Capability requirements (optional)">
+        <TagEditor value={tags} onChange={setTags} suggestions={[...new Set([...equipment.flatMap((e) => e.tags || []), ...templates.flatMap((t) => t.tags || [])])].sort()} />
+        <p className="text-xs text-slate-500 mt-1">This job will only be scheduled on — or allowed to be dragged onto — equipment carrying every tag.</p>
       </Field>
 
       {(parts || custom) && (
@@ -2404,6 +2676,26 @@ function JobModal({ job, templates, processes, staff, onClose, onSave, onDelete,
       {valueWarning && (
         <p className="text-xs text-amber-400 -mt-2 mb-3 flex items-center gap-1"><AlertTriangle size={12} /> Department value is higher than the total job value — double check these numbers.</p>
       )}
+
+      {procedureId && (() => {
+        const proc = procedures.find((p) => p.id === procedureId);
+        if (!proc) return null;
+        const rate = procedureCost(proc, costCentres);
+        const estHrs = Math.round((Number(quantity) || 0) * (Number(hoursPerUnit) || 0) * 100) / 100;
+        const cost = rate * estHrs;
+        const dep = Number(departmentValue) || 0;
+        const margin = dep - cost;
+        return (
+          <div className="mb-3 rounded-md border border-slate-700 bg-slate-800/60 p-3 text-xs">
+            <div className="flex justify-between text-slate-400"><span>Cost — {fmtMoney(rate)}/hr × {estHrs}h</span><span className="font-mono text-slate-200">{fmtMoney(cost)}</span></div>
+            <div className="flex justify-between text-slate-400 mt-1"><span>Your department value</span><span className="font-mono text-slate-200">{fmtMoney(dep)}</span></div>
+            <div className="flex justify-between mt-1 pt-1 border-t border-slate-700">
+              <span className="text-slate-300 font-medium">{margin >= 0 ? 'Estimated margin' : 'Estimated loss'}</span>
+              <span className={`font-mono font-semibold ${margin >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtMoney(margin)}</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {!parts && !isNew && (
         <Field label={`% complete — ${percentComplete}%`}>
