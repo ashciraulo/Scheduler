@@ -1,0 +1,20 @@
+{
+  "jobs": [
+    {
+      "name": "Bracket Weld Batch 17",
+      "process": "", "quantity": 20, "hoursTotal": 0,
+      "readyDate": "2026-07-19", "dueDate": "2026-08-02",
+      "totalValue": 2400, "departmentValue": 0,
+      "bcJobNo": "J00120", "bcJobTaskNo": "1000",
+      "status": "active", "completedDate": null
+    },
+    {
+      "name": "Turbine Coating Rework",
+      "process": "", "quantity": 3, "hoursTotal": 0,
+      "readyDate": "2026-07-19", "dueDate": "2026-08-10",
+      "totalValue": 5100, "departmentValue": 0,
+      "bcJobNo": "J00121", "bcJobTaskNo": "1000",
+      "status": "active", "completedDate": null
+    }
+  ]
+}

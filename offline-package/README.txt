@@ -1,20 +1,20 @@
-WELDCELL SCHEDULER + WIP IMPORTER
-==================================
+WELDCELL SCHEDULER
+==================
 
-The scheduler can now be shared across computers on your local network, so
-a planner and everyone viewing the schedule all see the same live data.
-The WIP importer is still a standalone, fully-offline tool.
+The scheduler is shared across computers on your local network, so a
+planner and everyone viewing the schedule all see the same live data.
 
 
 WHAT'S IN HERE
 --------------
 
-wip-importer.html      The WIP importer. Just double-click it — it opens
-                        in your browser directly, no setup needed. This tool
-                        stays fully offline and never makes network calls.
-
 scheduler/              The scheduler app. This is "served" from one PC and
                         opened from any computer on the network (see below).
+
+The separate WIP importer tool is no longer needed and is no longer
+included: the scheduler now reads the Business Central WIP .xlsx export
+itself, under Job Backlog > "Import from BC WIP export". Your keyword
+settings are asked for again the first time you use it.
 
 
 HOW TO RUN THE SCHEDULER (SHARED — the normal way now)
@@ -87,10 +87,12 @@ HOW MULTIPLE PEOPLE EDITING WORKS
 
 - Everyone sees the same jobs, equipment, staff, roster and templates,
   served from the host PC.
-- When someone makes a change, other screens refresh to show it within a
-  few seconds — but never while you have a dialog open or a field selected,
-  so you won't lose something you're part-way through typing. The refresh
-  keeps you on whatever tab you were viewing.
+- When someone makes a change, other screens update to show it within a
+  few seconds. The update happens in place — the page doesn't reload, so
+  you stay exactly where you were, on the same tab and scroll position.
+- It waits if you're in the middle of something: while you have a window
+  open or a job part-way dragged, the update is held back and applied the
+  moment you're finished. You can't lose something you're typing.
 - This is designed for one or two people planning while others watch. If
   two people edit the very same thing at the very same moment, the most
   recent save wins. The "Editing / View only" and "Display mode" buttons at
@@ -117,15 +119,21 @@ DATA / BACKUP / PRIVACY NOTES
   other web server that doesn't provide this data store, it automatically
   falls back to that browser's own local storage, exactly like the original
   single-computer version.)
-- The WIP importer never saves the WIP data it reads — only your
-  keyword/mapping settings are remembered, locally. Closing the tab
-  discards the loaded spreadsheet completely.
+- Importing a WIP export never saves the spreadsheet itself — only your
+  keyword settings are remembered. Closing the import window discards the
+  loaded spreadsheet completely, and it is read inside your browser, so it
+  is never uploaded anywhere.
 
 
 REBUILDING THIS PACKAGE LATER
 ------------------------------
-The app itself (scheduler/assets/) is a built snapshot, not source code.
-If the app's source changes later, regenerate the bundle (`npm run build`
-in the scheduler project, then copy dist/* over scheduler/). The server
-files (serve.py, serve.js), index.html and this README are edited here
-directly. Ask Claude Code to help if/when needed.
+This whole folder is generated — don't edit anything in it by hand, as it
+all gets overwritten. To produce a new copy after the app changes, run:
+
+  npm run package
+
+in the scheduler project. That builds the app and rebuilds this folder.
+Then copy it to the host PC, keeping the host's existing
+scheduler/scheduler-data.json (that file is your schedule — the packaging
+step leaves it alone, but a copy from another machine would overwrite it,
+so back it up first).
