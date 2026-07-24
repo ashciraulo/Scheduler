@@ -3276,7 +3276,7 @@ function overlaps(aStart, aEnd, bStart, bEnd) {
 function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function endOfMonth(d) { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
 
-function ReportsView({ jobs, equipment, staff }) {
+function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = [] }) {
   const today = new Date();
   const [basis, setBasis] = useState('completed'); // completed | scheduled | due
   const [rangeStart, setRangeStart] = useState(isoDate(startOfMonth(today)));
@@ -3316,6 +3316,10 @@ function ReportsView({ jobs, equipment, staff }) {
   const totalCompanyValue = included.reduce((s, j) => s + Number(j.totalValue || 0), 0);
   const totalDeptValue = included.reduce((s, j) => s + Number(j.departmentValue || 0), 0);
   const sharePct = totalCompanyValue > 0 ? Math.round((totalDeptValue / totalCompanyValue) * 1000) / 10 : 0;
+  const totalCost = included.reduce((s, j) => s + (jobCost(j, procedures, costCentres) || 0), 0);
+  const deptMargin = totalDeptValue - totalCost;
+  const marginPct = totalDeptValue > 0 ? Math.round((deptMargin / totalDeptValue) * 1000) / 10 : 0;
+  const costedCount = included.filter((j) => jobCost(j, procedures, costCentres) != null).length;
 
   const byProcess = useMemo(() => {
     const map = {};
@@ -3369,6 +3373,22 @@ function ReportsView({ jobs, equipment, staff }) {
         {basis === 'scheduled' && 'Jobs with schedule time in this range, whether finished or still upcoming.'}
         {basis === 'due' && 'Jobs whose customer due date falls in this range, regardless of status.'}
       </p>
+
+      <div className="grid sm:grid-cols-3 gap-3 mb-4">
+        <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
+          <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Estimated operating cost of these jobs</p>
+          <p className="text-2xl font-bold text-slate-100 font-mono">{fmtMoney(totalCost)}</p>
+          <p className="text-[10px] text-slate-500 mt-1">{costedCount} of {included.length} have a costed procedure</p>
+        </div>
+        <div className={`border rounded-lg p-4 ${deptMargin >= 0 ? 'border-emerald-700/50 bg-emerald-950/20' : 'border-red-800/50 bg-red-950/20'}`}>
+          <p className={`text-[11px] uppercase tracking-wide mb-1 ${deptMargin >= 0 ? 'text-emerald-400/80' : 'text-red-400/80'}`}>Department margin (value − cost)</p>
+          <p className={`text-2xl font-bold font-mono ${deptMargin >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{fmtMoney(deptMargin)}</p>
+        </div>
+        <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
+          <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Margin on department value</p>
+          <p className="text-2xl font-bold text-slate-100 font-mono">{marginPct}%</p>
+        </div>
+      </div>
 
       <div className="grid sm:grid-cols-3 gap-3 mb-6">
         <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
