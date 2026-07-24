@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The app uses a dark slate theme; set the page background so there is no
+   white flash before React mounts and so overscroll areas match the UI. */
+html, body, #root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background-color: #020617; /* slate-950 */
+}
