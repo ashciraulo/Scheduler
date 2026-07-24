@@ -5,6 +5,10 @@ import {
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
   Upload, FileWarning
 } from 'lucide-react';
+import {
+  parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
+  DEFAULT_INCLUDE, DEFAULT_EXCLUDE, DEFAULT_COMBOS,
+} from './wipImport';
 
 /* ============================================================
    SHIFTS & ROSTER CONSTANTS
@@ -2063,7 +2067,7 @@ function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit
         </div>
         {!readOnly && (
           <div className="flex items-center gap-2">
-            <button className={btnGhost} onClick={onImport}><Upload size={15} /> Import from WIP export</button>
+            <button className={btnGhost} onClick={onImport}><Upload size={15} /> Import from BC WIP export</button>
             <button className={btnPrimary} onClick={onAdd}><Plus size={15} /> New job</button>
           </div>
         )}
@@ -2858,15 +2862,133 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
 }
 
 /* ============================================================
-   IMPORT JOBS MODAL (from wip-importer's JSON export)
+   IMPORT JOBS MODAL
+   ------------------------------------------------------------
+   Two ways in, one review screen out:
+
+   1. A Business Central WIP export (.xlsx) read directly — the standalone
+      wip-importer's engine now lives in src/wipImport.js, so the user no
+      longer has to run a second tool and carry a JSON file across. The
+      keyword matching, duplicate detection and completion flagging are the
+      same logic, wrapped in this app's UI.
+   2. The .json the standalone importer still produces, for anyone who
+      already works that way.
+
+   Either path lands on the same "assign a template" review table, because
+   neither source carries shop-floor hours — see the note there.
    ============================================================ */
 
+const WIP_SETTINGS_KEY = 'wf_wipsettings';
+
+// Chip editor for the include/exclude keyword lists. Deliberately plain: type
+// a word, Enter or Add, click × to drop it.
+function KeywordChips({ words, onChange, placeholder, tone }) {
+  const [input, setInput] = useState('');
+  const chipCls = tone === 'exclude'
+    ? 'bg-red-950/40 text-red-300 border border-red-900'
+    : 'bg-amber-500/20 text-amber-300';
+  const add = () => {
+    const parts = input.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const next = [...words];
+    parts.forEach((p) => { if (!next.includes(p)) next.push(p); });
+    onChange(next);
+    setInput('');
+  };
+  return (
+    <div>
+      <div className="flex flex-wrap gap-1 mb-2">
+        {words.length === 0 && <span className="text-[11px] text-slate-500 italic">None</span>}
+        {words.map((w) => (
+          <span key={w} className={`text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1 ${chipCls}`}>
+            {w}
+            <button type="button" className="text-slate-500 hover:text-red-400" onClick={() => onChange(words.filter((x) => x !== w))}>×</button>
+          </span>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <input
+          className={smallInput}
+          value={input}
+          placeholder={placeholder}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+        />
+        <button type="button" className="text-xs px-2 py-1 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700" onClick={add}>Add</button>
+      </div>
+    </div>
+  );
+}
+
+// Highlight the matched keywords inside a description, so it's obvious *why* a
+// row matched when auditing keyword coverage. Built from React nodes, never
+// innerHTML — file content must never be treated as markup.
+function highlightHits(text, hits) {
+  if (!text) return null;
+  const list = (hits || []).filter(Boolean);
+  if (!list.length) return text;
+  const low = text.toLowerCase();
+  const ranges = [];
+  for (const h of list) {
+    const hl = h.toLowerCase();
+    let from = 0, idx;
+    while ((idx = low.indexOf(hl, from)) !== -1) { ranges.push([idx, idx + hl.length]); from = idx + hl.length; }
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([...r]);
+  }
+  const out = [];
+  let pos = 0;
+  merged.forEach(([a, b], i) => {
+    if (a > pos) out.push(text.slice(pos, a));
+    out.push(<mark key={i} className="bg-amber-500/20 text-amber-300 rounded px-0.5">{text.slice(a, b)}</mark>);
+    pos = b;
+  });
+  if (pos < text.length) out.push(text.slice(pos));
+  return out;
+}
+
 function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport }) {
-  const [rows, setRows] = useState(null); // null until a file is parsed
+  const [rows, setRows] = useState(null); // set once we reach the review step
   const [fileName, setFileName] = useState('');
   const [parseError, setParseError] = useState('');
+  const [busy, setBusy] = useState(false);
   const [bulkTemplateId, setBulkTemplateId] = useState('');
   const fileInputRef = useRef(null);
+
+  // ---- WIP (.xlsx) step ----
+  const [parsed, setParsed] = useState(null);      // { headers, rows, sheetName, headerRowNumber }
+  const [mapping, setMapping] = useState({});      // logical field -> header name
+  const [wipSettings, setWipSettings] = useState({ include: DEFAULT_INCLUDE, exclude: DEFAULT_EXCLUDE, combos: DEFAULT_COMBOS });
+  const [selected, setSelected] = useState(() => new Set());
+  const [wipView, setWipView] = useState('matched');
+  const [wipSearch, setWipSearch] = useState('');
+  const [showMapping, setShowMapping] = useState(false);
+
+  // Keyword lists persist (they're the user's department vocabulary and worth
+  // keeping); the WIP data itself never touches storage.
+  useEffect(() => {
+    let alive = true;
+    loadKey(WIP_SETTINGS_KEY, null).then((s) => {
+      if (!alive || !s) return;
+      setWipSettings({ include: s.include || DEFAULT_INCLUDE, exclude: s.exclude || [], combos: s.combos || [] });
+    });
+    return () => { alive = false; };
+  }, []);
+  function updateSettings(patch) {
+    setWipSettings((s) => { const next = { ...s, ...patch }; saveKey(WIP_SETTINGS_KEY, next); return next; });
+  }
+
+  const analysis = useMemo(
+    () => (parsed ? analyse(parsed.rows, mapping, wipSettings) : null),
+    [parsed, mapping, wipSettings]
+  );
+  // Re-analysing (a mapping or keyword change) resets the ticks to the new
+  // default selection — same as the standalone tool.
+  useEffect(() => { if (analysis) setSelected(new Set(analysis.defaultSelected)); }, [analysis]);
 
   const existingKeys = useMemo(() => {
     const keys = new Set();
@@ -2876,18 +2998,72 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
     return keys;
   }, [existingJobs]);
 
+  // Turn scheduler-shaped job objects (from either source) into review rows.
+  function toReviewRows(list) {
+    const now = new Date().toISOString();
+    return list.map((raw, i) => {
+      const name = (raw?.name || '').trim();
+      const bcJobNo = raw?.bcJobNo || '';
+      const bcJobTaskNo = raw?.bcJobTaskNo || '';
+      const dup = !!bcJobNo && existingKeys.has(`${bcJobNo}::${bcJobTaskNo}`);
+      return {
+        _rowId: i,
+        _invalid: !name,
+        _dup: dup,
+        include: !!name && !dup,
+        name: name || 'Untitled job',
+        process: raw?.process || '',
+        quantity: Number(raw?.quantity) > 0 ? Number(raw.quantity) : 1,
+        hoursTotal: Number(raw?.hoursTotal) || 0,
+        readyDate: raw?.readyDate || isoDate(new Date()),
+        dueDate: raw?.dueDate || addDays(isoDate(new Date()), 14),
+        templateId: raw?.templateId || null,
+        notes: raw?.notes || '',
+        totalValue: Number(raw?.totalValue) || 0,
+        departmentValue: Number(raw?.departmentValue) || 0,
+        percentComplete: Number(raw?.percentComplete) || 0,
+        status: 'active',
+        completedDate: null,
+        bcJobNo,
+        bcJobTaskNo,
+        updatedAt: now,
+      };
+    });
+  }
+
   function handleFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
     setParseError('');
+    if (/\.xlsx$/i.test(file.name)) readXlsxFile(file);
+    else readJsonFile(file);
+  }
+
+  async function readXlsxFile(file) {
+    setBusy(true);
+    try {
+      const p = await parseXlsx(await file.arrayBuffer());
+      setParsed(p);
+      setMapping(autoMap(p.headers));
+      setWipView('matched');
+      setWipSearch('');
+    } catch (err) {
+      setParseError(err?.message || 'That .xlsx could not be read.');
+      setParsed(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function readJsonFile(file) {
     const reader = new FileReader();
     reader.onload = () => {
       let data;
       try {
         data = JSON.parse(reader.result);
       } catch {
-        setParseError('That file is not valid JSON.');
+        setParseError('That file is not valid JSON — choose a .xlsx WIP export, or the .json the WIP importer produces.');
         setRows(null);
         return;
       }
@@ -2897,41 +3073,64 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
         setRows(null);
         return;
       }
-      const now = new Date().toISOString();
-      const built = list.map((raw, i) => {
-        const name = (raw?.name || '').trim();
-        const invalid = !name;
-        const bcJobNo = raw?.bcJobNo || '';
-        const bcJobTaskNo = raw?.bcJobTaskNo || '';
-        const dup = !!bcJobNo && existingKeys.has(`${bcJobNo}::${bcJobTaskNo}`);
-        return {
-          _rowId: i,
-          _invalid: invalid,
-          _dup: dup,
-          include: !invalid && !dup,
-          name: name || 'Untitled job',
-          process: raw?.process || '',
-          quantity: Number(raw?.quantity) > 0 ? Number(raw.quantity) : 1,
-          hoursTotal: Number(raw?.hoursTotal) || 0,
-          readyDate: raw?.readyDate || isoDate(new Date()),
-          dueDate: raw?.dueDate || addDays(isoDate(new Date()), 14),
-          templateId: raw?.templateId || null,
-          notes: raw?.notes || '',
-          totalValue: Number(raw?.totalValue) || 0,
-          departmentValue: Number(raw?.departmentValue) || 0,
-          percentComplete: Number(raw?.percentComplete) || 0,
-          status: 'active',
-          completedDate: null,
-          bcJobNo,
-          bcJobTaskNo,
-          updatedAt: now,
-        };
-      });
-      setRows(built);
+      setRows(toReviewRows(list));
     };
     reader.readAsText(file);
   }
 
+  function resetFile() {
+    setRows(null); setParsed(null); setFileName(''); setParseError('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  // ---- WIP step derived data ----
+  const counts = useMemo(() => {
+    if (!analysis) return null;
+    const a = analysis.records;
+    return {
+      total: a.length,
+      matched: a.filter((r) => r.matched && !r.isDupe).length,
+      dupes: a.filter((r) => r.isDupe).length,
+      unmatched: a.filter((r) => !r.matched && !r.isDupe).length,
+      held: a.filter((r) => r.combos.length && !r.isDupe).length,
+      done: a.filter((r) => r.matched && !r.isDupe && r.doneConfirmed).length,
+      warned: a.filter((r) => r.matched && !r.isDupe && r.warnings.length).length,
+    };
+  }, [analysis]);
+
+  const selectedValue = useMemo(() => {
+    if (!analysis) return 0;
+    return analysis.records.filter((r) => selected.has(r.id)).reduce((s, r) => s + (r.value || 0), 0);
+  }, [analysis, selected]);
+
+  const visibleRecs = useMemo(() => {
+    if (!analysis) return [];
+    let recs = analysis.records;
+    if (wipView === 'matched') recs = recs.filter((r) => r.matched && !r.isDupe);
+    else if (wipView === 'dupes') recs = recs.filter((r) => r.isDupe);
+    // "Not matched" excludes duplicates: a duplicate is already accounted for by
+    // its keeper under Duplicates, and this view exists to audit keyword gaps.
+    else if (wipView === 'unmatched') recs = recs.filter((r) => !r.matched && !r.isDupe);
+    const q = wipSearch.trim().toLowerCase();
+    if (q) recs = recs.filter((r) => `${r.jobNo} ${r.hay} ${r.customer}`.toLowerCase().includes(q));
+    return recs;
+  }, [analysis, wipView, wipSearch]);
+
+  function toggleRec(id, on) {
+    setSelected((s) => { const n = new Set(s); if (on) n.add(id); else n.delete(id); return n; });
+  }
+  function tickVisible(on) {
+    setSelected((s) => {
+      const n = new Set(s);
+      visibleRecs.forEach((r) => { if (on) n.add(r.id); else n.delete(r.id); });
+      return n;
+    });
+  }
+  function continueFromWip() {
+    setRows(toReviewRows(buildSchedulerJobs(analysis.records, selected)));
+  }
+
+  // ---- review step ----
   function updateRow(rowId, patch) {
     setRows((rs) => rs.map((r) => (r._rowId === rowId ? { ...r, ...patch } : r)));
   }
@@ -2968,42 +3167,234 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
     onImport(toImport);
   }
 
+  const stage = rows ? 'review' : parsed ? 'wip' : 'pick';
+  const title = stage === 'wip' ? 'WIP export — choose the jobs that are ours' : 'Import jobs from a WIP export';
+
+  const viewTabs = counts ? [
+    ['matched', 'Ours', counts.matched],
+    ['unmatched', 'Not matched', counts.unmatched],
+    ['dupes', 'Duplicates', counts.dupes],
+    ['all', 'All rows', counts.total],
+  ] : [];
+
   return (
-    <Modal title="Import jobs from WIP export" onClose={onClose} wide>
-      {!rows && (
+    <Modal title={title} onClose={onClose} wide>
+      {/* ---------------- step 1: choose a file ---------------- */}
+      {stage === 'pick' && (
         <div>
-          <p className="text-sm text-slate-400 mb-4">
-            Choose the <code className="text-slate-300">scheduler-jobs-*.json</code> file produced by the WIP
-            importer. Nothing is imported until you review the list and click Import below.
+          <p className="text-sm text-slate-400 mb-1">
+            Choose the Business Central WIP export (<code className="text-slate-300">.xlsx</code>) and this will
+            find the jobs that belong to the department, drop duplicates and pull through what the scheduler needs.
+          </p>
+          <p className="text-xs text-slate-500 mb-4">
+            The <code className="text-slate-400">scheduler-jobs-*.json</code> from the standalone WIP importer also
+            still works. Nothing is read off this machine and nothing is imported until you review the list.
           </p>
           <input
             ref={fileInputRef}
             type="file"
-            accept="application/json,.json"
+            accept=".xlsx,application/json,.json"
             onChange={handleFile}
             className="block w-full text-sm text-slate-300 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-amber-500 file:text-slate-950 file:font-semibold file:text-sm hover:file:bg-amber-400"
           />
+          {busy && (
+            <p className="text-xs text-slate-400 mt-3 flex items-center gap-1.5"><Loader2 size={13} className="animate-spin" /> Reading {fileName}…</p>
+          )}
           {parseError && (
-            <p className="text-xs text-red-400 mt-3 flex items-center gap-1.5"><FileWarning size={13} /> {parseError}</p>
+            <p className="text-xs text-red-400 mt-3 flex items-start gap-1.5"><FileWarning size={13} className="mt-0.5 shrink-0" /> {parseError}</p>
           )}
         </div>
       )}
 
-      {rows && (
+      {/* ---------------- step 2: WIP review (.xlsx only) ---------------- */}
+      {stage === 'wip' && analysis && (
         <div>
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <p className="text-xs text-slate-400">
-              {fileName} · {rows.length} job{rows.length === 1 ? '' : 's'} found
+              {fileName} · sheet “{parsed.sheetName}” · headers on row {parsed.headerRowNumber} · {counts.total} rows
+            </p>
+            <button type="button" className="text-xs text-amber-400 hover:underline" onClick={resetFile}>Choose a different file</button>
+          </div>
+
+          {/* stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-3">
+            {[
+              ['Rows in file', counts.total, 'text-slate-200'],
+              ['Match your keywords', counts.matched, 'text-emerald-400'],
+              ['Duplicate job no.', counts.dupes, 'text-slate-400'],
+              ['No keyword match', counts.unmatched, 'text-slate-400'],
+              ['Already complete', counts.done, 'text-slate-400'],
+              ['Value of selection', `$${Math.round(selectedValue).toLocaleString()}`, 'text-amber-400'],
+            ].map(([label, val, cls]) => (
+              <div key={label} className="bg-slate-800/50 border border-slate-800 rounded-md px-2.5 py-2">
+                <div className={`text-base font-semibold ${cls}`}>{val}</div>
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {counts.matched === 0 && (
+            <p className="text-xs text-amber-400 mb-3 flex items-start gap-1.5">
+              <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+              No rows matched. Check the keywords below, and that the Description column is mapped to the right header.
+            </p>
+          )}
+          {counts.held > 0 && (
+            <p className="text-[11px] text-slate-400 mb-3">
+              {counts.held} row{counts.held === 1 ? '' : 's'} held by a combination rule — they sit under “Not matched” for you to decide on.
+            </p>
+          )}
+
+          {/* keywords */}
+          <div className="grid sm:grid-cols-2 gap-3 mb-3">
+            <div className="bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
+              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Include if the description contains</div>
+              <KeywordChips words={wipSettings.include} placeholder="weld, spray, hvof…" onChange={(w) => updateSettings({ include: w })} />
+            </div>
+            <div className="bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
+              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Never include if it contains</div>
+              <KeywordChips words={wipSettings.exclude} tone="exclude" placeholder="machining, hire…" onChange={(w) => updateSettings({ exclude: w })} />
+            </div>
+          </div>
+
+          {/* column mapping */}
+          <button
+            type="button"
+            className="text-xs text-slate-400 hover:text-slate-200 mb-2 inline-flex items-center gap-1.5"
+            onClick={() => setShowMapping((v) => !v)}
+          >
+            <Settings2 size={13} /> {showMapping ? 'Hide' : 'Check'} column mapping
+          </button>
+          {showMapping && (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2 mb-3 bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
+              {FIELDS.map((f) => (
+                <label key={f.key} className="block">
+                  <span className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">
+                    {f.label}{f.need && <span className="text-amber-400"> *</span>}
+                  </span>
+                  <select
+                    className={smallInput}
+                    value={mapping[f.key] || ''}
+                    onChange={(e) => setMapping((m) => ({ ...m, [f.key]: e.target.value }))}
+                  >
+                    <option value="">— not mapped —</option>
+                    {parsed.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </label>
+              ))}
+            </div>
+          )}
+
+          {/* view tabs + search */}
+          <div className="flex items-center gap-2 flex-wrap mb-2">
+            {viewTabs.map(([id, label, n]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setWipView(id)}
+                className={`text-xs px-2.5 py-1.5 rounded-full border transition-colors ${
+                  wipView === id ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-800 border-slate-700 text-slate-400'
+                }`}
+              >
+                {label} <span className="opacity-70">{n}</span>
+              </button>
+            ))}
+            <input
+              className={`${smallInput} ml-auto w-auto min-w-[180px]`}
+              placeholder="Search job no., description, customer…"
+              value={wipSearch}
+              onChange={(e) => setWipSearch(e.target.value)}
+            />
+          </div>
+
+          <div className="flex items-center gap-3 mb-2 text-[11px] text-slate-500">
+            <button type="button" className="hover:text-amber-400" onClick={() => tickVisible(true)}>Tick all in view</button>
+            <button type="button" className="hover:text-amber-400" onClick={() => tickVisible(false)}>Untick all in view</button>
+          </div>
+
+          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto max-h-[40vh] overflow-y-auto">
+            <table className="w-full text-sm min-w-[900px]">
+              <thead className="sticky top-0 bg-slate-900 z-10">
+                <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+                  <th className="px-3 py-2 font-medium"></th>
+                  <th className="px-3 py-2 font-medium">Job / task</th>
+                  <th className="px-3 py-2 font-medium">Description</th>
+                  <th className="px-3 py-2 font-medium">Customer</th>
+                  <th className="px-3 py-2 font-medium">Value</th>
+                  <th className="px-3 py-2 font-medium">Qty</th>
+                  <th className="px-3 py-2 font-medium">Target</th>
+                  <th className="px-3 py-2 font-medium">BC status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRecs.length === 0 && (
+                  <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-500 text-xs">Nothing in this view.</td></tr>
+                )}
+                {visibleRecs.map((r) => (
+                  <tr key={r.id} className={`border-b border-slate-800/60 ${r.isDupe ? 'opacity-60' : ''}`}>
+                    <td className="px-3 py-2 align-top">
+                      <input type="checkbox" className="accent-amber-500" checked={selected.has(r.id)} onChange={(e) => toggleRec(r.id, e.target.checked)} />
+                    </td>
+                    <td className="px-3 py-2 align-top text-xs text-slate-400 whitespace-nowrap">
+                      {r.jobNo || '—'}{r.taskNo ? ` / ${r.taskNo}` : ''}
+                    </td>
+                    <td className="px-3 py-2 align-top text-slate-200 max-w-[300px]">
+                      <div className="truncate" title={r.desc}>{highlightHits(r.desc, r.incHits)}</div>
+                      <div className="flex flex-wrap gap-1 mt-0.5">
+                        {r.isDupe && <span className="text-[10px] text-slate-400">duplicate of job {r.jobNo}</span>}
+                        {r.doneConfirmed && <span className="text-[10px] text-emerald-400">complete in BC</span>}
+                        {r.combos.length > 0 && <span className="text-[10px] text-amber-400">held: {r.combos.map((c) => c.words.join('+')).join(', ')}</span>}
+                        {r.excHits.length > 0 && <span className="text-[10px] text-red-400">excluded: {r.excHits.join(', ')}</span>}
+                      </div>
+                      {r.warnings.map((w) => (
+                        <div key={w} className="text-[10px] text-amber-400 flex items-start gap-1 mt-0.5">
+                          <AlertTriangle size={10} className="mt-0.5 shrink-0" />{w}
+                        </div>
+                      ))}
+                    </td>
+                    <td className="px-3 py-2 align-top text-slate-400 text-xs max-w-[140px] truncate" title={r.customer}>{r.customer || '—'}</td>
+                    <td className="px-3 py-2 align-top text-slate-400 font-mono text-xs whitespace-nowrap">{r.value == null ? '—' : `$${Math.round(r.value).toLocaleString()}`}</td>
+                    <td className="px-3 py-2 align-top text-slate-400 text-xs">{r.qty == null ? '—' : r.qty}</td>
+                    <td className="px-3 py-2 align-top text-slate-400 text-xs whitespace-nowrap">{r.target ? fmtDate(r.target) : '—'}</td>
+                    <td className="px-3 py-2 align-top text-slate-400 text-xs max-w-[130px] truncate" title={r.status}>{r.status || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-between pt-4 mt-3 border-t border-slate-800">
+            <span className="text-xs text-slate-500">{selected.size} job{selected.size === 1 ? '' : 's'} ticked</span>
+            <div className="flex gap-2">
+              <button className={btnGhost} onClick={onClose}>Cancel</button>
+              <button
+                className={`${btnPrimary} disabled:opacity-40 disabled:cursor-not-allowed`}
+                disabled={selected.size === 0}
+                onClick={continueFromWip}
+              >
+                Next: set hours <ChevronRight size={14} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- step 3: review + assign templates ---------------- */}
+      {stage === 'review' && (
+        <div>
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <p className="text-xs text-slate-400">
+              {fileName} · {rows.length} job{rows.length === 1 ? '' : 's'}
               {dupCount > 0 && <span className="text-amber-400"> · {dupCount} look already imported (same BC job/task no.) — unchecked</span>}
               {invalidCount > 0 && <span className="text-red-400"> · {invalidCount} skipped (no name)</span>}
             </p>
-            <button
-              type="button"
-              className="text-xs text-amber-400 hover:underline"
-              onClick={() => { setRows(null); setFileName(''); setParseError(''); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-            >
-              Choose a different file
-            </button>
+            {parsed ? (
+              <button type="button" className="text-xs text-amber-400 hover:underline inline-flex items-center gap-1" onClick={() => setRows(null)}>
+                <ChevronLeft size={12} /> Back to the WIP review
+              </button>
+            ) : (
+              <button type="button" className="text-xs text-amber-400 hover:underline" onClick={resetFile}>Choose a different file</button>
+            )}
           </div>
 
           {templates.length > 0 && (
@@ -3026,7 +3417,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
           )}
 
           <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto max-h-[45vh] overflow-y-auto">
-            <table className="w-full text-sm min-w-[900px]">
+            <table className="w-full text-sm min-w-[860px]">
               <thead className="sticky top-0 bg-slate-900 z-10">
                 <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
                   <th className="px-3 py-2 font-medium"></th>
@@ -3062,7 +3453,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                     <td className="px-3 py-2 text-slate-400 font-mono">${Number(r.totalValue || 0).toLocaleString()}</td>
                     <td className="px-3 py-2">
                       <select
-                        className="bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
+                        className="w-[150px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
                         value={r.templateId || ''}
                         onChange={(e) => applyTemplateToRow(r._rowId, e.target.value)}
                       >
@@ -3072,7 +3463,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                     </td>
                     <td className="px-3 py-2">
                       <select
-                        className="bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
+                        className="w-[140px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
                         value={r.process}
                         onChange={(e) => updateRow(r._rowId, { process: e.target.value, templateId: null })}
                       >

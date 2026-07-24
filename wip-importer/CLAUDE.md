@@ -116,16 +116,25 @@ bcJobTaskNo, updatedAt, assignment`. Notable deliberate choices:
 If you change the scheduler's job shape, update this function to match, and vice
 versa. The two projects are coupled only through this JSON contract.
 
-## Downstream: the scheduler's import UI
+## Downstream: the scheduler now has this engine too
 
-The scheduler now has an "Import from WIP export" screen (`ImportJobsModal` in
-`scheduler/src/WeldingScheduler.jsx`) that reads the JSON this tool exports —
-either the `{ jobs: [...] }` wrapper this tool produces, or a bare array. It
-dedupes against existing jobs by `bcJobNo` + `bcJobTaskNo`, and lets the user
-assign a template per row (or bulk) to fill in the `process`/`hoursTotal` this
-tool deliberately leaves blank/zero. See `scheduler/CLAUDE.md` → "Importing
-jobs from the WIP importer". If you change `buildSchedulerJobs`'s output shape
-here, update that modal to match, and vice versa.
+**Important:** the scheduler can read a BC WIP `.xlsx` directly. This tool's
+engine — the XLSX reader, field detection, `analyse`, and
+`buildSchedulerJobs` — was ported into `scheduler/src/wipImport.js`, driven by
+`ImportJobsModal` in `scheduler/src/WeldingScheduler.jsx`. See
+`scheduler/CLAUDE.md` → "Importing jobs from a Business Central WIP export".
+That modal still also accepts the `{ jobs: [...] }` JSON this tool exports, so
+this tool remains a working path, not a dead one.
+
+**There are therefore two copies of the same logic, deliberately.** This file
+stays standalone because that is its whole value (email it, USB stick, no
+install); the scheduler's copy exists so the normal workflow is one tool, not
+two. They are not shared code and cannot be — see hard constraint 2.
+
+So: **a change to the matching, dedupe, completion or export logic here must be
+mirrored in `scheduler/src/wipImport.js`, and vice versa.** The behavioural
+rules above are reproduced there as comments for exactly this reason. Where
+they can drift silently, they will — check both when touching either.
 
 ## Testing
 

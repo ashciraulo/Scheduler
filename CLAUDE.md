@@ -17,25 +17,37 @@ A single self-contained, **offline**, zero-dependency HTML file that turns a
 Business Central WIP Excel export into a JSON file of jobs for the scheduler.
 No build step, no framework, no npm. See `wip-importer/CLAUDE.md`.
 
-These are intentionally different kinds of artifact. Do not try to fold the
-importer into the scheduler's build — its value is in being a standalone file
-that runs offline with nothing installed. Keep them separate.
+These are intentionally different kinds of artifact. The `.html` file must stay
+standalone — its value is in running offline with nothing installed. Don't fold
+it into the scheduler's build.
 
 ## How they connect
 
-The importer produces a JSON file whose job objects match the shape the
-scheduler consumes. That JSON is the only coupling between them. Both
-`CLAUDE.md` files describe this export contract; if you change the job shape in
-one, update the other.
+The everyday flow is now **one tool**:
 
-The end-to-end flow the user wants:
-`BC WIP export (.xlsx)` → **wip-importer** → `jobs (.json)` → **scheduler**.
+`BC WIP export (.xlsx)` → **scheduler** (Job Backlog → "Import from BC WIP
+export")
 
-This loop is now closed: the scheduler's Job Backlog tab has an "Import from
-WIP export" screen that reads the importer's JSON, dedupes against existing
-jobs, and lets the user assign a template per job to fill in the process/hours
-the importer can't know. See `scheduler/CLAUDE.md` → "Importing jobs from the
-WIP importer" for how it works and what to keep in sync.
+The scheduler reads BC's `.xlsx` directly: the importer's engine was ported to
+`scheduler/src/wipImport.js` (XLSX reader, keyword matching, dedupe, completion
+flagging, job building), driven by `ImportJobsModal`. The user picks the export,
+reviews what matched, assigns templates for the hours BC can't supply, and
+imports — no second tool, no file shuffling.
+
+The original path still works, for portability and for anyone already used to
+it:
+
+`BC WIP export (.xlsx)` → **wip-importer** → `jobs (.json)` → **scheduler**
+
+**The cost of this is two copies of the same logic**, which is accepted
+deliberately (the standalone file cannot import a module without losing the
+property that makes it worth having). A change to matching, dedupe, completion
+handling or the job shape in either place must be mirrored in the other:
+
+- `wip-importer/wip-importer.html` — `analyse`, `buildSchedulerJobs`
+- `scheduler/src/wipImport.js` — the same functions, same rules, commented
+
+Both `CLAUDE.md` files spell out the shared contract and the behavioural rules.
 
 ## Working here
 
@@ -43,8 +55,8 @@ WIP importer" for how it works and what to keep in sync.
   `CLAUDE.md` — especially the importer's hard constraints (offline, single-file,
   dependency-free).
 - Use Git branches and commit checkpoints before large changes.
-- The two projects don't share code or dependencies; a change in one usually
-  doesn't affect the other except through the JSON contract.
+- The two projects don't share code or dependencies. The couplings to watch are
+  the job shape and the duplicated WIP logic described above.
 
 ## Background
 

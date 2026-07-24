@@ -30,6 +30,7 @@ src/
   main.jsx            # entry; installs storage shim, mounts <App/>
   App.jsx             # renders <WeldingScheduler/>
   WeldingScheduler.jsx# the entire application (large; ~2000 lines)
+  wipImport.js        # BC .xlsx reader + keyword/dupe analysis (see below)
   storage.js          # localStorage-backed window.storage shim
   index.css           # Tailwind directives + dark base background
 tailwind.config.js
@@ -71,24 +72,56 @@ Top-to-bottom, the single component file contains:
    TemplatesView, ResourcesView, ReportsView.
 9. **Modals** — JobModal, ImportJobsModal, TemplateModal, EquipmentModal, StaffModal.
 
-## Importing jobs from the WIP importer
+## Importing jobs from a Business Central WIP export
 
-The Job Backlog tab has an "Import from WIP export" button (`ImportJobsModal`)
-that reads the JSON file produced by `wip-importer/wip-importer.html`. It
-accepts either `{ jobs: [...] }` (the importer's actual export shape) or a bare
-array, for robustness. Flow: pick file → preview table (one row per job,
-ticked by default) → optionally assign a Template per row (or bulk-apply one to
-all ticked rows without one), which fills in `process` and `hoursTotal` from
-the template's `hoursPerUnit`/`departmentValuePerUnit` × quantity — because the
-importer always exports `process: ''` and `hoursTotal: 0` (BC's WIP has no
-shop-floor hours) → click Import. Rows are matched against existing jobs by
-`bcJobNo` + `bcJobTaskNo` and flagged/unticked (not hidden) as probable
-duplicates if a match is found, so re-importing the same export doesn't create
-copies unless the user deliberately re-ticks them. Imported jobs get fresh
-`id`s and go through the normal `recompute`/scheduler pass like any other job.
-This is the "closes the loop" piece described in the workspace root
-`CLAUDE.md` — keep it in sync with `buildSchedulerJobs` in the importer if the
-job shape changes.
+The Job Backlog tab's "Import from BC WIP export" button (`ImportJobsModal`)
+reads BC's WIP **`.xlsx` directly** — the standalone importer's engine was
+ported into `src/wipImport.js`, so the user no longer has to run a second tool
+and carry a JSON file across. The old `.json` from
+`wip-importer/wip-importer.html` still works, so nobody's existing habit
+breaks.
+
+`src/wipImport.js` is pure logic, no UI: `parseXlsx` (ZIP-of-XML read with the
+browser-native `DecompressionStream` + `DOMParser` — **no SheetJS, no CDN, no
+network**, because WIP data is commercially sensitive), `FIELDS`/`autoMap`
+(header → logical field detection), `analyse` (keyword matching, duplicate
+detection, completion resolution, warnings, default tick set) and
+`buildSchedulerJobs` (the job-shape contract). Every behavioural rule in
+`wip-importer/CLAUDE.md` → "Behavioural rules that encode hard-won bug fixes"
+applies here verbatim and is commented in place — BC's `0` = empty date, the
+untrusted Actual Completion Date, keyword matching on `Description` only,
+whole-word combination rules, duplicate-keeper scoring, nothing dropped
+silently. Don't regress them.
+
+The modal is three steps:
+
+1. **Pick a file** — `.xlsx` (BC export) or `.json` (standalone importer).
+2. **WIP review** (`.xlsx` only) — counts, the include/exclude keyword chip
+   editors, a collapsible column-mapping panel, and Ours / Not matched /
+   Duplicates / All row views with search. Keyword hits are highlighted in the
+   description so it's obvious *why* a row matched. Changing a keyword or a
+   mapping re-analyses and resets the ticks to the new default selection, same
+   as the standalone tool. Only ticked rows go on.
+3. **Set hours** — the same review table both sources land on: assign a
+   Template per row (or bulk-apply one to all ticked rows without one), which
+   fills `process` and `hoursTotal` from `hoursPerUnit`/
+   `departmentValuePerUnit` × quantity. Neither source carries shop-floor
+   hours (BC's WIP has none), so both arrive with `process: ''` and
+   `hoursTotal: 0`.
+
+Rows are matched against existing jobs by `bcJobNo` + `bcJobTaskNo` and
+flagged/unticked (not hidden) as probable duplicates, so re-importing the same
+export doesn't create copies unless the user deliberately re-ticks them.
+Imported jobs get fresh `id`s and go through the normal `recompute`/scheduler
+pass like any other job.
+
+The keyword lists persist under `wf_wipsettings`; **the WIP data itself is
+never written to storage** — it lives in component state and is gone when the
+modal closes. Keep that property.
+
+If the job shape changes, update `buildSchedulerJobs` in *both*
+`src/wipImport.js` and `wip-importer/wip-importer.html` — the standalone tool
+is still shipped and its JSON must keep landing identically.
 
 ### Scheduling invariants (don't break these)
 
@@ -218,7 +251,8 @@ When the user wants real shared/live data:
   same `get/set/delete/list` async interface so nothing else changes.
 - Consider websockets / polling so the workshop monitor updates live.
 - Data keys currently used: `wf_equipment`, `wf_staff`, `wf_templates`,
-  `wf_processes`, `wf_jobs` (each a JSON blob).
+  `wf_processes`, `wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`,
+  `wf_wipsettings` (each a JSON blob).
 
 ## Future: Business Central integration (not built yet)
 
