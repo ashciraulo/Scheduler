@@ -2,12 +2,82 @@
 @tailwind components;
 @tailwind utilities;
 
-/* The app uses a dark slate theme; set the page background so there is no
-   white flash before React mounts and so overscroll areas match the UI. */
 html, body, #root {
   height: 100%;
 }
 body {
   margin: 0;
-  background-color: #020617; /* slate-950 */
+  background-color: #EDEEF0; /* light company page background */
 }
+
+/* ===== Company light theme (coral #E0523C, navy #253646, teal #00857C) =====
+   The app is written with dark-slate + amber Tailwind utility classes; rather
+   than rewrite every className, this remaps the used colour utilities to a
+   light, calculator-style palette that sits naturally inside SharePoint.
+   Coral = primary action & highlight, navy = text/dark surfaces, teal =
+   secondary accent. */
+.bg-slate-950 { background-color: #EDEEF0 !important; }
+.bg-slate-900 { background-color: #FFFFFF !important; }
+.bg-slate-800 { background-color: #EAECEF !important; }
+.bg-slate-700 { background-color: #DCDFE4 !important; }
+.bg-slate-800\/50 { background-color: #EEF0F2 !important; }
+.bg-slate-800\/60 { background-color: #EEF0F2 !important; }
+.bg-slate-900\/60 { background-color: rgba(255, 255, 255, 0.7) !important; }
+.bg-slate-950\/40 { background-color: #E6E8EB !important; }
+.bg-slate-950\/70 { background-color: #E9EBEE !important; }
+.bg-slate-950\/95 { background-color: rgba(246, 247, 248, 0.95) !important; }
+.bg-amber-500 { background-color: #E0523C !important; }
+.bg-amber-500\/10 { background-color: #FBEEEB !important; }
+.bg-amber-500\/20 { background-color: #F7DED8 !important; }
+.bg-amber-950\/20 { background-color: #FBF1EE !important; }
+.bg-emerald-900\/40 { background-color: #E5F0EA !important; }
+.bg-red-950 { background-color: #F7E4E2 !important; }
+.bg-red-950\/40 { background-color: #FAECEA !important; }
+.bg-sky-500 { background-color: #253646 !important; }
+.bg-orange-500 { background-color: #00857C !important; }
+.accent-amber-500 { accent-color: #E0523C !important; }
+.text-slate-100 { color: #1C2128 !important; }
+.text-slate-200 { color: #253646 !important; }
+.text-slate-300 { color: #39434F !important; }
+.text-slate-400 { color: #5A6472 !important; }
+.text-slate-500 { color: #7C8694 !important; }
+.text-slate-600 { color: #9AA3AF !important; }
+.text-slate-950 { color: #FFFFFF !important; }
+.text-amber-500 { color: #E0523C !important; }
+.text-amber-400 { color: #E0523C !important; }
+.text-amber-300 { color: #BE4632 !important; }
+.text-amber-200 { color: #BE4632 !important; }
+.text-amber-500\/80 { color: rgba(224, 82, 60, 0.85) !important; }
+.text-emerald-400 { color: #2F7D4F !important; }
+.text-emerald-300 { color: #2F7D4F !important; }
+.text-red-400 { color: #B23A34 !important; }
+.text-red-300 { color: #B23A34 !important; }
+.text-orange-400 { color: #00857C !important; }
+.text-sky-400 { color: #253646 !important; }
+.border-slate-800 { border-color: #DBDEE3 !important; }
+.border-slate-700 { border-color: #CBD0D7 !important; }
+.border-slate-600 { border-color: #B4BAC2 !important; }
+.border-slate-800\/40 { border-color: #E6E8EB !important; }
+.border-slate-800\/60 { border-color: #E1E4E8 !important; }
+.border-slate-800\/70 { border-color: #DBDEE3 !important; }
+.border-amber-500 { border-color: #E0523C !important; }
+.border-amber-600 { border-color: #E0523C !important; }
+.border-amber-700 { border-color: #BE4632 !important; }
+.border-amber-700\/50 { border-color: rgba(224, 82, 60, 0.5) !important; }
+.border-red-700 { border-color: #C34A44 !important; }
+.border-red-900 { border-color: #DBA39E !important; }
+.border-l-sky-500 { border-left-color: #253646 !important; }
+.border-l-orange-500 { border-left-color: #00857C !important; }
+.hover\:bg-amber-400:hover { background-color: #EC6450 !important; }
+.hover\:bg-red-900:hover { background-color: #F2D6D3 !important; }
+.hover\:bg-slate-700:hover { background-color: #DCDFE4 !important; }
+.hover\:bg-slate-800:hover { background-color: #EAECEF !important; }
+.hover\:bg-slate-900:hover { background-color: #F2F3F5 !important; }
+.hover\:bg-slate-800\/40:hover { background-color: #EEF0F2 !important; }
+.hover\:text-amber-300:hover { color: #BE4632 !important; }
+.hover\:text-emerald-300:hover { color: #2F7D4F !important; }
+.hover\:text-red-400:hover { color: #B23A34 !important; }
+.hover\:text-slate-200:hover { color: #253646 !important; }
+.focus\:border-amber-500:focus { border-color: #E0523C !important; }
+.focus\:ring-amber-500\/60:focus,
+.focus\:ring-amber-500:focus { --tw-ring-color: rgba(224, 82, 60, 0.5) !important; }
