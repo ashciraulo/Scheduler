@@ -94,10 +94,10 @@ const EQUIP_TYPES = ['Welding Robot', 'Thermal Spray Robot'];
 
 function seedEquipment() {
   return [
-    { id: 'eq_1', name: 'Weld Robot 1', type: 'Welding Robot', processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
-    { id: 'eq_2', name: 'Weld Robot 2', type: 'Welding Robot', processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
-    { id: 'eq_3', name: 'Weld Robot 3', type: 'Welding Robot', processes: ['Robotic MIG Welding'], unavailableDates: [], bcResourceNo: '' },
-    { id: 'eq_4', name: 'Weld Robot 4', type: 'Welding Robot', processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
+    { id: 'eq_1', name: 'Weld Robot 1', type: 'Welding Robot', tags: ['1T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
+    { id: 'eq_2', name: 'Weld Robot 2', type: 'Welding Robot', tags: ['5T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
+    { id: 'eq_3', name: 'Weld Robot 3', type: 'Welding Robot', tags: ['1T Positioner'], processes: ['Robotic MIG Welding'], unavailableDates: [], bcResourceNo: '' },
+    { id: 'eq_4', name: 'Weld Robot 4', type: 'Welding Robot', tags: ['5T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
     { id: 'eq_5', name: 'Thermal Spray Cell 1', type: 'Thermal Spray Robot', processes: ['Thermal Spray - HVOF', 'Thermal Spray - Plasma Spray'], unavailableDates: [], bcResourceNo: '' },
     { id: 'eq_6', name: 'Thermal Spray Cell 2', type: 'Thermal Spray Robot', processes: ['Thermal Spray - HVOF', 'Thermal Spray - Arc Spray'], unavailableDates: [], bcResourceNo: '' },
   ];
@@ -118,11 +118,11 @@ function seedStaff() {
 
 function seedTemplates() {
   return [
-    { id: 'tp_1', name: 'Bracket Weld - Standard', process: 'Robotic MIG Welding', hoursPerUnit: 0.5, equipmentIds: ['eq_1', 'eq_2', 'eq_3', 'eq_4'], totalValuePerUnit: 120, departmentValuePerUnit: 45 },
-    { id: 'tp_2', name: 'Chassis Frame Weld', process: 'Robotic TIG Welding', hoursPerUnit: 2, equipmentIds: ['eq_1', 'eq_2', 'eq_4'], totalValuePerUnit: 850, departmentValuePerUnit: 310 },
-    { id: 'tp_3', name: 'Hydraulic Shaft HVOF Coating', process: 'Thermal Spray - HVOF', hoursPerUnit: 1.5, equipmentIds: ['eq_5', 'eq_6'], totalValuePerUnit: 640, departmentValuePerUnit: 210 },
-    { id: 'tp_4', name: 'Turbine Blade Plasma Coat', process: 'Thermal Spray - Plasma Spray', hoursPerUnit: 3, equipmentIds: ['eq_5'], totalValuePerUnit: 2100, departmentValuePerUnit: 780 },
-    { id: 'tp_5', name: 'Wear Plate Arc Spray', process: 'Thermal Spray - Arc Spray', hoursPerUnit: 1, equipmentIds: ['eq_6'], totalValuePerUnit: 300, departmentValuePerUnit: 95 },
+    { id: 'tp_1', name: 'Bracket Weld - Standard', category: 'Brackets & Frames', tags: [], process: 'Robotic MIG Welding', hoursPerUnit: 0.5, equipmentIds: ['eq_1', 'eq_2', 'eq_3', 'eq_4'], totalValuePerUnit: 120, departmentValuePerUnit: 45 },
+    { id: 'tp_2', name: 'Chassis Frame Weld', category: 'Brackets & Frames', tags: ['5T Positioner'], process: 'Robotic TIG Welding', hoursPerUnit: 2, equipmentIds: ['eq_1', 'eq_2', 'eq_4'], totalValuePerUnit: 850, departmentValuePerUnit: 310 },
+    { id: 'tp_3', name: 'Hydraulic Shaft HVOF Coating', category: 'Shafts & Rollers', tags: [], process: 'Thermal Spray - HVOF', hoursPerUnit: 1.5, equipmentIds: ['eq_5', 'eq_6'], totalValuePerUnit: 640, departmentValuePerUnit: 210 },
+    { id: 'tp_4', name: 'Turbine Blade Plasma Coat', category: 'Turbine Components', tags: [], process: 'Thermal Spray - Plasma Spray', hoursPerUnit: 3, equipmentIds: ['eq_5'], totalValuePerUnit: 2100, departmentValuePerUnit: 780 },
+    { id: 'tp_5', name: 'Wear Plate Arc Spray', category: 'Wear Plates', tags: [], process: 'Thermal Spray - Arc Spray', hoursPerUnit: 1, equipmentIds: ['eq_6'], totalValuePerUnit: 300, departmentValuePerUnit: 95 },
   ];
 }
 
@@ -153,11 +153,161 @@ function mkJob({ name, process, quantity, hoursPerUnit, dueDate, readyDate = nul
     percentComplete: Number(percentComplete) || 0,
     status: 'active',
     completedDate: null,
+    tags: [],
+    procedureId: '',
     bcJobNo: '',
     bcJobTaskNo: '',
     updatedAt: new Date().toISOString(),
     assignment: null,
   };
+}
+
+/* ============================================================
+   COSTING MODEL — cost centres (shared capital) + procedures
+   (full per-hour cost breakdown), ported from the thermal-spray
+   cost calculator. A procedure's total $/hr costs a job:
+   cost = procedure $/hr × hours (actual once complete, else est).
+   ============================================================ */
+
+function seedCostCentres() {
+  return [
+    { id: 'cc_hvof_gas', name: 'HVOF (gas-fuel)', interestRate: 10, annualHours: 3800, assets: [
+      { name: 'HVOF gun system', capital: 180000, salvage: 15000, life: 20000 },
+      { name: 'Robot cell', capital: 220000, salvage: 20000, life: 40000 },
+      { name: 'Dust extraction', capital: 45000, salvage: 0, life: 30000 },
+    ] },
+    { id: 'cc_hvof_kero', name: 'HVOF (kerosene)', interestRate: 10, annualHours: 3800, assets: [
+      { name: 'HVOF gun system', capital: 195000, salvage: 15000, life: 20000 },
+      { name: 'Robot cell', capital: 220000, salvage: 20000, life: 40000 },
+      { name: 'Dust extraction', capital: 45000, salvage: 0, life: 30000 },
+    ] },
+    { id: 'cc_plasma', name: 'Atmospheric plasma', interestRate: 10, annualHours: 3800, assets: [
+      { name: 'Plasma gun + power supply', capital: 150000, salvage: 12000, life: 25000 },
+      { name: 'Robot cell', capital: 220000, salvage: 20000, life: 40000 },
+      { name: 'Dust extraction', capital: 45000, salvage: 0, life: 30000 },
+    ] },
+  ];
+}
+
+function seedProcedures() {
+  const note = 'Placeholder from cost calculator — edit or re-import with your real values.';
+  return [
+    { id: 'proc_wccocr', name: 'WC-CoCr 86/10/4 — hydraulic rod', process: 'Thermal Spray - HVOF', costCentreId: 'cc_hvof_gas', substrate: '17-4PH stainless', notes: note,
+      powder: { material: 'WC-CoCr 86/10/4', pricePerKg: 82, gPerMin: 83.33 },
+      gases: [
+        { name: 'Hydrogen (fuel)', role: 'primary', unit: 'm³', pricePerUnit: 8.5, lPerMin: 750 },
+        { name: 'Oxygen', role: 'secondary', unit: 'm³', pricePerUnit: 2.2, lPerMin: 300 },
+        { name: 'Nitrogen', role: 'carrier', unit: 'm³', pricePerUnit: 1.1, lPerMin: 50 },
+      ],
+      electricity: { kw: 85, tariff: 0.28 },
+      spares: [{ name: 'Nozzle', cost: 1250, life: 300 }, { name: 'Powder feeder wheel', cost: 340, life: 800 }, { name: 'O-ring / seal kit', cost: 65, life: 500 }],
+      maintenance: [{ name: 'Annual OEM service', cost: 12000, interval: 2000 }, { name: 'Robot calibration', cost: 1800, interval: 1000 }],
+      consumables: [{ name: 'Masking tape', costPerHour: 4.5 }, { name: 'Blasting grit', costPerHour: 6 }, { name: 'PPE / filters', costPerHour: 2.2 }],
+      labour: [{ name: 'Spray technician', rate: 55, count: 1 }, { name: 'Cell supervisor', rate: 72, count: 0.3 }],
+      qa: [{ name: 'Metallurgical coupon', costPerHour: 18 }, { name: 'CMM inspection', costPerHour: 9 }, { name: 'Documentation / cert', costPerHour: 6 }],
+    },
+    { id: 'proc_cr3c2', name: 'Cr₃C₂-NiCr — turbine shroud', process: 'Thermal Spray - HVOF', costCentreId: 'cc_hvof_kero', substrate: 'Inconel 718', notes: note,
+      powder: { material: 'Cr₃C₂-NiCr (WOKA 7202)', pricePerKg: 95, gPerMin: 75 },
+      gases: [
+        { name: 'Kerosene (fuel)', role: 'primary', unit: 'L', pricePerUnit: 1.6, lPerMin: 0.37 },
+        { name: 'Oxygen', role: 'secondary', unit: 'm³', pricePerUnit: 2.2, lPerMin: 916.67 },
+        { name: 'Nitrogen', role: 'carrier', unit: 'm³', pricePerUnit: 1.1, lPerMin: 50 },
+      ],
+      electricity: { kw: 90, tariff: 0.28 },
+      spares: [{ name: 'Combustion nozzle', cost: 1650, life: 250 }, { name: 'Spark plug', cost: 120, life: 400 }, { name: 'Powder feeder wheel', cost: 340, life: 800 }],
+      maintenance: [{ name: 'Annual OEM service', cost: 12000, interval: 2000 }],
+      consumables: [{ name: 'Masking', costPerHour: 5 }, { name: 'Blasting grit', costPerHour: 6.5 }, { name: 'PPE / filters', costPerHour: 2.2 }],
+      labour: [{ name: 'Spray technician', rate: 55, count: 1 }, { name: 'Cell supervisor', rate: 72, count: 0.3 }],
+      qa: [{ name: 'Metallurgical coupon', costPerHour: 22 }, { name: 'CMM inspection', costPerHour: 9 }, { name: 'Documentation / cert', costPerHour: 6 }],
+    },
+    { id: 'proc_nicraly', name: 'NiCrAlY bond coat — APS', process: 'Thermal Spray - Plasma Spray', costCentreId: 'cc_plasma', substrate: 'Various', notes: note,
+      powder: { material: 'NiCrAlY', pricePerKg: 120, gPerMin: 63.33 },
+      gases: [
+        { name: 'Argon', role: 'primary', unit: 'm³', pricePerUnit: 3.8, lPerMin: 60 },
+        { name: 'Hydrogen', role: 'secondary', unit: 'm³', pricePerUnit: 8.5, lPerMin: 15 },
+        { name: 'Argon', role: 'carrier', unit: 'm³', pricePerUnit: 3.8, lPerMin: 8.33 },
+      ],
+      electricity: { kw: 110, tariff: 0.28 },
+      spares: [{ name: 'Electrode (cathode)', cost: 480, life: 250 }, { name: 'Anode / nozzle', cost: 520, life: 250 }, { name: 'O-ring kit', cost: 65, life: 500 }],
+      maintenance: [{ name: 'Annual OEM service', cost: 10000, interval: 2000 }, { name: 'Robot calibration', cost: 1800, interval: 1000 }],
+      consumables: [{ name: 'Masking', costPerHour: 4 }, { name: 'Blasting grit', costPerHour: 6 }, { name: 'PPE / filters', costPerHour: 2.2 }],
+      labour: [{ name: 'Spray technician', rate: 55, count: 1 }, { name: 'Cell supervisor', rate: 72, count: 0.3 }],
+      qa: [{ name: 'Metallurgical coupon', costPerHour: 18 }, { name: 'Bond strength test (amortised)', costPerHour: 12 }, { name: 'Documentation / cert', costPerHour: 6 }],
+    },
+  ];
+}
+
+const fmtMoney = (n) => '$' + (Math.round((Number(n) || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Gas flow → units/hr. Priced per m³ with flow L/min → m³/hr = L/min × 0.06;
+// priced per litre of liquid (unit 'L', e.g. kerosene) → L/hr = L/min × 60.
+function gasUnitsHr(g) {
+  return String((g && g.unit) || '').trim().toUpperCase() === 'L' ? (Number(g.lPerMin) || 0) * 60 : (Number(g.lPerMin) || 0) * 0.06;
+}
+// Cost centre → $/hr: straight-line depreciation + interest on average capital.
+function costCentrePerHr(cc) {
+  if (!cc) return 0;
+  const hrs = Number(cc.annualHours) || 0;
+  return (cc.assets || []).reduce((s, r) => {
+    const dep = Number(r.life) > 0 ? ((Number(r.capital) || 0) - (Number(r.salvage) || 0)) / Number(r.life) : 0;
+    const interest = hrs > 0 ? ((Number(cc.interestRate) || 0) / 100) * ((Number(r.capital) || 0) + (Number(r.salvage) || 0)) / 2 / hrs : 0;
+    return s + dep + interest;
+  }, 0);
+}
+// Procedure → per-category and total $/hr.
+function procedureParts(p, costCentres) {
+  if (!p) return { powder: 0, gas: 0, electricity: 0, spares: 0, maintenance: 0, consumables: 0, depreciation: 0, labour: 0, qa: 0, total: 0 };
+  const pw = p.powder || {}, el = p.electricity || {};
+  const cc = (costCentres || []).find((c) => c.id === p.costCentreId);
+  const t = {};
+  t.powder = (Number(pw.pricePerKg) || 0) * ((Number(pw.gPerMin) || 0) * 0.06);
+  t.gas = (p.gases || []).reduce((s, g) => s + (Number(g.pricePerUnit) || 0) * gasUnitsHr(g), 0);
+  t.electricity = (Number(el.kw) || 0) * (Number(el.tariff) || 0);
+  t.spares = (p.spares || []).reduce((s, r) => s + (Number(r.life) > 0 ? (Number(r.cost) || 0) / Number(r.life) : 0), 0);
+  t.maintenance = (p.maintenance || []).reduce((s, r) => s + (Number(r.interval) > 0 ? (Number(r.cost) || 0) / Number(r.interval) : 0), 0);
+  t.consumables = (p.consumables || []).reduce((s, r) => s + (Number(r.costPerHour) || 0), 0);
+  t.depreciation = costCentrePerHr(cc);
+  t.labour = (p.labour || []).reduce((s, r) => s + (Number(r.rate) || 0) * (Number(r.count) || 0), 0);
+  t.qa = (p.qa || []).reduce((s, r) => s + (Number(r.costPerHour) || 0), 0);
+  t.total = t.powder + t.gas + t.electricity + t.spares + t.maintenance + t.consumables + t.depreciation + t.labour + t.qa;
+  return t;
+}
+const procedureCost = (p, costCentres) => procedureParts(p, costCentres).total;
+// Hours used to cost a job: actual once complete, otherwise the estimate.
+const jobHoursForCost = (j) => (j && j.status === 'complete' && Number(j.actualHours) > 0 ? Number(j.actualHours) : Number((j && j.hoursTotal) || 0));
+function jobCost(j, procedures, costCentres) {
+  if (!j || !j.procedureId) return null;
+  const p = (procedures || []).find((x) => x.id === j.procedureId);
+  if (!p) return null;
+  return procedureCost(p, costCentres) * jobHoursForCost(j);
+}
+// Map a cost-calculator spec's process string onto one of the scheduler's processes.
+function mapImportProcess(str, schedProcesses) {
+  const s = String(str || '').toLowerCase();
+  if (!schedProcesses || !schedProcesses.length) return '';
+  const hit = schedProcesses.find((pr) => s.includes(String(pr).toLowerCase()));
+  if (hit) return hit;
+  if (s.includes('hvof')) return schedProcesses.find((pr) => /hvof/i.test(pr)) || '';
+  if (s.includes('plasma') || s.includes('aps')) return schedProcesses.find((pr) => /plasma/i.test(pr)) || '';
+  if (s.includes('arc')) return schedProcesses.find((pr) => /arc/i.test(pr)) || '';
+  return '';
+}
+// Parse the cost calculator's "Export specs" JSON ({format,version,processes,specs}).
+function parseCostingImport(data, schedProcesses) {
+  const rawSpecs = Array.isArray(data) ? data : (data && Array.isArray(data.specs) ? data.specs : null);
+  if (!rawSpecs) return null;
+  const rawProcs = (data && Array.isArray(data.processes)) ? data.processes : [];
+  const costCentres = rawProcs.map((p) => ({
+    id: p.id || uid('cc'), name: p.name || '', interestRate: Number(p.interestRate) || 0, annualHours: Number(p.annualHours) || 0,
+    assets: (Array.isArray(p.assets) ? p.assets : (Array.isArray(p.depreciation) ? p.depreciation : [])).map((r) => ({ name: r.name || '', capital: Number(r.capital) || 0, salvage: Number(r.salvage) || 0, life: Number(r.life) || 0 })),
+  }));
+  const procedures = rawSpecs.map((s) => ({
+    id: s.id || uid('proc'), name: s.name || '', process: mapImportProcess(s.process || s.name, schedProcesses), costCentreId: s.processId || s.costCentreId || '', substrate: s.substrate || '', notes: s.notes || '',
+    powder: s.powder || { material: '', pricePerKg: 0, gPerMin: 0 }, gases: Array.isArray(s.gases) ? s.gases : [], electricity: s.electricity || { kw: 0, tariff: 0 },
+    spares: Array.isArray(s.spares) ? s.spares : [], maintenance: Array.isArray(s.maintenance) ? s.maintenance : [], consumables: Array.isArray(s.consumables) ? s.consumables : [],
+    labour: Array.isArray(s.labour) ? s.labour : [], qa: Array.isArray(s.qa) ? s.qa : [],
+  }));
+  return { costCentres, procedures };
 }
 
 function uid(prefix = 'id') {
@@ -346,6 +496,35 @@ function consume(plan, equipId, jobId, days, equipDayLock, equipShiftUsed, staff
   });
 }
 
+// A job schedules on a piece of equipment only if the equipment carries every
+// capability tag the job requires (e.g. a positioner load rating). Untagged
+// jobs run anywhere their process allows, exactly as before.
+function tagOk(job, equip) {
+  const need = job.tags || [];
+  return !need.length || need.every((t) => (equip.tags || []).includes(t));
+}
+
+// Human-readable reason a job couldn't be auto-placed, shown on its
+// "Needs scheduling" card. Checked in order of severity.
+function whyUnscheduled(job, equipment, staff, days) {
+  if (!(job.hoursTotal > 0.001)) return 'no hours set on this job yet — add hours (or a template) so it can be scheduled';
+  const runsProcess = equipment.filter((e) => e.processes.includes(job.process));
+  if (!runsProcess.length) return `no equipment runs ${job.process}`;
+  const need = job.tags || [];
+  if (need.length) {
+    const ok = runsProcess.filter((e) => tagOk(job, e));
+    if (!ok.length) {
+      const missing = need.filter((t) => !runsProcess.some((e) => (e.tags || []).includes(t)));
+      return missing.length
+        ? `no equipment running ${job.process} has: ${missing.join(', ')}`
+        : `no single ${job.process} system has all of: ${need.join(', ')}`;
+    }
+  }
+  if (!staff.filter((s) => s.processes.includes(job.process)).length) return `no staff can run ${job.process}`;
+  if (job.readyDate && job.readyDate > days[days.length - 1]) return `not ready until ${fmtDate(job.readyDate)} — beyond the schedule horizon`;
+  return `no free equipment/staff capacity in the horizon for ${job.hoursTotal}h`;
+}
+
 function runScheduler(jobsIn, equipment, staff, days) {
   const order = jobsIn.map((j) => j.id);
 
@@ -444,12 +623,12 @@ function runScheduler(jobsIn, equipment, staff, days) {
   const exclusiveDemand = {};
   equipment.forEach((e) => { exclusiveDemand[e.id] = 0; });
   unpinned.forEach((j) => {
-    const compat = equipment.filter((e) => e.processes.includes(j.process));
+    const compat = equipment.filter((e) => e.processes.includes(j.process) && tagOk(j, e));
     if (compat.length === 1) exclusiveDemand[compat[0].id] += 1;
   });
 
   unpinned.forEach((job) => {
-    const compatibleEquip = equipment.filter((e) => e.processes.includes(job.process));
+    const compatibleEquip = equipment.filter((e) => e.processes.includes(job.process) && tagOk(job, e));
     const compatibleStaffIds = staff.filter((s) => s.processes.includes(job.process)).map((s) => s.id);
     let best = null;
     let floorIdx = 0;
@@ -505,6 +684,7 @@ function runScheduler(jobsIn, equipment, staff, days) {
       };
     } else {
       job.assignment = null;
+      job.unschedReason = whyUnscheduled(job, equipment, staff, days);
     }
   });
 
@@ -531,6 +711,7 @@ function runScheduler(jobsIn, equipment, staff, days) {
       percentComplete: unit.percentComplete,
       status: unit.status,
       assignment: unit.assignment,
+      unschedReason: unit.unschedReason,
     };
   });
   collapsedByParent.forEach((collapsed) => {
