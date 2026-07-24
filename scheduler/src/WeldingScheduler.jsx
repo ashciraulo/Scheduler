@@ -1687,6 +1687,7 @@ function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit
         <table className="w-full text-sm min-w-[760px]">
           <thead>
             <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+              <th className="px-3 py-2 font-medium">Job #</th>
               <th className="px-3 py-2 font-medium">Job</th>
               <th className="px-3 py-2 font-medium">Process</th>
               <th className="px-3 py-2 font-medium">Qty</th>
@@ -1712,6 +1713,7 @@ function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit
               const scheduledParts = isSplit ? j.parts.filter((p) => p.assignment || p.status === 'complete').length : 0;
               return (
                 <tr key={j.id} className="border-b border-slate-800/60 hover:bg-slate-800/40">
+                  <td className="px-3 py-2 font-mono text-xs text-slate-400 whitespace-nowrap cursor-pointer" onClick={() => onEdit(j)}>{j.bcJobNo || '—'}</td>
                   <td className="px-3 py-2 font-medium text-slate-200 cursor-pointer" onClick={() => onEdit(j)}>
                     <span className="flex items-center gap-1.5">
                       {j.name}
@@ -1763,7 +1765,7 @@ function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit
               );
             })}
             {sorted.length === 0 && (
-              <tr><td colSpan={11} className="px-3 py-8 text-center text-slate-600 text-sm">No jobs in this view.</td></tr>
+              <tr><td colSpan={13} className="px-3 py-8 text-center text-slate-600 text-sm">No jobs in this view.</td></tr>
             )}
           </tbody>
         </table>
@@ -1776,6 +1778,16 @@ function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit
    TEMPLATES VIEW
    ============================================================ */
 
+// Group templates by category (untitled → "Uncategorised"), sorted by name.
+function groupTemplatesByCategory(templates) {
+  const map = {};
+  templates.forEach((t) => {
+    const key = t.category || 'Uncategorised';
+    (map[key] = map[key] || []).push(t);
+  });
+  return Object.keys(map).sort().map((k) => [k, map[k]]);
+}
+
 function TemplatesView({ templates, equipment, processes, readOnly, onAdd, onEdit, onDelete, onSaveProcesses }) {
   const [newProcess, setNewProcess] = useState('');
   return (
@@ -1785,29 +1797,39 @@ function TemplatesView({ templates, equipment, processes, readOnly, onAdd, onEdi
           <h2 className="text-lg font-bold text-slate-100">Job templates</h2>
           {!readOnly && <button className={btnPrimary} onClick={onAdd}><Plus size={15} /> New template</button>}
         </div>
-        <div className="grid sm:grid-cols-2 gap-3">
-          {templates.map((t) => (
-            <div key={t.id} className="border border-slate-800 bg-slate-900 rounded-lg p-4">
-              <div className="flex items-start justify-between gap-2">
-                <h3 className="font-semibold text-slate-100 text-sm">{t.name}</h3>
-                {!readOnly && (
-                  <div className="flex gap-1 shrink-0">
-                    <button onClick={() => onEdit(t)} className="p-1 rounded hover:bg-slate-700 text-slate-400"><Pencil size={13} /></button>
-                    <button onClick={() => onDelete(t)} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
+        {groupTemplatesByCategory(templates).map(([category, group]) => (
+          <div key={category} className="mb-4">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">{category} ({group.length})</div>
+            <div className="grid sm:grid-cols-2 gap-3">
+              {group.map((t) => (
+                <div key={t.id} className="border border-slate-800 bg-slate-900 rounded-lg p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="font-semibold text-slate-100 text-sm">{t.name}</h3>
+                    {!readOnly && (
+                      <div className="flex gap-1 shrink-0">
+                        <button onClick={() => onEdit(t)} className="p-1 rounded hover:bg-slate-700 text-slate-400"><Pencil size={13} /></button>
+                        <button onClick={() => onDelete(t)} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-              <p className="text-xs text-slate-500 mt-1">{t.process}</p>
-              <p className="text-xs text-slate-400 mt-2">{t.hoursPerUnit}h per unit</p>
-              <div className="flex flex-wrap gap-1 mt-2">
-                {t.equipmentIds.map((id) => {
-                  const eq = equipment.find((e) => e.id === id);
-                  return eq ? <span key={id} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{eq.name}</span> : null;
-                })}
-              </div>
+                  <p className="text-xs text-slate-500 mt-1">{t.process}</p>
+                  <p className="text-xs text-slate-400 mt-2">{t.hoursPerUnit}h per unit</p>
+                  {(t.tags || []).length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {t.tags.map((tag) => <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">{tag}</span>)}
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {t.equipmentIds.map((id) => {
+                      const eq = equipment.find((e) => e.id === id);
+                      return eq ? <span key={id} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{eq.name}</span> : null;
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
       </div>
       <div>
         <h2 className="text-lg font-bold text-slate-100 mb-4">Welding &amp; coating processes</h2>
