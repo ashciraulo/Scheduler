@@ -2651,24 +2651,73 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
    TEMPLATE MODAL
    ============================================================ */
 
-function TemplateModal({ template, equipment, processes, onClose, onSave }) {
+// Shared chip editor for capability tags: type to add (Enter or the Add
+// button), click × to remove, with datalist suggestions to keep spellings
+// consistent across equipment/templates/jobs.
+function TagEditor({ value, onChange, suggestions }) {
+  const [input, setInput] = useState('');
+  const add = () => { const t = input.trim(); if (t && !value.includes(t)) onChange([...value, t]); setInput(''); };
+  return (
+    <div>
+      {value.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {value.map((t) => (
+            <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 flex items-center gap-1">
+              {t}
+              <button type="button" className="text-slate-500 hover:text-red-400" onClick={() => onChange(value.filter((x) => x !== t))}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input className={inputCls} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} list="cap-tags" placeholder="e.g. 1T Positioner, 5T Positioner…" />
+        <button type="button" className={btnGhost} onClick={add}>Add</button>
+      </div>
+      <datalist id="cap-tags">{(suggestions || []).filter((x) => !value.includes(x)).map((x) => <option key={x} value={x} />)}</datalist>
+    </div>
+  );
+}
+
+function TemplateModal({ template, equipment, processes, procedures = [], costCentres = [], allTags = [], categorySuggestions = [], onClose, onSave }) {
   const isNew = !template;
   const [name, setName] = useState(template?.name || '');
+  const [category, setCategory] = useState(template?.category || '');
+  const [tags, setTags] = useState(template?.tags || []);
   const [process, setProcess] = useState(template?.process || processes[0] || '');
+  const [procedureId, setProcedureId] = useState(template?.procedureId || '');
   const [hoursPerUnit, setHoursPerUnit] = useState(template?.hoursPerUnit ?? 1);
   const [equipmentIds, setEquipmentIds] = useState(template?.equipmentIds || []);
   const [totalValuePerUnit, setTotalValuePerUnit] = useState(template?.totalValuePerUnit ?? '');
   const [departmentValuePerUnit, setDepartmentValuePerUnit] = useState(template?.departmentValuePerUnit ?? '');
 
   const compatibleEquip = equipment.filter((e) => e.processes.includes(process));
+  const procsForProcess = procedures.filter((p) => p.process === process);
 
   return (
     <Modal title={isNew ? 'New template' : 'Edit template'} onClose={onClose}>
       <Field label="Template name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+      <Field label="Category">
+        <input className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)} list="tpl-cats" placeholder="e.g. Nozzle Inserts, Elbows / Spools, Valves" />
+        <datalist id="tpl-cats">{[...new Set(categorySuggestions)].filter(Boolean).sort().map((c) => <option key={c} value={c} />)}</datalist>
+      </Field>
       <Field label="Process">
-        <select className={inputCls} value={process} onChange={(e) => { setProcess(e.target.value); setEquipmentIds([]); }}>
+        <select className={inputCls} value={process} onChange={(e) => {
+          const nv = e.target.value; setProcess(nv); setEquipmentIds([]);
+          const fm = procedures.filter((p) => p.process === nv);
+          setProcedureId(fm.some((p) => p.id === procedureId) ? procedureId : (fm[0] ? fm[0].id : ''));
+        }}>
           {processes.map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
+      </Field>
+      <Field label="Procedure (sets hourly cost)">
+        <select className={inputCls} value={procedureId} onChange={(e) => setProcedureId(e.target.value)}>
+          <option value="">— none —</option>
+          {procsForProcess.map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p, costCentres))}/hr</option>)}
+        </select>
+      </Field>
+      <Field label="Capability requirements (optional)">
+        <TagEditor value={tags} onChange={setTags} suggestions={allTags} />
+        <p className="text-xs text-slate-500 mt-1">Jobs from this template only schedule on equipment carrying every tag — e.g. a positioner load rating.</p>
       </Field>
       <Field label="Hours per unit"><input type="number" min={0.1} step={0.1} className={inputCls} value={hoursPerUnit} onChange={(e) => setHoursPerUnit(e.target.value)} /></Field>
       <div className="grid grid-cols-2 gap-3">
@@ -2694,7 +2743,10 @@ function TemplateModal({ template, equipment, processes, onClose, onSave }) {
           onClick={() => onSave({
             id: template?.id || uid('tpl'),
             name: name.trim() || 'Untitled template',
+            category: category.trim(),
+            tags,
             process,
+            procedureId,
             hoursPerUnit: Number(hoursPerUnit) || 1,
             equipmentIds: equipmentIds.length ? equipmentIds : compatibleEquip.map((e) => e.id),
             totalValuePerUnit: totalValuePerUnit === '' ? null : Number(totalValuePerUnit),
@@ -2710,11 +2762,12 @@ function TemplateModal({ template, equipment, processes, onClose, onSave }) {
    EQUIPMENT MODAL
    ============================================================ */
 
-function EquipmentModal({ item, processes, onClose, onSave }) {
+function EquipmentModal({ item, processes, allTags = [], onClose, onSave }) {
   const isNew = !item;
   const [name, setName] = useState(item?.name || '');
   const [type, setType] = useState(item?.type || EQUIP_TYPES[0]);
   const [procs, setProcs] = useState(item?.processes || []);
+  const [tags, setTags] = useState(item?.tags || []);
   const [bcResourceNo, setBcResourceNo] = useState(item?.bcResourceNo || '');
 
   return (
@@ -2728,6 +2781,10 @@ function EquipmentModal({ item, processes, onClose, onSave }) {
       <Field label="Processes it can run">
         <MultiCheck options={processes} value={procs} onChange={setProcs} />
       </Field>
+      <Field label="Capability tags (optional)">
+        <TagEditor value={tags} onChange={setTags} suggestions={allTags} />
+        <p className="text-xs text-slate-500 mt-1">What this system is fitted with — jobs requiring a tag only schedule on equipment that has it.</p>
+      </Field>
       <Field label="Business Central Resource No. (optional)">
         <input className={inputCls} value={bcResourceNo} onChange={(e) => setBcResourceNo(e.target.value)} placeholder="e.g. EQ-ROBOT-01" />
       </Field>
@@ -2735,7 +2792,7 @@ function EquipmentModal({ item, processes, onClose, onSave }) {
         <button className={btnGhost} onClick={onClose}>Cancel</button>
         <button
           className={btnPrimary}
-          onClick={() => onSave({ id: item?.id || uid('eq'), name: name.trim() || 'Untitled', type, processes: procs, unavailableDates: item?.unavailableDates || [], bcResourceNo: bcResourceNo.trim() })}
+          onClick={() => onSave({ id: item?.id || uid('eq'), name: name.trim() || 'Untitled', type, tags, processes: procs, unavailableDates: item?.unavailableDates || [], bcResourceNo: bcResourceNo.trim() })}
         ><Check size={14} /> Save</button>
       </div>
     </Modal>
