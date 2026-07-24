@@ -77,17 +77,25 @@ can still have thrown.
   equipment, 7 staff — expect them in screenshots/assertions unless storage
   was pre-populated.
 
-## wip-importer/ — single offline HTML file
+## Testing the BC WIP import
 
-No dev server, no build. Open the file directly:
+The standalone `wip-importer.html` is retired; its engine is now
+`scheduler/src/wipImport.js`, reached from Job Backlog → "Import from BC WIP
+export". Test it through the app like any other feature.
 
-```bash
-xdg-open /path/to/wip-importer/wip-importer.html   # or a browser's file:// URL
-```
+You need a `.xlsx` to drive it, and real WIP exports must never be committed
+(`*.xlsx` is gitignored). Generate a throwaway one in the scratchpad with
+Python's `zipfile` — an `.xlsx` is just a ZIP of XML, so no library is needed.
+Worth reproducing BC's quirks, since they're what the parser exists to handle:
+namespace-prefixed tags (`<x:row>`, `<x:c>`), **no** `r=` attributes on rows or
+cells, empty dates written as the serial `0`, a repeated Job No., and a
+completion date on a row whose status says it hasn't started.
 
-To drive it headlessly with Playwright, `page.goto('file:///…/wip-importer.html')`
-works the same way as the scheduler steps above (same locator/gotcha notes
-apply). After any change here, also grep for `http`/`fetch(`/`XMLHttpRequest`
-per `wip-importer/CLAUDE.md`'s offline requirement — driving it with a browser
-won't itself catch a network dependency that only fires on a code path you
-didn't exercise.
+Scope Playwright locators to the modal — `page.locator('div.fixed.inset-0 >
+div')` — or `table tbody tr` and `button:has-text("Import")` will also match the
+Job Backlog table and buttons behind the overlay, which silently gives you the
+wrong element (or a click that the overlay intercepts until it times out).
+
+After changes, confirm no request leaves the origin: the spreadsheet is parsed
+in-browser and must never be uploaded.
+`page.on('request', r => …)` asserting every URL is same-origin catches it.

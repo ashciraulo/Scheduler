@@ -75,23 +75,29 @@ Top-to-bottom, the single component file contains:
 ## Importing jobs from a Business Central WIP export
 
 The Job Backlog tab's "Import from BC WIP export" button (`ImportJobsModal`)
-reads BC's WIP **`.xlsx` directly** — the standalone importer's engine was
-ported into `src/wipImport.js`, so the user no longer has to run a second tool
-and carry a JSON file across. The old `.json` from
-`wip-importer/wip-importer.html` still works, so nobody's existing habit
-breaks.
+reads BC's WIP **`.xlsx` directly**, via `src/wipImport.js`. The `.json`
+produced by the old standalone importer is still accepted so existing exports
+keep working, but that tool has been **retired** — `wipImport.js` is now the
+only copy of this logic. (See the workspace root `CLAUDE.md`; the tool is in
+git history if it's ever wanted back.)
 
 `src/wipImport.js` is pure logic, no UI: `parseXlsx` (ZIP-of-XML read with the
 browser-native `DecompressionStream` + `DOMParser` — **no SheetJS, no CDN, no
 network**, because WIP data is commercially sensitive), `FIELDS`/`autoMap`
 (header → logical field detection), `analyse` (keyword matching, duplicate
 detection, completion resolution, warnings, default tick set) and
-`buildSchedulerJobs` (the job-shape contract). Every behavioural rule in
-`wip-importer/CLAUDE.md` → "Behavioural rules that encode hard-won bug fixes"
-applies here verbatim and is commented in place — BC's `0` = empty date, the
-untrusted Actual Completion Date, keyword matching on `Description` only,
-whole-word combination rules, duplicate-keeper scoring, nothing dropped
-silently. Don't regress them.
+`buildSchedulerJobs` (the job-shape contract).
+
+**The rules commented through that file each fixed a real bug against real BC
+output — don't regress them:** BC writes an empty date as serial `0` (which
+naively converts to a truthy "1899-12-30"); BC's Actual Completion Date is not
+trusted on its own and only counts as complete alongside a corroborating
+status; rows may omit `r=` attributes and use namespace-prefixed tags like
+`<x:row>`; keywords match on `Description` only (Job Task Description holds WIP
+progress text like "WIP 50%"); combination rules match whole words; the
+duplicate-keeper score ignores the completion-date column; and nothing is ever
+dropped silently — duplicates, held and complete rows stay visible and
+tickable, only the default *selection* changes.
 
 The modal is three steps:
 
@@ -119,9 +125,9 @@ The keyword lists persist under `wf_wipsettings`; **the WIP data itself is
 never written to storage** — it lives in component state and is gone when the
 modal closes. Keep that property.
 
-If the job shape changes, update `buildSchedulerJobs` in *both*
-`src/wipImport.js` and `wip-importer/wip-importer.html` — the standalone tool
-is still shipped and its JSON must keep landing identically.
+`buildSchedulerJobs` is the job-shape contract: if the job shape changes,
+update it too, and check `toReviewRows` in the modal still reads old `.json`
+exports sensibly.
 
 ### Scheduling invariants (don't break these)
 

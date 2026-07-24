@@ -1,20 +1,20 @@
-WELDCELL SCHEDULER + WIP IMPORTER
-==================================
+WELDCELL SCHEDULER
+==================
 
-The scheduler can now be shared across computers on your local network, so
-a planner and everyone viewing the schedule all see the same live data.
-The WIP importer is still a standalone, fully-offline tool.
+The scheduler is shared across computers on your local network, so a
+planner and everyone viewing the schedule all see the same live data.
 
 
 WHAT'S IN HERE
 --------------
 
-wip-importer.html      The WIP importer. Just double-click it — it opens
-                        in your browser directly, no setup needed. This tool
-                        stays fully offline and never makes network calls.
-
 scheduler/              The scheduler app. This is "served" from one PC and
                         opened from any computer on the network (see below).
+
+The separate WIP importer tool is no longer needed and is no longer
+included: the scheduler now reads the Business Central WIP .xlsx export
+itself, under Job Backlog > "Import from BC WIP export". Your keyword
+settings are asked for again the first time you use it.
 
 
 HOW TO RUN THE SCHEDULER (SHARED — the normal way now)
@@ -117,9 +117,10 @@ DATA / BACKUP / PRIVACY NOTES
   other web server that doesn't provide this data store, it automatically
   falls back to that browser's own local storage, exactly like the original
   single-computer version.)
-- The WIP importer never saves the WIP data it reads — only your
-  keyword/mapping settings are remembered, locally. Closing the tab
-  discards the loaded spreadsheet completely.
+- Importing a WIP export never saves the spreadsheet itself — only your
+  keyword settings are remembered. Closing the import window discards the
+  loaded spreadsheet completely, and it is read inside your browser, so it
+  is never uploaded anywhere.
 
 
 REBUILDING THIS PACKAGE LATER
