@@ -274,6 +274,10 @@ function buildCapacityMaps(equipment, staff, days) {
 }
 
 function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds, equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift) {
+  // A job with no positive hours has nothing to place; return null so the
+  // caller falls into its conflict/placeholder path instead of accepting an
+  // empty (but truthy) plan that would render as a blank block.
+  if (!(hoursNeeded > 0.001)) return null;
   let remaining = hoursNeeded;
   let idx = startIdx;
   const plan = [];
