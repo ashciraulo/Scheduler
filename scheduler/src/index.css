@@ -23,6 +23,9 @@ body {
 .bg-slate-800\/50 { background-color: #EEF0F2 !important; }
 .bg-slate-800\/60 { background-color: #EEF0F2 !important; }
 .bg-slate-900\/60 { background-color: rgba(255, 255, 255, 0.7) !important; }
+/* Past days on the Schedule timeline — a touch flatter than a live column, but
+   still clearly a usable part of the grid rather than a disabled block. */
+.bg-slate-950\/30 { background-color: #F1F2F4 !important; }
 .bg-slate-950\/40 { background-color: #E6E8EB !important; }
 .bg-slate-950\/70 { background-color: #E9EBEE !important; }
 .bg-slate-950\/95 { background-color: rgba(246, 247, 248, 0.95) !important; }
