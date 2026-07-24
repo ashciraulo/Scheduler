@@ -1328,53 +1328,46 @@ export default function WeldingScheduler() {
 // of the hours — never stacked into a separate lane. Gap days inside a job's
 // own span (no hours logged, e.g. an unstaffed weekday) still render as a
 // full-width continuation of that job so its bar doesn't show a hole.
-function buildEquipRowSegments(equipJobs, visibleDays, colWidth) {
-  const byDateShift = {};
-  visibleDays.forEach((d) => { byDateShift[d] = { day: [], afternoon: [] }; });
-  equipJobs.forEach((job) => {
-    (job.assignment.days || []).forEach((entry) => {
-      if (byDateShift[entry.date]) byDateShift[entry.date][entry.shift].push({ job, hours: entry.hours });
-    });
-  });
-  Object.values(byDateShift).forEach((cell) => {
-    SHIFT_ORDER.forEach((s) => cell[s].sort((a, b) => (a.job.assignment.claimOrder ?? 0) - (b.job.assignment.claimOrder ?? 0)));
-  });
+// Calmer, on-brand categorical palette for staff-coloured timeline bars.
+const STAFF_PALETTE = ['#3E6B8B', '#2F8F86', '#C4634A', '#7E6BA8', '#C98A3E', '#5B8C5A', '#4E7CA1', '#B5677F', '#6A7F8C', '#8A9A3F'];
+const UNASSIGNED_COLOR = '#475569';
+const COMPLETE_GREY = '#64748b';
 
-  const raw = [];
-  visibleDays.forEach((date, dayIdx) => {
-    const cell = byDateShift[date];
-    const activeShifts = SHIFT_ORDER.filter((s) => cell[s].length > 0);
-    const colLeft = dayIdx * colWidth;
-    if (activeShifts.length === 0) {
-      const owner = equipJobs.find((j) => j.assignment.startDate <= date && date <= j.assignment.endDate);
-      if (owner) raw.push({ job: owner, left: colLeft, width: colWidth });
+// Positioned colour segments for one job's bar across the visible window. Each
+// day's entries are laid out proportionally; a gap day inside the job's own
+// span becomes a full-width continuation; adjacent same-staff segments merge;
+// and the completed leading portion (by percentComplete, or all of it when the
+// job is complete) is greyed.
+function buildJobSegments(job, visibleDays, colWidth, staffColor) {
+  const days = job.assignment.days || [];
+  const start = job.assignment.startDate;
+  const end = job.assignment.endDate;
+  const segs = [];
+  visibleDays.forEach((date, di) => {
+    const entries = days
+      .filter((e) => e.date === date)
+      .sort((a, b) => (a.shift === 'afternoon' ? 1 : 0) - (b.shift === 'afternoon' ? 1 : 0));
+    const x0 = di * colWidth;
+    if (entries.length === 0) {
+      if (start <= date && date <= end) segs.push({ left: x0, width: colWidth, staffId: null });
       return;
     }
-    const splitHalf = activeShifts.length > 1;
-    activeShifts.forEach((shift, si) => {
-      const sectionWidth = splitHalf ? colWidth / 2 : colWidth;
-      let offset = splitHalf ? si * sectionWidth : 0;
-      cell[shift].forEach(({ job, hours }) => {
-        const w = Math.min(sectionWidth, (hours / SHIFT_DEFS[shift].defaultHours) * sectionWidth);
-        raw.push({ job, left: colLeft + offset, width: Math.min(w, colLeft + colWidth - (colLeft + offset)) });
-        offset += w;
-      });
-    });
+    const segW = colWidth / entries.length;
+    entries.forEach((e, ei) => segs.push({ left: x0 + ei * segW, width: segW, staffId: e.staffId }));
   });
-
-  raw.sort((a, b) => a.left - b.left);
   const merged = [];
-  raw.forEach((seg) => {
+  segs.forEach((sg) => {
     const prev = merged[merged.length - 1];
-    if (prev && prev.job.id === seg.job.id && Math.abs(prev.left + prev.width - seg.left) < 0.5) {
-      prev.width += seg.width;
-    } else {
-      merged.push({ ...seg });
-    }
+    if (prev && prev.staffId === sg.staffId && Math.abs(prev.left + prev.width - sg.left) < 0.5) prev.width += sg.width;
+    else merged.push({ ...sg });
   });
-  const labeled = new Set();
-  merged.forEach((seg) => {
-    if (!labeled.has(seg.job.id)) { seg.isLabel = true; labeled.add(seg.job.id); }
+  const totalW = merged.reduce((s, g) => s + g.width, 0);
+  let greyLeft = (job.status === 'complete' ? 100 : Math.max(0, Math.min(100, job.percentComplete || 0))) / 100 * totalW;
+  merged.forEach((sg) => {
+    const g = Math.min(sg.width, greyLeft);
+    sg.grey = g > 0.01 ? g / sg.width : 0;
+    sg.color = sg.staffId ? staffColor(sg.staffId) : UNASSIGNED_COLOR;
+    greyLeft -= g;
   });
   return merged;
 }
@@ -1387,11 +1380,19 @@ function ScheduleView({
   const colWidth = displayMode ? 92 : 76;
   const rowHeight = displayMode ? 76 : 60;
 
+  const staffColor = useMemo(() => {
+    const m = {};
+    staff.forEach((s, i) => { m[s.id] = STAFF_PALETTE[i % STAFF_PALETTE.length]; });
+    return (id) => m[id] || UNASSIGNED_COLOR;
+  }, [staff]);
+
   const jobsByEquip = useMemo(() => {
     const map = {};
     equipment.forEach((e) => { map[e.id] = []; });
+    // Completed jobs stay on the timeline (rendered fully grey); only jobs
+    // with no assignment at all are dropped.
     const pushUnit = (unit) => {
-      if (unit.status === 'complete' || !unit.assignment) return;
+      if (!unit.assignment) return;
       if (map[unit.assignment.equipmentId]) map[unit.assignment.equipmentId].push(unit);
     };
     jobs.forEach((j) => {
@@ -1460,11 +1461,11 @@ function ScheduleView({
 
         <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900">
           <div className="overflow-x-auto">
-            <div style={{ minWidth: 180 + visibleDays.length * colWidth }}>
+            <div style={{ minWidth: 240 + visibleDays.length * colWidth }}>
               {/* Day header row */}
               <div className="flex border-b border-slate-800 bg-slate-900 sticky top-0 z-10">
-                <div className="shrink-0 w-[180px] px-3 py-2 text-[11px] font-semibold text-slate-500 uppercase tracking-wide border-r border-slate-800">
-                  Equipment
+                <div className="shrink-0 px-3 py-2 text-[11px] font-semibold text-slate-500 uppercase tracking-wide border-r border-slate-800" style={{ width: 240 }}>
+                  Equipment / Jobs
                 </div>
                 {visibleDays.map((day) => {
                   const { dow, dom } = fmtDay(day);
@@ -1483,90 +1484,121 @@ function ScheduleView({
                 })}
               </div>
 
-              {/* Equipment rows */}
+              {/* Equipment groups: a header row (name, type, total assigned
+                  hours this period) with one lane per job beneath it. Job
+                  number/name/staff/hours live in the left column; the timeline
+                  bars are plain, coloured per staff, greyed as work completes. */}
               {equipment.map((eq) => {
                 const color = EQUIP_COLOR[eq.type] || EQUIP_COLOR['Welding Robot'];
                 const equipJobs = jobsByEquip[eq.id] || [];
-                const segments = buildEquipRowSegments(equipJobs, visibleDays, colWidth);
+                const d0 = visibleDays[0];
+                const d1 = visibleDays[visibleDays.length - 1];
+                const totalHrs = Math.round(equipJobs.reduce((t, j) => t + (j.assignment.days || []).reduce((b, e) => (e.date >= d0 && e.date <= d1 ? b + e.hours : b), 0), 0) * 10) / 10;
+                const lanes = [...equipJobs].sort((a, b) =>
+                  a.assignment.startDate < b.assignment.startDate ? -1
+                    : a.assignment.startDate > b.assignment.startDate ? 1
+                    : (a.assignment.claimOrder ?? 0) - (b.assignment.claimOrder ?? 0));
+                const laneH = displayMode ? 56 : 46;
+                const cells = () => (
+                  <div className="absolute inset-0 flex">
+                    {visibleDays.map((day) => {
+                      const isHint = dropHint && dropHint.equipId === eq.id && dropHint.date === day;
+                      const weekend = isWeekendDate(day);
+                      return (
+                        <div
+                          key={day}
+                          style={{ width: colWidth }}
+                          className={`h-full border-r border-slate-800/40 ${isHint ? 'bg-amber-500/20' : weekend ? 'bg-slate-950/40' : ''}`}
+                          onDragOver={(e) => { if (!readOnly) { e.preventDefault(); setDropHint({ equipId: eq.id, date: day }); } }}
+                          onDragLeave={() => setDropHint(null)}
+                          onDrop={(e) => { e.preventDefault(); onDrop(eq.id, day); }}
+                        />
+                      );
+                    })}
+                  </div>
+                );
                 return (
-                  <div key={eq.id} className={`flex border-b border-slate-800/70 border-l-[3px] ${color.border}`}>
-                    <div className="shrink-0 w-[180px] px-3 py-2 border-r border-slate-800 flex flex-col justify-center">
-                      <div className="text-sm font-semibold text-slate-200 truncate">{eq.name}</div>
-                      <div className={`text-[10px] ${color.text} truncate`}>{eq.type}</div>
-                    </div>
-                    <div className="relative" style={{ height: rowHeight, width: visibleDays.length * colWidth }}>
-                      {/* drop-target background cells */}
-                      <div className="absolute inset-0 flex">
-                        {visibleDays.map((day) => {
-                          const isHint = dropHint && dropHint.equipId === eq.id && dropHint.date === day;
-                          const weekend = isWeekendDate(day);
-                          return (
-                            <div
-                              key={day}
-                              style={{ width: colWidth }}
-                              className={`h-full border-r border-slate-800/40 ${isHint ? 'bg-amber-500/20' : weekend ? 'bg-slate-950/40' : ''}`}
-                              onDragOver={(e) => { if (!readOnly) { e.preventDefault(); setDropHint({ equipId: eq.id, date: day }); } }}
-                              onDragLeave={() => setDropHint(null)}
-                              onDrop={(e) => { e.preventDefault(); onDrop(eq.id, day); }}
-                            />
-                          );
-                        })}
+                  <div key={eq.id} className={`border-b border-slate-800/70 border-l-[3px] ${color.border}`}>
+                    <div className="border-b border-slate-800/60 bg-slate-950/70 px-3 py-1.5">
+                      <div style={{ position: 'sticky', left: 0, display: 'inline-flex', alignItems: 'center', gap: 10, maxWidth: '100%' }}>
+                        <span className="text-sm font-semibold text-slate-200">{eq.name}</span>
+                        <span className={`text-[10px] ${color.text}`}>{eq.type}</span>
+                        <span className="text-[11px] text-slate-400 font-mono">· {totalHrs}h assigned this period</span>
                       </div>
-                      {/* job blocks — one lane; each segment sized to the actual
-                          share of the day/shift it uses, so a job that finishes
-                          partway through a day can hand the rest of that day off
-                          to the next job instead of stacking into a new row */}
-                      {segments.map((seg, i) => {
-                        const job = seg.job;
-                        const staffIds = [...new Set((job.assignment.days || []).map((d) => d.staffId).filter(Boolean))];
-                        const hasAfternoon = (job.assignment.days || []).some((d) => d.shift === 'afternoon');
-                        const hasDay = (job.assignment.days || []).some((d) => d.shift === 'day');
-                        let personLabel = 'Unassigned';
-                        if (staffIds.length === 1) personLabel = staff.find((s) => s.id === staffIds[0])?.name || 'Unassigned';
-                        else if (staffIds.length > 1) personLabel = `${staffIds.length} staff`;
-                        const conflict = job.assignment.conflict;
-                        const left = seg.left + 2;
-                        const width = Math.max(6, seg.width - 4);
-                        const isPart = !!job._parentJob;
-                        return (
+                    </div>
+                    {lanes.length === 0 && (
+                      <div className="flex">
+                        <div className="shrink-0 px-3 border-r border-slate-800 flex items-center" style={{ width: 240 }}>
+                          <span className="text-[10px] text-slate-600">No jobs scheduled</span>
+                        </div>
+                        <div className="relative" style={{ height: 30, width: visibleDays.length * colWidth }}>{cells()}</div>
+                      </div>
+                    )}
+                    {lanes.map((job) => {
+                      const parent = job._parentJob || job;
+                      const jobNo = parent.bcJobNo || '—';
+                      const staffIds = [...new Set((job.assignment.days || []).map((e) => e.staffId).filter(Boolean))];
+                      const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Unassigned';
+                      const conflict = job.assignment.conflict;
+                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${conflict ? ' · OVERBOOKED' : ''}`;
+                      const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
+                      return (
+                        <div key={job.id} className="flex border-b border-slate-800/40">
                           <div
-                            key={`${job.id}_${i}`}
-                            draggable={!readOnly}
-                            onDragStart={() => setDragJobId(job.id)}
-                            onDragEnd={() => { setDragJobId(null); setDropHint(null); }}
-                            onClick={() => onEditJob(isPart ? job._parentJob : job)}
-                            style={{ position: 'absolute', left, width, top: 5, height: rowHeight - 10 }}
-                            className={`rounded-md px-2 py-1 cursor-pointer overflow-hidden shadow-sm border transition-transform hover:scale-[1.015] ${
-                              conflict
-                                ? 'bg-red-950 border-red-700'
-                                : job.assignment.pinned
-                                ? 'bg-slate-800 border-amber-600'
-                                : 'bg-slate-800 border-slate-600'
-                            }`}
-                            title={`${job.name} · ${job.hoursTotal}h${staffIds.length ? ' · ' + staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') : ''}`}
+                            className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer"
+                            style={{ width: 240 }}
+                            onClick={() => onEditJob(job._parentJob || job)}
+                            title={tip}
                           >
-                            {seg.isLabel && (
-                              <>
-                                <div className="flex items-center gap-1 text-[11px] font-semibold text-slate-100 truncate">
-                                  {conflict && <AlertTriangle size={11} className="text-red-400 shrink-0" />}
-                                  {job.assignment.pinned && !conflict && <Pin size={10} className="text-amber-400 shrink-0" />}
-                                  <span className="truncate">{job.name}</span>
-                                </div>
-                                <div className="text-[10px] text-slate-400 truncate flex items-center gap-1">
-                                  <span className="truncate">{personLabel} · {job.hoursTotal}h</span>
-                                  {hasDay && hasAfternoon && <span className="shrink-0 text-[9px] px-1 rounded bg-slate-700 text-slate-300">2 shifts</span>}
-                                </div>
-                                {job.percentComplete > 0 && (
-                                  <div className="h-1 bg-slate-700 rounded-full overflow-hidden mt-0.5">
-                                    <div className="h-full bg-amber-500 rounded-full" style={{ width: `${job.percentComplete}%` }} />
-                                  </div>
-                                )}
-                              </>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-mono text-[10px] shrink-0" style={{ color: '#E0523C' }}>{jobNo}</span>
+                              <span className="text-[11px] font-semibold text-slate-200 truncate">{job.name}</span>
+                              {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
+                              {job.assignment.pinned && !conflict && <Pin size={9} className="text-amber-400 shrink-0" />}
+                            </div>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {staffIds.slice(0, 4).map((id) => (
+                                <span key={id} className="shrink-0" style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: staffColor(id), display: 'inline-block' }} />
+                              ))}
+                              <span className="text-[10px] text-slate-400 truncate">{staffNames} · {job.hoursTotal}h</span>
+                            </div>
+                            {job.percentComplete > 0 && (
+                              <div style={{ height: 2, background: '#D8DBE0', borderRadius: 1, overflow: 'hidden', marginTop: 2 }}>
+                                <div style={{ height: '100%', width: `${job.percentComplete}%`, background: '#E0523C' }} />
+                              </div>
                             )}
                           </div>
-                        );
-                      })}
-                    </div>
+                          <div className="relative" style={{ height: laneH, width: visibleDays.length * colWidth }}>
+                            {cells()}
+                            {segs.map((sg, si) => (
+                              <div
+                                key={si}
+                                draggable={!readOnly}
+                                onDragStart={() => setDragJobId(job.id)}
+                                onDragEnd={() => { setDragJobId(null); setDropHint(null); }}
+                                onClick={() => onEditJob(job._parentJob || job)}
+                                title={tip}
+                                className="absolute cursor-pointer"
+                                style={{
+                                  left: sg.left + 1,
+                                  width: Math.max(4, sg.width - 2),
+                                  top: 7,
+                                  height: laneH - 14,
+                                  background: sg.grey >= 0.999
+                                    ? COMPLETE_GREY
+                                    : sg.grey > 0
+                                    ? `linear-gradient(90deg, ${COMPLETE_GREY} ${(sg.grey * 100).toFixed(1)}%, ${sg.color} ${(sg.grey * 100).toFixed(1)}%)`
+                                    : sg.color,
+                                  borderRadius: 4,
+                                  opacity: 0.92,
+                                  border: conflict ? '1.5px solid #ef4444' : job.assignment.pinned ? '1.5px solid #E0523C' : '1px solid rgba(37,54,70,.35)',
+                                }}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 );
               })}
@@ -1610,8 +1642,10 @@ function ScheduleView({
                   className="text-xs bg-slate-800 hover:bg-slate-700 rounded px-2 py-1.5 text-slate-300 cursor-pointer border border-slate-700"
                   title="Drag onto the schedule to place it"
                 >
-                  <div className="font-medium text-slate-200 truncate">{j.name}</div>
-                  <div className="text-slate-500">{j.hoursTotal}h · ready {fmtDate(j.readyDate)} · due {fmtDate(j.dueDate)} · no capacity or compatible resource found in horizon</div>
+                  <div className="font-medium text-slate-200 truncate">
+                    <span className="font-mono text-[10px]" style={{ color: '#E0523C' }}>{(j._parentJob || j).bcJobNo || '—'}</span> {j.name}
+                  </div>
+                  <div className="text-slate-500">{j.hoursTotal}h · ready {fmtDate(j.readyDate)} · due {fmtDate(j.dueDate)} · {j.unschedReason || 'no capacity or compatible resource found in horizon'}</div>
                 </div>
               ))}
             </div>
