@@ -635,6 +635,9 @@ export function buildSchedulerJobs(records, selectedIds) {
     completedDate: null,
     bcJobNo: r.jobNo || '',
     bcJobTaskNo: r.taskNo || '',
+    // Imported work is unassigned — the scheduler picks the person. The user
+    // can override it per job afterwards (job.staffId).
+    staffId: null,
     updatedAt: new Date().toISOString(),
     assignment: null,
   }));

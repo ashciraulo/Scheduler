@@ -3,7 +3,7 @@ import {
   Plus, X, Settings2, Calendar, Users, Wrench, Check, AlertTriangle,
   Monitor, ChevronLeft, ChevronRight, Trash2, Pencil, Pin, PinOff,
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
-  Upload, FileWarning
+  Upload, FileWarning, UserCheck
 } from 'lucide-react';
 import {
   parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
@@ -86,6 +86,12 @@ function normalizeStaff(s) {
 
 // (Per-resource daily capacity is now derived per shift from each employee's roster — see SHIFT_DEFS.)
 const HORIZON_DAYS = 150; // calendar days to look ahead when scheduling
+// Calendar days of *history* the timeline keeps behind today. The grid used to
+// begin at today, so finished and part-finished work dropped off the left edge
+// the moment its dates passed and there was no way to look back at what the
+// department actually ran. Nothing is ever auto-scheduled into these days —
+// see runScheduler's `earliestIdx`.
+const HISTORY_DAYS = 90;
 
 const DEFAULT_PROCESSES = [
   'Robotic MIG Welding',
@@ -167,6 +173,9 @@ function mkJob({ name, process, quantity, hoursPerUnit, dueDate, readyDate = nul
     procedureId: '',
     bcJobNo: '',
     bcJobTaskNo: '',
+    // null = the scheduler picks whoever is free and signed off on the
+    // process; a staff id here is a manual assignment it must honour.
+    staffId: null,
     updatedAt: new Date().toISOString(),
     assignment: null,
   };
@@ -399,6 +408,12 @@ const RANGE_PRESETS = [
    ============================================================ */
 
 function buildCapacityMaps(equipment, staff, days) {
+  // staffLoad[staffId] = hours this person has picked up so far this run. Used
+  // purely as a tie-break when two people are equally able to take a stint —
+  // without it the comparison fell through to the order of the staff list, so
+  // whoever was first in the list collected the work every time.
+  const staffLoad = {};
+  staff.forEach((s) => { staffLoad[s.id] = 0; });
   // equipDayLock[equipId][date] = the id of the job currently "set up" on that
   // equipment that day (or 'closed' for a marked-unavailable day), else null.
   // A day is locked once a job has claimed it AND still has hours left to go
@@ -430,18 +445,52 @@ function buildCapacityMaps(equipment, staff, days) {
       staffDayShift[s.id][day] = info.shift;
     });
   });
-  return { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift };
+  return { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift, staffLoad };
 }
 
-function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds, equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift) {
+// Who actually did most of the work on an existing assignment. The scheduler
+// re-derives every assignment from scratch on every recompute, so without this
+// the people on a job were free to change for no reason the user could see —
+// most obviously when dragging a job onto other equipment, which reorders
+// placement and reshuffled names across the whole board. Feeding the previous
+// primary person back in as `seedStaffId` keeps whoever had the job on it
+// wherever they're still available.
+function primaryStaffOf(assignment) {
+  const hoursByStaff = new Map();
+  (assignment?.days || []).forEach((d) => {
+    if (!d.staffId) return;
+    hoursByStaff.set(d.staffId, (hoursByStaff.get(d.staffId) || 0) + (d.hours || 0));
+  });
+  let best = null;
+  let bestHours = 0;
+  hoursByStaff.forEach((h, sid) => { if (h > bestHours) { best = sid; bestHours = h; } });
+  return best;
+}
+
+// Who is allowed to run this job. Normally that's everyone signed off on the
+// process, but a job can carry a manual assignment (`job.staffId`) — the user
+// has said who does this one. That is a hard restriction, not a hint: the
+// scheduler waits for that person rather than quietly handing the work to
+// someone else. Clearing it puts the job back to automatic.
+function eligibleStaffIds(job, staff) {
+  const qualified = staff.filter((s) => s.processes.includes(job.process));
+  if (job.staffId) return qualified.some((s) => s.id === job.staffId) ? [job.staffId] : [];
+  return qualified.map((s) => s.id);
+}
+
+function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds, caps, seedStaffId = null) {
+  const { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift, staffLoad } = caps;
   // A job with no positive hours has nothing to place; return null so the
   // caller falls into its conflict/placeholder path instead of accepting an
   // empty (but truthy) plan that would render as a blank block.
   if (!(hoursNeeded > 0.001)) return null;
+  if (!compatibleStaffIds.length) return null;
   let remaining = hoursNeeded;
   let idx = startIdx;
   const plan = [];
-  let preferredStaffId = null; // once someone starts this job, keep them on it where possible
+  // Once someone starts this job, keep them on it where possible — seeded from
+  // whoever had it before this recompute (see primaryStaffOf).
+  let preferredStaffId = seedStaffId && compatibleStaffIds.includes(seedStaffId) ? seedStaffId : null;
   while (remaining > 0.001) {
     if (idx >= days.length) return null;
     const date = days[idx];
@@ -451,42 +500,59 @@ function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds, equipD
     for (const shift of SHIFT_ORDER) {
       if (remaining <= 0.001) break;
       const already = equipShiftUsed[equipId]?.[date]?.[shift] ?? 0;
-      const shiftCap = SHIFT_DEFS[shift].defaultHours - already;
-      if (shiftCap <= 0.001) continue;
+      let shiftLeft = SHIFT_DEFS[shift].defaultHours - already;
+      if (shiftLeft <= 0.001) continue;
 
-      let candidate = null;
-      const preferredStillAvailable =
-        preferredStaffId &&
-        staffDayShift[preferredStaffId]?.[date] === shift &&
-        (staffDayRemain[preferredStaffId]?.[date] ?? 0) > 0.001;
-      if (preferredStillAvailable) {
-        candidate = preferredStaffId;
-      } else {
-        // No one is already "on" this job for this shift (or the person who was
-        // isn't rostered/available today) — pick whoever has the most free hours
-        // this shift, since that person is least likely to force another handover
-        // later in the job.
-        const options = compatibleStaffIds.filter(
-          (sid) => staffDayShift[sid]?.[date] === shift && (staffDayRemain[sid]?.[date] ?? 0) > 0.001
-        );
-        if (options.length) {
-          options.sort((a, b) => (staffDayRemain[b][date] ?? 0) - (staffDayRemain[a][date] ?? 0));
-          candidate = options[0];
-        }
+      // Everyone qualified, rostered onto this shift today, with hours to give.
+      const pool = compatibleStaffIds.filter(
+        (sid) => staffDayShift[sid]?.[date] === shift && (staffDayRemain[sid]?.[date] ?? 0) > 0.001
+      );
+      if (!pool.length) continue;
+      const contribution = (sid) => Math.min(staffDayRemain[sid][date], shiftLeft, remaining);
+      const bestContribution = Math.max(...pool.map(contribution));
+      pool.sort((a, b) => {
+        // Continuity first — but only while the person already on the job can
+        // still cover as much of it today as anyone else could. Keeping them on
+        // it for the sake of a half-hour leftover is what used to stretch a job
+        // out over days while a colleague with a whole free shift sat idle, and
+        // it read as one person hogging every job.
+        const aPref = a === preferredStaffId && contribution(a) >= bestContribution - 0.001;
+        const bPref = b === preferredStaffId && contribution(b) >= bestContribution - 0.001;
+        if (aPref !== bPref) return aPref ? -1 : 1;
+        const byContribution = contribution(b) - contribution(a);
+        if (Math.abs(byContribution) > 0.001) return byContribution; // longest single stint = fewest handovers
+        // A genuine tie: give it to whoever has least on so far, so the work
+        // spreads instead of always landing on the first name in the list.
+        const byLoad = (staffLoad[a] ?? 0) - (staffLoad[b] ?? 0);
+        if (Math.abs(byLoad) > 0.001) return byLoad;
+        return a < b ? -1 : a > b ? 1 : 0; // stable, list-order-independent
+      });
+      // Fill the shift from the top of that order. Normally one person takes
+      // the whole stint; a second only joins once the first has run out of
+      // hours and the equipment still has shift capacity going spare.
+      let firstOnShift = null;
+      let preferredStayed = false;
+      for (const sid of pool) {
+        if (remaining <= 0.001 || shiftLeft <= 0.001) break;
+        const use = Math.min(shiftLeft, staffDayRemain[sid][date], remaining);
+        if (use <= 0.001) continue;
+        plan.push({ date, shift, staffId: sid, hours: use });
+        remaining -= use;
+        shiftLeft -= use;
+        if (!firstOnShift) firstOnShift = sid;
+        if (sid === preferredStaffId) preferredStayed = true;
       }
-      if (!candidate) continue;
-      const use = Math.min(shiftCap, staffDayRemain[candidate][date], remaining);
-      if (use <= 0.001) continue;
-      plan.push({ date, shift, staffId: candidate, hours: use });
-      remaining -= use;
-      preferredStaffId = candidate;
+      // The person who was on it is genuinely off it now — whoever picked up
+      // the bulk of this shift becomes the one to keep for continuity.
+      if (!preferredStayed && firstOnShift) preferredStaffId = firstOnShift;
     }
     idx++;
   }
   return plan;
 }
 
-function consume(plan, equipId, jobId, days, equipDayLock, equipShiftUsed, staffDayRemain) {
+function consume(plan, equipId, jobId, days, caps) {
+  const { equipDayLock, equipShiftUsed, staffDayRemain, staffLoad } = caps;
   if (!plan.length) return;
   const startDate = plan[0].date;
   const finalDate = plan[plan.length - 1].date;
@@ -502,7 +568,9 @@ function consume(plan, equipId, jobId, days, equipDayLock, equipShiftUsed, staff
   }
   plan.forEach(({ date, shift, staffId, hours }) => {
     equipShiftUsed[equipId][date][shift] += hours;
+    if (!staffId) return; // an overbooked pinned job's placeholder plan has no one on it
     staffDayRemain[staffId][date] -= hours;
+    staffLoad[staffId] = (staffLoad[staffId] ?? 0) + hours;
   });
 }
 
@@ -531,11 +599,26 @@ function whyUnscheduled(job, equipment, staff, days) {
     }
   }
   if (!staff.filter((s) => s.processes.includes(job.process)).length) return `no staff can run ${job.process}`;
+  // A manual staff assignment narrows the job to one person, so it's the most
+  // likely reason a job that would otherwise fit can't be placed — say so
+  // plainly, and name the way out.
+  if (job.staffId) {
+    const person = staff.find((s) => s.id === job.staffId);
+    if (!person) return 'the person this job was assigned to is no longer on staff — reassign it or set it back to automatic';
+    if (!person.processes.includes(job.process)) return `${person.name} isn't signed off on ${job.process} — reassign this job or set it back to automatic`;
+  }
   if (job.readyDate && job.readyDate > days[days.length - 1]) return `not ready until ${fmtDate(job.readyDate)} — beyond the schedule horizon`;
+  const assignee = job.staffId ? staff.find((s) => s.id === job.staffId) : null;
+  if (assignee) return `${assignee.name} has no free ${job.hoursTotal}h alongside a free machine in the horizon — reassign this job or set it back to automatic`;
   return `no free equipment/staff capacity in the horizon for ${job.hoursTotal}h`;
 }
 
-function runScheduler(jobsIn, equipment, staff, days) {
+// `days` now runs from some way *behind* today (so finished work stays on the
+// timeline) up to the forward horizon. `earliestIdx` is the index of today —
+// the floor below which nothing may be auto-placed. Pinned jobs are exempt: a
+// job the user dropped on a past date is a record of what actually happened,
+// and it keeps that slot.
+function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   const order = jobsIn.map((j) => j.id);
 
   // A split job (job.parts set) doesn't get scheduled as one unit — each part
@@ -559,6 +642,10 @@ function runScheduler(jobsIn, equipment, staff, days) {
           // and tagOk waved them onto any machine — a split job that needed a
           // 5T positioner could be placed on equipment that hasn't got one.
           tags: j.tags || [],
+          // A manual staff assignment sits on the job, so it applies to every
+          // part of it — the parts are separately *placed*, not separately
+          // staffed.
+          staffId: j.staffId || null,
           hoursTotal: part.hoursTotal,
           readyDate: j.readyDate,
           dueDate: j.dueDate,
@@ -573,8 +660,18 @@ function runScheduler(jobsIn, equipment, staff, days) {
     }
   });
 
-  const { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift } = buildCapacityMaps(equipment, staff, days);
+  const caps = buildCapacityMaps(equipment, staff, days);
+  const { equipDayLock } = caps;
   let claimCounter = 0; // stamped onto each placed assignment so the Schedule view can lay out same-day handoffs left-to-right in the order they were actually claimed
+
+  // Whoever was on each unit before this run, captured now because placement
+  // overwrites `assignment` as it goes.
+  // `seedStaffId` is set when a drag throws the day plan away (see handleDrop);
+  // otherwise the plan itself says who had it.
+  const stickyStaff = new Map();
+  jobs.forEach((j) => {
+    stickyStaff.set(j.id, j.assignment?.seedStaffId || primaryStaffOf(j.assignment));
+  });
 
   const complete = jobs.filter((j) => j.status === 'complete');
   const active = jobs.filter((j) => j.status !== 'complete');
@@ -585,9 +682,18 @@ function runScheduler(jobsIn, equipment, staff, days) {
   //    Which staff/shift cover each day is worked out automatically from
   //    the roster; a job can span a day-shift stint and an afternoon-shift
   //    stint (different people) on the same date if that's what it takes.
+  //    Earliest start first: a pinned job starting sooner should get first
+  //    call on the roster, otherwise one pinned later in the array could take
+  //    the person an earlier job was already relying on.
+  pinned.sort((a, b) => {
+    const ad = a.assignment.startDate;
+    const bd = b.assignment.startDate;
+    if (ad !== bd) return ad < bd ? -1 : 1;
+    return (a.assignment.claimOrder ?? 0) - (b.assignment.claimOrder ?? 0);
+  });
   pinned.forEach((job) => {
     const a = job.assignment;
-    const compatibleStaffIds = staff.filter((s) => s.processes.includes(job.process)).map((s) => s.id);
+    const compatibleStaffIds = eligibleStaffIds(job, staff);
     const startIdx = days.indexOf(a.startDate);
     const notYetReady = job.readyDate && a.startDate < job.readyDate;
     let conflict = false;
@@ -595,10 +701,10 @@ function runScheduler(jobsIn, equipment, staff, days) {
     if (startIdx === -1 || notYetReady || !equipDayLock[a.equipmentId]) {
       conflict = true;
     } else {
-      const fit = tryFit(days, startIdx, job.hoursTotal, a.equipmentId, compatibleStaffIds, equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift);
+      const fit = tryFit(days, startIdx, job.hoursTotal, a.equipmentId, compatibleStaffIds, caps, stickyStaff.get(job.id));
       if (fit) {
         plan = fit;
-        consume(plan, a.equipmentId, job.id, days, equipDayLock, equipShiftUsed, staffDayRemain);
+        consume(plan, a.equipmentId, job.id, days, caps);
       } else {
         conflict = true;
       }
@@ -628,14 +734,24 @@ function runScheduler(jobsIn, equipment, staff, days) {
     };
   });
 
-  // 2. Auto-schedule unpinned jobs, earliest due date first, into earliest
-  // available slot. On an equal due date a job flagged `needsFurtherProcessing`
-  // goes first: it still has machining or manual work to go through after us,
-  // so the same due date leaves it strictly less slack than one that ships
-  // straight from this department.
-  unpinned.sort((a, b) =>
-    (new Date(a.dueDate) - new Date(b.dueDate))
-    || ((b.needsFurtherProcessing ? 1 : 0) - (a.needsFurtherProcessing ? 1 : 0)));
+  // 2. Auto-schedule unpinned jobs into the earliest available slot, in order
+  // of how little room each has to move.
+  unpinned.sort((a, b) => {
+    // A job with a manual staff assignment places first: it can only draw on
+    // the one person the user named, so it gets first call on their time. An
+    // automatic job still has the whole qualified team to fall back on.
+    const aManual = a.staffId ? 0 : 1;
+    const bManual = b.staffId ? 0 : 1;
+    if (aManual !== bManual) return aManual - bManual;
+    // Then earliest due date.
+    const byDue = new Date(a.dueDate) - new Date(b.dueDate);
+    if (byDue) return byDue;
+    // On an equal due date, a job flagged `needsFurtherProcessing` goes first:
+    // it still has machining or manual work to go through after us, so the
+    // same due date leaves it strictly less slack than one that ships straight
+    // from this department.
+    return (b.needsFurtherProcessing ? 1 : 0) - (a.needsFurtherProcessing ? 1 : 0);
+  });
 
   // How many pending jobs can run on ONLY this one piece of equipment (no
   // alternative machine). Used below so that when a job with a choice of
@@ -651,18 +767,21 @@ function runScheduler(jobsIn, equipment, staff, days) {
 
   unpinned.forEach((job) => {
     const compatibleEquip = equipment.filter((e) => e.processes.includes(job.process) && tagOk(job, e));
-    const compatibleStaffIds = staff.filter((s) => s.processes.includes(job.process)).map((s) => s.id);
+    const compatibleStaffIds = eligibleStaffIds(job, staff);
+    const seedStaffId = stickyStaff.get(job.id);
     let best = null;
-    let floorIdx = 0;
+    // Never auto-place into the past: `days` starts behind today so history
+    // stays visible, but new work begins today at the earliest.
+    let floorIdx = earliestIdx;
     if (job.readyDate) {
-      floorIdx = days.findIndex((d) => d >= job.readyDate);
-      if (floorIdx === -1) floorIdx = days.length;
+      const readyIdx = days.findIndex((d) => d >= job.readyDate);
+      floorIdx = readyIdx === -1 ? days.length : Math.max(floorIdx, readyIdx);
     }
     if (compatibleEquip.length && compatibleStaffIds.length) {
       const candidates = [];
       for (const e of compatibleEquip) {
         for (let idx = floorIdx; idx < days.length; idx++) {
-          const fit = tryFit(days, idx, job.hoursTotal, e.id, compatibleStaffIds, equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift);
+          const fit = tryFit(days, idx, job.hoursTotal, e.id, compatibleStaffIds, caps, seedStaffId);
           if (fit) {
             candidates.push({ equipId: e.id, plan: fit, startDate: fit[0].date, endDate: fit[fit.length - 1].date });
             break; // this is the earliest start this particular machine can offer
@@ -685,6 +804,14 @@ function runScheduler(jobsIn, equipment, staff, days) {
           const aExcl = exclusiveDemand[a.equipId] || 0;
           const bExcl = exclusiveDemand[b.equipId] || 0;
           if (aExcl !== bExcl) return aExcl - bExcl;
+          // Still tied: take the machine that keeps the person who already had
+          // this job on it. Moving a job between equipment shouldn't change who
+          // is doing it when they're perfectly free to carry on.
+          if (seedStaffId) {
+            const aKeeps = primaryStaffOf({ days: a.plan }) === seedStaffId;
+            const bKeeps = primaryStaffOf({ days: b.plan }) === seedStaffId;
+            if (aKeeps !== bKeeps) return aKeeps ? -1 : 1;
+          }
           const aStaffCount = new Set(a.plan.map((d) => d.staffId)).size;
           const bStaffCount = new Set(b.plan.map((d) => d.staffId)).size;
           if (aStaffCount !== bStaffCount) return aStaffCount - bStaffCount; // fewer different people = less handover
@@ -694,7 +821,7 @@ function runScheduler(jobsIn, equipment, staff, days) {
       }
     }
     if (best) {
-      consume(best.plan, best.equipId, job.id, days, equipDayLock, equipShiftUsed, staffDayRemain);
+      consume(best.plan, best.equipId, job.id, days, caps);
       job.assignment = {
         equipmentId: best.equipId,
         startDate: best.plan[0].date,
@@ -1163,8 +1290,16 @@ export default function WeldingScheduler() {
   }
 
   const todayIso = useMemo(() => isoDate(new Date()), []);
-  const workingDays = useMemo(() => generateCalendarDays(todayIso, HORIZON_DAYS), [todayIso]);
-  const [rangeStart, setRangeStart] = useState(0); // index into workingDays
+  // The timeline spans HISTORY_DAYS behind today as well as the forward
+  // horizon, so past work stays there to be paged back to. `todayIdx` is
+  // today's position in it — the floor for auto-scheduling, and where the
+  // view opens.
+  const workingDays = useMemo(
+    () => generateCalendarDays(addDays(todayIso, -HISTORY_DAYS), HISTORY_DAYS + HORIZON_DAYS),
+    [todayIso]
+  );
+  const todayIdx = useMemo(() => Math.max(0, workingDays.indexOf(todayIso)), [workingDays, todayIso]);
+  const [rangeStart, setRangeStart] = useState(HISTORY_DAYS); // index into workingDays; opens on today
   const [rangeLength, setRangeLength] = useState(30); // days shown at once — see RANGE_PRESETS
   const visibleDays = useMemo(
     () => workingDays.slice(rangeStart, rangeStart + rangeLength),
@@ -1200,8 +1335,7 @@ export default function WeldingScheduler() {
       setCostCentres(finalCc);
       setProcedures(finalPc);
 
-      const wd = generateCalendarDays(isoDate(new Date()), HORIZON_DAYS);
-      const scheduled = runScheduler(finalJb, finalEq, finalSt, wd);
+      const scheduled = runScheduler(finalJb, finalEq, finalSt, workingDays, todayIdx);
       setJobs(scheduled);
 
       if (!eq) saveKey('wf_equipment', finalEq);
@@ -1244,9 +1378,9 @@ export default function WeldingScheduler() {
     if (pr) setProcesses(pr);
     if (cc) setCostCentres(cc);
     if (pc) setProcedures(pc);
-    if (jb) setJobs(runScheduler(jb, nextEq, nextSt, workingDays));
+    if (jb) setJobs(runScheduler(jb, nextEq, nextSt, workingDays, todayIdx));
     if (pk) setParked(pk);
-  }, [workingDays]);
+  }, [workingDays, todayIdx]);
 
   const [remoteChange, setRemoteChange] = useState(false);
   useEffect(() => startLiveSync(() => setRemoteChange(true)), []);
@@ -1265,11 +1399,11 @@ export default function WeldingScheduler() {
   }, [remoteChange, loaded, busyEditing, reloadFromStore]);
 
   const recompute = useCallback((jobsList, eqList, stList) => {
-    const result = runScheduler(jobsList, eqList, stList, workingDays);
+    const result = runScheduler(jobsList, eqList, stList, workingDays, todayIdx);
     setJobs(result);
     saveKey('wf_jobs', result);
     return result;
-  }, [workingDays]);
+  }, [workingDays, todayIdx]);
 
   // ---------- job actions ----------
   function addOrUpdateJob(jobData, isNew) {
@@ -1424,7 +1558,16 @@ export default function WeldingScheduler() {
       showToast(`${job.name} isn't received/ready until ${fmtDate(job.readyDate)} — can't schedule it earlier.`);
       return;
     }
-    const newAssignment = { equipmentId: equipId, startDate: date, endDate: date, pinned: true, conflict: false, days: [] };
+    // Dropping a job somewhere new discards its worked-out day plan, and with
+    // it the record of who was on the job — which is why moving a job to
+    // another machine used to hand it to a different person (and cascade a
+    // reshuffle through everything else). Carry the person forward explicitly
+    // so the next scheduler pass keeps them on it wherever they're still free.
+    const prevAssignment = partIndex === null ? job.assignment : job.parts[partIndex].assignment;
+    const newAssignment = {
+      equipmentId: equipId, startDate: date, endDate: date, pinned: true, conflict: false,
+      days: [], seedStaffId: primaryStaffOf(prevAssignment),
+    };
     const updated = partIndex === null
       ? { ...job, updatedAt: new Date().toISOString(), assignment: newAssignment }
       : { ...job, updatedAt: new Date().toISOString(), parts: job.parts.map((p, i) => (i === partIndex ? { ...p, assignment: newAssignment } : p)) };
@@ -1664,6 +1807,7 @@ export default function WeldingScheduler() {
             rangeLength={rangeLength}
             setRangeLength={setRangeLength}
             totalDays={workingDays.length}
+            todayIdx={todayIdx}
             readOnly={readOnly}
             displayMode={displayMode}
             dragJobId={dragJobId}
@@ -1941,12 +2085,13 @@ function buildJobSegments(job, visibleDays, colWidth, staffColor) {
 }
 
 function ScheduleView({
-  equipment, staff, jobs, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays,
+  equipment, staff, jobs, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
   onEditJob, unscheduledJobs, conflictJobs, onAddJob,
 }) {
   const colWidth = displayMode ? 92 : 76;
   const rowHeight = displayMode ? 76 : 60;
+  const todayIso = useMemo(() => isoDate(new Date()), []);
 
   const staffColor = useMemo(() => {
     const m = {};
@@ -1973,6 +2118,7 @@ function ScheduleView({
           pushUnit({
             id: part.id,
             name: j.parts.length > 1 ? `${j.name} (Part ${i + 1})` : j.name,
+            staffId: j.staffId || null,
             hoursTotal: part.hoursTotal,
             percentComplete: part.percentComplete,
             status: part.status,
@@ -1990,6 +2136,10 @@ function ScheduleView({
   const canPrev = rangeStart > 0;
   const canNext = rangeStart + rangeLength < totalDays;
   const rangeLabel = visibleDays.length ? fmtDateRange(visibleDays[0], visibleDays[visibleDays.length - 1]) : '';
+  // The window can be paged back into completed work, so give it a way home.
+  const maxStart = Math.max(0, totalDays - rangeLength);
+  const showingToday = todayIdx >= rangeStart && todayIdx < rangeStart + rangeLength;
+  const inPast = rangeStart + rangeLength <= todayIdx;
 
   return (
     <div className="flex flex-col gap-4">
@@ -2007,8 +2157,16 @@ function ScheduleView({
             <button
               className={btnGhost}
               disabled={!canNext}
-              onClick={() => setRangeStart((i) => Math.min(Math.max(0, totalDays - rangeLength), i + rangeLength))}
+              onClick={() => setRangeStart((i) => Math.min(maxStart, i + rangeLength))}
             ><ChevronRight size={14} /></button>
+            {!showingToday && (
+              <button
+                className={`${btnGhost} border-amber-500/60 text-amber-300`}
+                onClick={() => setRangeStart(Math.min(maxStart, todayIdx))}
+                title="Jump back to today"
+              >Today</button>
+            )}
+            {inPast && <span className="text-[11px] text-slate-500">Completed work — history only</span>}
           </div>
           <div className="flex items-center gap-2">
             {!displayMode && (
@@ -2037,16 +2195,17 @@ function ScheduleView({
                 </div>
                 {visibleDays.map((day) => {
                   const { dow, dom } = fmtDay(day);
-                  const isToday = day === isoDate(new Date());
+                  const isToday = day === todayIso;
+                  const past = day < todayIso;
                   const weekend = isWeekendDate(day);
                   return (
                     <div
                       key={day}
                       style={{ width: colWidth }}
-                      className={`shrink-0 text-center py-2 border-r border-slate-800/60 ${isToday ? 'bg-amber-500/10' : weekend ? 'bg-slate-950/70' : ''}`}
+                      className={`shrink-0 text-center py-2 border-r border-slate-800/60 ${isToday ? 'bg-amber-500/10' : past ? 'bg-slate-950/40' : weekend ? 'bg-slate-950/70' : ''}`}
                     >
-                      <div className={`text-[10px] uppercase tracking-wide ${isToday ? 'text-amber-400 font-semibold' : weekend ? 'text-slate-600' : 'text-slate-500'}`}>{dow}</div>
-                      <div className={`text-sm font-semibold ${isToday ? 'text-amber-300' : weekend ? 'text-slate-600' : 'text-slate-300'}`}>{dom}</div>
+                      <div className={`text-[10px] uppercase tracking-wide ${isToday ? 'text-amber-400 font-semibold' : weekend || past ? 'text-slate-600' : 'text-slate-500'}`}>{dow}</div>
+                      <div className={`text-sm font-semibold ${isToday ? 'text-amber-300' : weekend || past ? 'text-slate-600' : 'text-slate-300'}`}>{dom}</div>
                     </div>
                   );
                 })}
@@ -2072,11 +2231,12 @@ function ScheduleView({
                     {visibleDays.map((day) => {
                       const isHint = dropHint && dropHint.equipId === eq.id && dropHint.date === day;
                       const weekend = isWeekendDate(day);
+                      const past = day < todayIso;
                       return (
                         <div
                           key={day}
                           style={{ width: colWidth }}
-                          className={`h-full border-r border-slate-800/40 ${isHint ? 'bg-amber-500/20' : weekend ? 'bg-slate-950/40' : ''}`}
+                          className={`h-full border-r border-slate-800/40 ${isHint ? 'bg-amber-500/20' : past ? 'bg-slate-950/30' : weekend ? 'bg-slate-950/40' : ''}`}
                           onDragOver={(e) => { if (!readOnly) { e.preventDefault(); setDropHint({ equipId: eq.id, date: day }); } }}
                           onDragLeave={() => setDropHint(null)}
                           onDrop={(e) => { e.preventDefault(); onDrop(eq.id, day); }}
@@ -2108,7 +2268,8 @@ function ScheduleView({
                       const staffIds = [...new Set((job.assignment.days || []).map((e) => e.staffId).filter(Boolean))];
                       const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Unassigned';
                       const conflict = job.assignment.conflict;
-                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${conflict ? ' · OVERBOOKED' : ''}`;
+                      const manualStaff = parent.staffId ? staff.find((s) => s.id === parent.staffId) : null;
+                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${conflict ? ' · OVERBOOKED' : ''}`;
                       const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
                       return (
                         <div key={job.id} className="flex border-b border-slate-800/40">
@@ -2128,6 +2289,7 @@ function ScheduleView({
                               {staffIds.slice(0, 4).map((id) => (
                                 <span key={id} className="shrink-0" style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: staffColor(id), display: 'inline-block' }} />
                               ))}
+                              {manualStaff && <UserCheck size={9} className="text-amber-400 shrink-0" />}
                               <span className="text-[10px] text-slate-400 truncate">{staffNames} · {job.hoursTotal}h</span>
                             </div>
                             {job.percentComplete > 0 && (
@@ -2705,6 +2867,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [showBcLink, setShowBcLink] = useState(!!(job?.bcJobNo || job?.bcJobTaskNo));
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState((templates.find((t) => t.id === templateId) || {}).category || 'Uncategorised');
+  const [staffId, setStaffId] = useState(job?.staffId || '');
   const [tags, setTags] = useState(job?.tags || (job ? [] : (templates.find((t) => t.id === templateId) || {}).tags) || []);
   const [procedureId, setProcedureId] = useState(job?.procedureId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).procedureId) || '');
 
@@ -2744,6 +2907,16 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
 
   const valueWarning = Number(departmentValue) > Number(totalValue) && Number(totalValue) > 0;
 
+  // Who could be put on this job, and who the scheduler has on it right now
+  // (across every part, for a split job).
+  const qualifiedStaff = staff.filter((s) => s.processes.includes(process));
+  const currentlyOn = useMemo(() => {
+    const assignments = job?.parts ? job.parts.map((p) => p.assignment) : [job?.assignment];
+    const ids = new Set();
+    assignments.forEach((a) => (a?.days || []).forEach((d) => d.staffId && ids.add(d.staffId)));
+    return [...ids].map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean);
+  }, [job, staff]);
+
   function handleSave() {
     const hoursTotal = Math.round(quantity * hoursPerUnit * 100) / 100;
     const data = {
@@ -2760,6 +2933,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       departmentValue: Number(departmentValue) || 0,
       tags,
       procedureId,
+      staffId: staffId || null,
       actualHours: job?.actualHours,
       bcJobNo: bcJobNo.trim(),
       bcJobTaskNo: bcJobTaskNo.trim(),
@@ -2881,6 +3055,33 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
           <span className="block text-xs text-slate-500">Machining, manual work, etc. Scheduled ahead of a job with the same due date that ships straight from here.</span>
         </span>
       </label>
+
+      {/* Manual staff assignment. Normally the scheduler picks whoever is free
+          and signed off on the process; naming someone here overrides that for
+          this job — it waits for them rather than handing the work to anyone
+          else, and won't quietly swap them out when the schedule is recomputed
+          or the job is dragged onto other equipment. */}
+      <Field label="Assigned to">
+        <select className={inputCls} value={staffId} onChange={(e) => setStaffId(e.target.value)}>
+          <option value="">Automatic — whoever is free</option>
+          {qualifiedStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          {/* A lock on someone who has since lost the sign-off (or on a job whose
+              process changed) stays selectable, so it's visible rather than
+              silently reverting to automatic. */}
+          {staffId && !qualifiedStaff.some((s) => s.id === staffId) && (
+            <option value={staffId}>
+              {staff.find((s) => s.id === staffId)?.name || 'Former staff member'} — not signed off on {process || 'this process'}
+            </option>
+          )}
+        </select>
+      </Field>
+      <p className="text-xs text-slate-500 -mt-2 mb-3">
+        {staffId
+          ? `Locked to ${staff.find((s) => s.id === staffId)?.name || 'this person'} — the job waits for them instead of going to whoever is free, and stays with them if you move it to other equipment.`
+          : currentlyOn.length
+          ? `Currently on it: ${currentlyOn.join(', ')}. Pick a name to keep the job with one person regardless of how the rest of the schedule reflows.`
+          : 'The scheduler will pick whoever is signed off on this process and has the hours free.'}
+      </p>
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="Total job value ($)">
