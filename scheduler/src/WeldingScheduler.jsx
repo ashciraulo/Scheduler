@@ -3379,6 +3379,63 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
     setRows((rs) => rs.map((r) => (r._rowId === rowId ? { ...r, ...patch } : r)));
   }
 
+  // One WIP row can cover several things this department has to schedule
+  // separately — distinct components on the one BC job, or stages done at
+  // different times. Splitting it here produces independent jobs, each with
+  // its own name and hours, rather than the job-level `parts` split: parts
+  // deliberately share one name and one backlog row, which is the opposite of
+  // what's wanted when the pieces are different components.
+  //
+  // Quantity, hours and both $ figures divide across the new rows so the
+  // totals still add up to what BC exported; the remainder goes to the first
+  // row. Every piece keeps the same BC job/task number, since they genuinely
+  // are the same BC line.
+  function splitRow(rowId) {
+    setRows((rs) => {
+      const i = rs.findIndex((r) => r._rowId === rowId);
+      if (i < 0) return rs;
+      const src = rs[i];
+      const nextId = rs.reduce((m, r) => Math.max(m, r._rowId), 0) + 1;
+      const group = src._splitGroup ?? src._rowId;
+
+      const half = (n, first) => {
+        const v = Number(n) || 0;
+        const b = Math.round((v / 2) * 100) / 100;
+        return first ? Math.round((v - b) * 100) / 100 : b;
+      };
+      const qA = Math.ceil((Number(src.quantity) || 1) / 2);
+      const qB = Math.max(1, (Number(src.quantity) || 1) - qA);
+
+      const base = src._splitGroup == null ? src.name : src.name.replace(/\s+—\s+\d+$/, '');
+      const piece = (first) => ({
+        ...src,
+        _splitGroup: group,
+        quantity: first ? qA : qB,
+        hoursTotal: half(src.hoursTotal, first),
+        totalValue: half(src.totalValue, first),
+        departmentValue: half(src.departmentValue, first),
+      });
+
+      // Number the new piece past the highest suffix already in the group, not
+      // by group size: splitting piece 1 and then piece 2 of a three-way split
+      // would otherwise hand out a number that already exists.
+      const suffixOf = (n) => { const m = /\s+—\s+(\d+)$/.exec(n); return m ? Number(m[1]) : 0; };
+      const used = src._splitGroup == null
+        ? [1] // the source row becomes "— 1" below
+        : rs.filter((r) => (r._splitGroup ?? r._rowId) === group).map((r) => suffixOf(r.name));
+      const nextSuffix = Math.max(0, ...used) + 1;
+
+      const a = { ...piece(true), name: src._splitGroup == null ? `${base} — 1` : src.name };
+      const b = { ...piece(false), _rowId: nextId, name: `${base} — ${nextSuffix}` };
+      // Keep the pieces adjacent so a split group reads as one block.
+      return [...rs.slice(0, i), a, b, ...rs.slice(i + 1)];
+    });
+  }
+
+  function removeRow(rowId) {
+    setRows((rs) => rs.filter((r) => r._rowId !== rowId));
+  }
+
   function applyTemplateToRow(rowId, templateId) {
     const t = templates.find((x) => x.id === templateId);
     if (!t) { updateRow(rowId, { templateId: null }); return; }
@@ -3401,13 +3458,15 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
     }));
   }
 
-  const includedRows = rows ? rows.filter((r) => r.include) : [];
+  // Names are editable now (a split needs distinct ones), so a blank name is a
+  // live condition rather than something settled when the rows were built.
+  const includedRows = rows ? rows.filter((r) => r.include && r.name.trim()) : [];
   const missingHours = includedRows.filter((r) => !r.hoursTotal || !r.process).length;
   const dupCount = rows ? rows.filter((r) => r._dup).length : 0;
   const invalidCount = rows ? rows.filter((r) => r._invalid).length : 0;
 
   function handleImportClick() {
-    const toImport = includedRows.map(({ _rowId, _invalid, _dup, include, ...job }) => job);
+    const toImport = includedRows.map(({ _rowId, _invalid, _dup, _splitGroup, include, ...job }) => job);
     onImport(toImport);
   }
 
@@ -3494,7 +3553,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
               resizing the modal and shoving the whole UI around, and the row
               list gets the full remaining width. */}
           <div className="grid lg:grid-cols-[250px_1fr] gap-3">
-          <aside className="space-y-3 lg:max-h-[58vh] lg:overflow-y-auto lg:pr-1">
+          <aside className="space-y-3 lg:max-h-[40vh] lg:overflow-y-auto lg:pr-1">
             <div className="bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
               <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Include if the description contains</div>
               <KeywordChips words={wipSettings.include} placeholder="weld, spray, hvof…" onChange={(w) => updateSettings({ include: w })} />
@@ -3570,8 +3629,8 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
           {/* Fixed height, not max-height: the row count changes as keywords
               are edited, and letting that resize the modal moved the whole
               dialog under the pointer mid-edit. */}
-          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto h-[46vh] overflow-y-auto">
-            <table className="w-full text-sm min-w-[900px]">
+          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto h-[40vh] overflow-y-auto">
+            <table className="w-full text-sm min-w-[760px]">
               <thead className="sticky top-0 bg-slate-900 z-10">
                 <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
                   <th className="px-3 py-2 font-medium"></th>
@@ -3704,9 +3763,32 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                         className="accent-amber-500"
                       />
                     </td>
-                    <td className="px-3 py-2 text-slate-200 max-w-[220px] truncate" title={r.name}>
-                      {r.name}
-                      {r._dup && <span className="ml-1.5 text-[10px] text-amber-400">already imported?</span>}
+                    <td className="px-3 py-2 text-slate-200">
+                      <div className={`flex items-center gap-1.5 ${r._splitGroup != null ? 'border-l-2 border-amber-600/60 pl-2' : ''}`}>
+                        <input
+                          type="text"
+                          className="w-[180px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
+                          value={r.name}
+                          title={r.name}
+                          onChange={(e) => updateRow(r._rowId, { name: e.target.value })}
+                        />
+                        <button
+                          type="button"
+                          title="Split into another job — for separate components or stages scheduled independently"
+                          className="text-slate-500 hover:text-amber-400 shrink-0"
+                          onClick={() => splitRow(r._rowId)}
+                        ><Plus size={13} /></button>
+                        {r._splitGroup != null && (
+                          <button
+                            type="button"
+                            title="Remove this piece of the split"
+                            className="text-slate-500 hover:text-red-400 shrink-0"
+                            onClick={() => removeRow(r._rowId)}
+                          ><Trash2 size={12} /></button>
+                        )}
+                      </div>
+                      {r._dup && <span className="text-[10px] text-amber-400">already imported?</span>}
+                      {r.include && !r.name.trim() && <span className="text-[10px] text-red-400">name required — won't import</span>}
                     </td>
                     <td className="px-3 py-2 text-slate-500 text-xs whitespace-nowrap">{r.bcJobNo || '—'}{r.bcJobTaskNo ? ` / ${r.bcJobTaskNo}` : ''}</td>
                     <td className="px-3 py-2 text-slate-400">{r.quantity}</td>
