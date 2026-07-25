@@ -774,8 +774,22 @@ const btnDanger = "inline-flex items-center gap-1.5 bg-red-950 hover:bg-red-900 
 const smallInput = "w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-amber-500/60";
 
 function Modal({ title, onClose, children, wide }) {
+  // A backdrop click closes the modal, but "click" fires on the nearest common
+  // ancestor of mousedown and mouseup — so selecting text inside the modal and
+  // releasing the mouse outside it counted as a backdrop click and threw away
+  // whatever had been typed. Only close when the gesture both started and
+  // ended on the backdrop itself.
+  const downOnBackdrop = useRef(false);
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => {
+        const closed = downOnBackdrop.current && e.target === e.currentTarget;
+        downOnBackdrop.current = false;
+        if (closed) onClose();
+      }}
+    >
       <div
         className={`bg-slate-900 border border-slate-700 rounded-lg shadow-2xl w-full ${wide ? 'max-w-5xl' : 'max-w-md'} max-h-[85vh] overflow-y-auto`}
         onClick={(e) => e.stopPropagation()}
@@ -790,7 +804,16 @@ function Modal({ title, onClose, children, wide }) {
   );
 }
 
-function MultiCheck({ options, value, onChange, getLabel = (x) => x, getId = (x) => x }) {
+// `showOrphans` renders selected values that are no longer offered as options,
+// so they can be unticked. Only for lists whose options are a stable set the
+// value is meant to stay inside (the process editors): a resource that kept a
+// deleted process showed the capability everywhere with no control to clear
+// it. Leave it off where options are filtered dynamically — in TemplateModal
+// the equipment list narrows to the chosen process, and an id outside it is
+// ordinary filtering, not stale data.
+function MultiCheck({ options, value, onChange, getLabel = (x) => x, getId = (x) => x, showOrphans = false }) {
+  const optionIds = options.map(getId);
+  const orphans = showOrphans ? value.filter((v) => !optionIds.includes(v)) : [];
   return (
     <div className="flex flex-wrap gap-2">
       {options.map((opt) => {
@@ -809,6 +832,17 @@ function MultiCheck({ options, value, onChange, getLabel = (x) => x, getId = (x)
           </button>
         );
       })}
+      {orphans.map((id) => (
+        <button
+          type="button"
+          key={id}
+          onClick={() => onChange(value.filter((v) => v !== id))}
+          title="No longer available — click to remove"
+          className="text-xs px-2.5 py-1.5 rounded-full border transition-colors bg-red-950/40 border-red-900 text-red-300 line-through"
+        >
+          {id}
+        </button>
+      ))}
     </div>
   );
 }
@@ -1399,8 +1433,51 @@ export default function WeldingScheduler() {
     setConfirmDelete(null);
   }
   function saveProcesses(list) {
+    // Removing a process here used to leave it behind on every piece of
+    // equipment and every staff member that had it: ResourcesView still drew
+    // it as a capability chip, but the editors only offer a checkbox per
+    // *current* process, so there was no control left to untick it with.
+    // Cascade the removal so resources can't keep a capability that no longer
+    // exists.
+    const removed = processes.filter((p) => !list.includes(p));
     setProcesses(list);
     saveKey('wf_processes', list);
+    if (!removed.length) return;
+
+    const stale = (arr) => arr.some((p) => removed.includes(p));
+    const strip = (arr) => arr.filter((p) => !removed.includes(p));
+
+    const eqHit = equipment.filter((e) => stale(e.processes));
+    if (eqHit.length) {
+      const next = equipment.map((e) => (stale(e.processes) ? { ...e, processes: strip(e.processes) } : e));
+      setEquipment(next);
+      saveKey('wf_equipment', next);
+    }
+    const stHit = staff.filter((s) => stale(s.processes));
+    if (stHit.length) {
+      const next = staff.map((s) => (stale(s.processes) ? { ...s, processes: strip(s.processes) } : s));
+      setStaff(next);
+      saveKey('wf_staff', next);
+    }
+
+    // Templates and jobs deliberately keep their process string: it records
+    // what the work actually is, and blanking it would silently unschedule
+    // them. Say so instead, so the user can retarget them on purpose.
+    const tplHit = templates.filter((t) => removed.includes(t.process)).length;
+    const jobHit = jobs.filter((j) => removed.includes(j.process) && j.status !== 'complete').length;
+
+    const cleared = [];
+    if (eqHit.length) cleared.push(`${eqHit.length} equipment`);
+    if (stHit.length) cleared.push(`${stHit.length} staff`);
+    let msg = `Removed ${removed.join(', ')}`;
+    msg += cleared.length ? ` from ${cleared.join(' and ')}.` : '.';
+    if (tplHit || jobHit) {
+      const orphaned = [];
+      if (tplHit) orphaned.push(`${tplHit} template${tplHit > 1 ? 's' : ''}`);
+      if (jobHit) orphaned.push(`${jobHit} open job${jobHit > 1 ? 's' : ''}`);
+      msg += ` ${orphaned.join(' and ')} still use it and won't schedule until reassigned.`;
+    }
+    showToast(msg);
   }
 
   // ---------- costing: cost centres + procedures ----------
@@ -3683,7 +3760,7 @@ function EquipmentModal({ item, processes, allTags = [], onClose, onSave }) {
         </select>
       </Field>
       <Field label="Processes it can run">
-        <MultiCheck options={processes} value={procs} onChange={setProcs} />
+        <MultiCheck options={processes} value={procs} onChange={setProcs} showOrphans />
       </Field>
       <Field label="Capability tags (optional)">
         <TagEditor value={tags} onChange={setTags} suggestions={allTags} />
@@ -3900,7 +3977,7 @@ function StaffModal({ item, processes, onClose, onSave }) {
     <Modal title={isNew ? 'Add staff member' : 'Edit staff member'} onClose={onClose}>
       <Field label="Name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
       <Field label="Certified / competent processes">
-        <MultiCheck options={processes} value={procs} onChange={setProcs} />
+        <MultiCheck options={processes} value={procs} onChange={setProcs} showOrphans />
       </Field>
       <Field label="Business Central Resource No. (optional)">
         <input className={inputCls} value={bcResourceNo} onChange={(e) => setBcResourceNo(e.target.value)} placeholder="e.g. RES-0042" />
