@@ -36,3 +36,8 @@ pnpm-debug.log*
 *.xls
 scheduler-jobs-*.json
 wip-review-*.json
+
+# e2e run output (screenshots) and the generated WIP fixture. Real WIP exports
+# are commercially sensitive; the fixture is regenerated on every run.
+e2e/artifacts/
+e2e/fixtures/*.xlsx

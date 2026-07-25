@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch makes the in-flight run redundant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            scheduler/package-lock.json
+            e2e/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: scheduler
+        run: npm ci
+
+      - name: Build
+        working-directory: scheduler
+        run: npm run build
+
+      # offline-package/ is build output, and CLAUDE.md forbids hand-editing it.
+      # Rebuilding it and diffing catches a change to src/ that was committed
+      # without running `npm run package` — which would otherwise ship a stale
+      # bundle to the host PC. Vite's output is deterministic for the same
+      # input, so this compares content-hashed filenames safely.
+      - name: offline-package is up to date with src
+        working-directory: scheduler
+        run: |
+          npm run package
+          if ! git diff --exit-code -- ../offline-package; then
+            echo "::error::offline-package/ is stale. Run 'npm run package' in scheduler/ and commit the result."
+            exit 1
+          fi
+
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Serve the production build
+        working-directory: scheduler
+        run: |
+          npx vite preview --port 4173 --strictPort &
+          echo $! > /tmp/preview.pid
+          timeout 60 bash -c 'until curl -sf http://localhost:4173 >/dev/null; do sleep 1; done'
+
+      - name: End-to-end suites
+        working-directory: e2e
+        env:
+          BASE_URL: http://localhost:4173
+        run: npm test
+
+      - name: Stop the server
+        if: always()
+        run: kill "$(cat /tmp/preview.pid)" || true
+
+      # Screenshots are taken at the end of every suite, so they are just as
+      # useful for seeing what a failing run actually rendered.
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

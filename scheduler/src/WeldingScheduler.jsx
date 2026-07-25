@@ -4189,8 +4189,12 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
 
       {/* ---------------- step 2: WIP review (.xlsx only) ---------------- */}
       {stage === 'wip' && analysis && (
-        <div>
-          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+        // Fixed height, so nothing inside can change the dialog's outer size.
+        // The keyword rail and the row table were already pinned, but the
+        // notices above them appear and disappear as rules fire, which still
+        // moved the whole centred dialog mid-edit — the exact complaint.
+        <div className="flex flex-col h-[68vh]">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3 flex-none">
             <p className="text-xs text-slate-400">
               {fileName} · sheet “{parsed.sheetName}” · headers on row {parsed.headerRowNumber} · {counts.total} rows
             </p>
@@ -4198,7 +4202,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
           </div>
 
           {/* stats */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-3 flex-none">
             {[
               ['Rows in file', counts.total, 'text-slate-200'],
               ['Match your keywords', counts.matched, 'text-emerald-400'],
@@ -4215,13 +4219,13 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
           </div>
 
           {counts.matched === 0 && (
-            <p className="text-xs text-amber-400 mb-3 flex items-start gap-1.5">
+            <p className="text-xs text-amber-400 mb-3 flex items-start gap-1.5 flex-none">
               <AlertTriangle size={13} className="mt-0.5 shrink-0" />
               No rows matched. Check the keywords below, and that the Description column is mapped to the right header.
             </p>
           )}
           {counts.held > 0 && (
-            <p className="text-[11px] text-slate-400 mb-3">
+            <p className="text-[11px] text-slate-400 mb-3 flex-none">
               {counts.held} row{counts.held === 1 ? '' : 's'} excluded by a combination rule — under “Not matched”, still tickable if one should come in.
             </p>
           )}
@@ -4230,8 +4234,8 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
               left, where growing a chip list scrolls the rail instead of
               resizing the modal and shoving the whole UI around, and the row
               list gets the full remaining width. */}
-          <div className="grid lg:grid-cols-[250px_1fr] gap-3">
-          <aside className="space-y-3 lg:max-h-[40vh] lg:overflow-y-auto lg:pr-1">
+          <div className="grid lg:grid-cols-[250px_1fr] gap-3 flex-1 min-h-0">
+          <aside className="space-y-3 overflow-y-auto lg:pr-1 min-h-0">
             <div className="bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
               <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Include if the description contains</div>
               <KeywordChips words={wipSettings.include} placeholder="weld, spray, hvof…" onChange={(w) => updateSettings({ include: w })} />
@@ -4276,9 +4280,9 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
             </div>
           </aside>
 
-          <div className="min-w-0">
+          <div className="min-w-0 flex flex-col min-h-0">
           {/* view tabs + search */}
-          <div className="flex items-center gap-2 flex-wrap mb-2">
+          <div className="flex items-center gap-2 flex-wrap mb-2 flex-none">
             {viewTabs.map(([id, label, n]) => (
               <button
                 key={id}
@@ -4299,7 +4303,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
             />
           </div>
 
-          <div className="flex items-center gap-3 mb-2 text-[11px] text-slate-500">
+          <div className="flex items-center gap-3 mb-2 text-[11px] text-slate-500 flex-none">
             <button type="button" className="hover:text-amber-400" onClick={() => tickVisible(true)}>Tick all in view</button>
             <button type="button" className="hover:text-amber-400" onClick={() => tickVisible(false)}>Untick all in view</button>
           </div>
@@ -4307,7 +4311,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
           {/* Fixed height, not max-height: the row count changes as keywords
               are edited, and letting that resize the modal moved the whole
               dialog under the pointer mid-edit. */}
-          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto h-[40vh] overflow-y-auto">
+          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto flex-1 min-h-0 overflow-y-auto">
             <table className="w-full text-sm min-w-[760px]">
               <thead className="sticky top-0 bg-slate-900 z-10">
                 <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -4360,7 +4364,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
           </div>
           </div>
 
-          <div className="flex items-center justify-between pt-4 mt-3 border-t border-slate-800">
+          <div className="flex items-center justify-between pt-4 mt-3 border-t border-slate-800 flex-none">
             <span className="text-xs text-slate-500">{selected.size} job{selected.size === 1 ? '' : 's'} ticked</span>
             <div className="flex gap-2">
               <button className={btnGhost} onClick={onClose}>Cancel</button>
