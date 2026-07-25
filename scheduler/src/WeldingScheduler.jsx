@@ -23,22 +23,43 @@ const SHIFT_ORDER = ['day', 'afternoon'];
 const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']; // indexed by Date.getDay()
 const DAY_COLS = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
 
+// `production: false` means rostered on but not available for scheduled
+// production work — training, covering the office, on the tools elsewhere.
+// Distinct from `working: false` (not rostered at all) so the roster still
+// shows the person is in, and distinct from leave, which is a date range.
 function defaultWeeklyRoster(shift = 'day') {
   return {
-    mon: { working: true, shift, hours: 8 },
-    tue: { working: true, shift, hours: 8 },
-    wed: { working: true, shift, hours: 8 },
-    thu: { working: true, shift, hours: 8 },
-    fri: { working: true, shift, hours: 8 },
-    sat: { working: false, shift: 'day', hours: 0 },
-    sun: { working: false, shift: 'day', hours: 0 },
+    mon: { working: true, production: true, shift, hours: 8 },
+    tue: { working: true, production: true, shift, hours: 8 },
+    wed: { working: true, production: true, shift, hours: 8 },
+    thu: { working: true, production: true, shift, hours: 8 },
+    fri: { working: true, production: true, shift, hours: 8 },
+    sat: { working: false, production: true, shift: 'day', hours: 0 },
+    sun: { working: false, production: true, shift: 'day', hours: 0 },
   };
 }
+
+// Absence kinds. All of them make someone unavailable — the distinction is for
+// the record, so "I'm on a course" doesn't have to be booked as annual leave.
+const ABSENCE_KINDS = [
+  ['leave', 'Leave'],
+  ['sick', 'Sick'],
+  ['training', 'Training'],
+  ['other', 'Other duties'],
+];
+const absenceKindLabel = (k) => (ABSENCE_KINDS.find(([v]) => v === k) || ABSENCE_KINDS[0])[1];
+
 function normalizeStaff(s) {
+  const roster = s.weeklyRoster || defaultWeeklyRoster();
   return {
     ...s,
-    weeklyRoster: s.weeklyRoster || defaultWeeklyRoster(),
-    leavePeriods: s.leavePeriods || [],
+    // `production` post-dates the roster, so days saved before it exist
+    // without the flag — absent means available, or every existing roster
+    // would read as non-production.
+    weeklyRoster: Object.fromEntries(
+      Object.entries(roster).map(([k, d]) => [k, { production: true, ...d }])
+    ),
+    leavePeriods: (s.leavePeriods || []).map((p) => ({ kind: 'leave', ...p })),
   };
 }
 
@@ -369,6 +390,9 @@ function getStaffDayInfo(staffMember, dateStr) {
   const key = DAY_KEYS[new Date(dateStr + 'T00:00:00').getDay()];
   const pattern = (staffMember.weeklyRoster || {})[key];
   if (!pattern || !pattern.working) return { working: false, shift: null, hours: 0 };
+  // Rostered on but not available for production — the scheduler must treat
+  // this exactly like a day off; the difference is only what the roster shows.
+  if (pattern.production === false) return { working: false, shift: null, hours: 0 };
   return { working: true, shift: pattern.shift || 'day', hours: Number(pattern.hours) || 0 };
 }
 function fmtDay(dateStr) {
@@ -1126,14 +1150,21 @@ function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, o
   );
 }
 
-function ActualHoursModal({ job, onCancel, onConfirm }) {
-  const [hours, setHours] = useState(String(job.actualHours ?? job.hoursTotal ?? ''));
+function ActualHoursModal({ job, logged = 0, onCancel, onConfirm }) {
+  // Prefer what was logged day by day over anything recalled now: that's the
+  // whole point of the daily log. Fall back to a stored actual, then estimate.
+  const [hours, setHours] = useState(String(logged > 0 ? logged : (job.actualHours ?? job.hoursTotal ?? '')));
   return (
     <Modal title="Job complete — record actual hours" onClose={onCancel}>
       <p className="text-sm text-slate-300 mb-3"><span className="font-semibold text-slate-100">{job.name}</span> is being marked complete.</p>
       <Field label={`Actual hours taken — estimated ${job.hoursTotal}h${job.quantity > 1 ? ` for ${job.quantity} units` : ''}`}>
         <input type="number" min={0} step={0.25} className={inputCls} value={hours} onChange={(e) => setHours(e.target.value)} autoFocus />
       </Field>
+      {logged > 0 && (
+        <p className="text-xs text-emerald-400 -mt-2 mb-3">
+          Pre-filled from {logged}h logged daily against this job. Adjust if the log missed something.
+        </p>
+      )}
       <p className="text-xs text-slate-500 mb-3">
         {job.templateId
           ? "Saved to the job history — the template's hours-per-unit becomes the average of actual hours across its completed jobs."
@@ -1142,6 +1173,166 @@ function ActualHoursModal({ job, onCancel, onConfirm }) {
       <div className="flex items-center justify-end gap-2">
         <button className={btnGhost} onClick={onCancel}>Cancel</button>
         <button className={btnPrimary} onClick={() => onConfirm(Math.max(0, Number(hours) || 0) || job.hoursTotal)}>Save &amp; complete</button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================
+   DAILY HOURS LOG
+   Records what was actually worked, day by day, instead of asking
+   someone to reconstruct a total weeks later at completion time.
+   Opens on a date, lists the jobs the schedule expected that day
+   (so the common case is confirming numbers, not hunting for jobs),
+   and lets any other active job be added for when reality differed.
+   ============================================================ */
+
+function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
+  const [day, setDay] = useState(date);
+  const [rows, setRows] = useState([]);
+  const [addId, setAddId] = useState('');
+
+  const activeJobs = useMemo(() => jobs.filter((j) => j.status !== 'complete'), [jobs]);
+
+  // Jobs the plan put on this day, plus any that already have an entry for it.
+  useEffect(() => {
+    const existing = entries.filter((e) => e.date === day);
+    const plannedIds = new Set();
+    activeJobs.forEach((j) => {
+      const units = Array.isArray(j.parts) && j.parts.length ? j.parts : [j];
+      units.forEach((u) => {
+        if ((u.assignment?.days || []).some((d) => d.date === day)) plannedIds.add(j.id);
+      });
+    });
+    existing.forEach((e) => plannedIds.add(e.jobId));
+
+    setRows([...plannedIds].map((jobId) => {
+      const e = existing.find((x) => x.jobId === jobId);
+      const job = activeJobs.find((j) => j.id === jobId);
+      const units = job && Array.isArray(job.parts) && job.parts.length ? job.parts : job ? [job] : [];
+      const planned = units.reduce((s, u) =>
+        s + (u.assignment?.days || []).filter((d) => d.date === day).reduce((t, d) => t + (d.hours || 0), 0), 0);
+      return {
+        jobId,
+        name: job ? job.name : '(deleted job)',
+        planned: Math.round(planned * 10) / 10,
+        hours: e ? String(e.hours) : '',
+        staffId: e ? (e.staffId || '') : '',
+        note: e ? (e.note || '') : '',
+        id: e ? e.id : uid('tl'),
+      };
+    }).sort((a, b) => b.planned - a.planned || a.name.localeCompare(b.name)));
+  }, [day, entries, activeJobs]);
+
+  const setRow = (jobId, patch) => setRows((rs) => rs.map((r) => (r.jobId === jobId ? { ...r, ...patch } : r)));
+  const total = Math.round(rows.reduce((s, r) => s + (Number(r.hours) || 0), 0) * 100) / 100;
+  const addable = activeJobs.filter((j) => !rows.some((r) => r.jobId === j.id));
+
+  return (
+    <Modal title="Daily hours log" onClose={onClose} wide>
+      <div className="flex items-end gap-3 flex-wrap mb-3">
+        <Field label="Date">
+          <input type="date" className={inputCls} value={day} onChange={(e) => setDay(e.target.value)} />
+        </Field>
+        <p className="text-xs text-slate-500 pb-3 flex-1 min-w-[220px]">
+          Jobs the schedule expected on this day are listed for you. Leave a row blank if nothing was done on it.
+        </p>
+      </div>
+
+      <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto max-h-[42vh] overflow-y-auto">
+        <table className="w-full text-sm min-w-[720px]">
+          <thead className="sticky top-0 bg-slate-900 z-10">
+            <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+              <th className="px-3 py-2 font-medium">Job</th>
+              <th className="px-3 py-2 font-medium">Planned</th>
+              <th className="px-3 py-2 font-medium">Hours worked</th>
+              <th className="px-3 py-2 font-medium">Who</th>
+              <th className="px-3 py-2 font-medium">Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr><td colSpan={5} className="px-3 py-8 text-center text-slate-500 text-xs">
+                Nothing was scheduled on this day. Add a job below if work happened anyway.
+              </td></tr>
+            )}
+            {rows.map((r) => (
+              <tr key={r.jobId} className="border-b border-slate-800/60">
+                <td className="px-3 py-2 text-slate-200 max-w-[260px] truncate" title={r.name}>{r.name}</td>
+                <td className="px-3 py-2 text-slate-500 text-xs whitespace-nowrap">{r.planned ? `${r.planned}h` : '—'}</td>
+                <td className="px-3 py-2">
+                  <input
+                    type="number" min={0} step={0.25}
+                    className="w-20 bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-100"
+                    value={r.hours}
+                    placeholder="0"
+                    onChange={(e) => setRow(r.jobId, { hours: e.target.value })}
+                  />
+                </td>
+                <td className="px-3 py-2">
+                  <select
+                    className="w-[130px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
+                    value={r.staffId}
+                    onChange={(e) => setRow(r.jobId, { staffId: e.target.value })}
+                  >
+                    <option value="">—</option>
+                    {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </td>
+                <td className="px-3 py-2">
+                  <input
+                    type="text"
+                    className="w-full min-w-[140px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
+                    value={r.note}
+                    placeholder="optional"
+                    onChange={(e) => setRow(r.jobId, { note: e.target.value })}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {addable.length > 0 && (
+        <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <span className="text-xs text-slate-400">Also worked on:</span>
+          <select
+            className={`${inputCls} py-1.5 flex-1 min-w-[200px]`}
+            value={addId}
+            onChange={(e) => setAddId(e.target.value)}
+          >
+            <option value="">Choose a job…</option>
+            {addable.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+          </select>
+          <button
+            type="button"
+            className={btnGhost}
+            disabled={!addId}
+            onClick={() => {
+              const j = activeJobs.find((x) => x.id === addId);
+              if (!j) return;
+              setRows((rs) => [...rs, { jobId: j.id, name: j.name, planned: 0, hours: '', staffId: '', note: '', id: uid('tl') }]);
+              setAddId('');
+            }}
+          ><Plus size={14} /> Add</button>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between pt-4 mt-3 border-t border-slate-800">
+        <span className="text-xs text-slate-500">{total}h logged for {fmtDate(day)}</span>
+        <div className="flex gap-2">
+          <button className={btnGhost} onClick={onClose}>Cancel</button>
+          <button
+            className={btnPrimary}
+            onClick={() => onSave(day, rows.map((r) => ({
+              id: r.id, jobId: r.jobId, date: day,
+              hours: Number(r.hours) || 0,
+              staffId: r.staffId || null,
+              note: (r.note || '').trim(),
+            })))}
+          ><Check size={14} /> Save log</button>
+        </div>
       </div>
     </Modal>
   );
@@ -1259,6 +1450,12 @@ export default function WeldingScheduler() {
   const [jobs, setJobs] = useState([]);
   const [costCentres, setCostCentres] = useState([]);
   const [procedures, setProcedures] = useState([]);
+  const [categories, setCategories] = useState([]);
+  // Daily record of hours actually worked per job. Recalling a total at the
+  // point of completion is guesswork; this is entered day by day while it's
+  // still fresh, and the completion dialog then totals it rather than asking.
+  const [timeLog, setTimeLog] = useState([]);
+  const [timeLogDate, setTimeLogDate] = useState(null); // ISO date, or null when closed
   // Rows the last WIP import didn't claim, kept so a job whose scope later
   // grows into our work can be pulled in without re-running the whole import.
   // See PARKED_KEY for what is and isn't stored.
@@ -1309,7 +1506,7 @@ export default function WeldingScheduler() {
   // ---------- initial load ----------
   useEffect(() => {
     (async () => {
-      const [eq, st, tp, pr, jb, cc, pc, pk] = await Promise.all([
+      const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl] = await Promise.all([
         loadKey('wf_equipment', null),
         loadKey('wf_staff', null),
         loadKey('wf_templates', null),
@@ -1318,8 +1515,11 @@ export default function WeldingScheduler() {
         loadKey('wf_costcentres', null),
         loadKey('wf_procedures', null),
         loadKey(PARKED_KEY, null),
+        loadKey('wf_categories', null),
+        loadKey(TIMELOG_KEY, null),
       ]);
       if (pk) setParked(pk);
+      if (tl) setTimeLog(tl);
       const finalEq = eq || seedEquipment();
       const finalSt = (st || seedStaff()).map(normalizeStaff);
       const finalTp = tp || seedTemplates();
@@ -1334,6 +1534,11 @@ export default function WeldingScheduler() {
       setProcesses(finalPr);
       setCostCentres(finalCc);
       setProcedures(finalPc);
+      // Categories used to be free text typed per template. Seed the managed
+      // list from whatever the existing templates already use, so nothing an
+      // existing user set up disappears the first time they load this.
+      const finalCt = ct || [...new Set(finalTp.map((t) => t.category).filter(Boolean))].sort();
+      setCategories(finalCt);
 
       const scheduled = runScheduler(finalJb, finalEq, finalSt, workingDays, todayIdx);
       setJobs(scheduled);
@@ -1345,6 +1550,7 @@ export default function WeldingScheduler() {
       saveKey('wf_jobs', scheduled);
       if (!cc) saveKey('wf_costcentres', finalCc);
       if (!pc) saveKey('wf_procedures', finalPc);
+      if (!ct) saveKey('wf_categories', finalCt);
 
       setLoaded(true);
     })();
@@ -1360,7 +1566,7 @@ export default function WeldingScheduler() {
   // write anything back: a save would bump the server's version and every
   // other screen would see *that* as a change, and so on around the loop.
   const reloadFromStore = useCallback(async () => {
-    const [eq, st, tp, pr, jb, cc, pc, pk] = await Promise.all([
+    const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl] = await Promise.all([
       loadKey('wf_equipment', null),
       loadKey('wf_staff', null),
       loadKey('wf_templates', null),
@@ -1369,7 +1575,11 @@ export default function WeldingScheduler() {
       loadKey('wf_costcentres', null),
       loadKey('wf_procedures', null),
       loadKey(PARKED_KEY, null),
+      loadKey('wf_categories', null),
+      loadKey(TIMELOG_KEY, null),
     ]);
+    if (ct) setCategories(ct);
+    if (tl) setTimeLog(tl);
     const nextEq = eq || latest.current.equipment;
     const nextSt = st ? st.map(normalizeStaff) : latest.current.staff;
     if (eq) setEquipment(nextEq);
@@ -1391,6 +1601,7 @@ export default function WeldingScheduler() {
   const busyEditing = !!(
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
+    || timeLogDate
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1604,10 +1815,72 @@ export default function WeldingScheduler() {
     setConfirmDelete(null);
   }
   function saveTemplate(item, isNew) {
+    const before = isNew ? null : templates.find((t) => t.id === item.id);
     const list = isNew ? [...templates, item] : templates.map((t) => (t.id === item.id ? item : t));
     setTemplates(list);
     saveKey('wf_templates', list);
     setEditingTemplate(null);
+
+    // Capability requirements describe the work, so changing them on a template
+    // has to reach the open jobs made from it — they were copied at the moment
+    // the template was picked and then never looked at the template again.
+    // A job whose requirements have since been edited by hand keeps them: this
+    // app treats a manual decision as the more specific instruction (same as
+    // pinning, or a hand-assigned person). The toast says how many of each, so
+    // a customised job that *should* follow the template can be fixed
+    // deliberately rather than being silently overwritten.
+    const sameTags = (a, b) => {
+      const x = [...(a || [])].sort(); const y = [...(b || [])].sort();
+      return x.length === y.length && x.every((v, i) => v === y[i]);
+    };
+    if (before && !sameTags(before.tags, item.tags)) {
+      let updated = 0, kept = 0;
+      const nextJobs = jobs.map((j) => {
+        if (j.templateId !== item.id || j.status === 'complete') return j;
+        if (!sameTags(j.tags, before.tags)) { kept += 1; return j; }
+        updated += 1;
+        return { ...j, tags: [...(item.tags || [])], updatedAt: new Date().toISOString() };
+      });
+      if (updated) recompute(nextJobs, equipment, staff);
+      if (updated || kept) {
+        let msg = updated
+          ? `Capability requirements updated on ${updated} open job${updated === 1 ? '' : 's'}.`
+          : 'No open jobs took the new capability requirements.';
+        if (kept) msg += ` ${kept} kept ${kept === 1 ? 'its' : 'their'} own edited requirements.`;
+        showToast(msg);
+      }
+    }
+  }
+
+  // Replace every entry for one date with what the dialog was showing, so a
+  // row cleared to blank removes its entry rather than leaving a stale one.
+  function saveTimeLog(date, entries) {
+    const rest = timeLog.filter((e) => e.date !== date);
+    const kept = entries.filter((e) => Number(e.hours) > 0);
+    const next = [...rest, ...kept];
+    setTimeLog(next);
+    saveKey(TIMELOG_KEY, next);
+    setTimeLogDate(null);
+    const total = Math.round(kept.reduce((s, e) => s + Number(e.hours), 0) * 100) / 100;
+    showToast(kept.length
+      ? `Logged ${total}h across ${kept.length} job${kept.length === 1 ? '' : 's'} for ${fmtDate(date)}.`
+      : `Cleared the hours log for ${fmtDate(date)}.`);
+  }
+
+  function saveCategories(list) {
+    // Same cascade as saveProcesses: a category removed here must not linger on
+    // a template as a value the drop-down can no longer offer.
+    const removed = categories.filter((c) => !list.includes(c));
+    setCategories(list);
+    saveKey('wf_categories', list);
+    if (!removed.length) return;
+    const hit = templates.filter((t) => removed.includes(t.category));
+    if (hit.length) {
+      const next = templates.map((t) => (removed.includes(t.category) ? { ...t, category: '' } : t));
+      setTemplates(next);
+      saveKey('wf_templates', next);
+      showToast(`Removed ${removed.join(', ')} — ${hit.length} template${hit.length === 1 ? '' : 's'} moved to Uncategorised.`);
+    }
   }
   function deleteTemplate(id) {
     const list = templates.filter((t) => t.id !== id);
@@ -1697,7 +1970,6 @@ export default function WeldingScheduler() {
   const staffById = useMemo(() => Object.fromEntries(staff.map((s) => [s.id, s])), [staff]);
   const equipById = useMemo(() => Object.fromEntries(equipment.map((e) => [e.id, e])), [equipment]);
   const allTags = useMemo(() => [...new Set([...equipment.flatMap((e) => e.tags || []), ...templates.flatMap((t) => t.tags || [])])].sort(), [equipment, templates]);
-  const templateCategories = useMemo(() => [...new Set(templates.map((t) => t.category).filter(Boolean))], [templates]);
 
   // Flattened to part level (not just job level) so a split job's specific
   // unscheduled/conflicted part can be dragged onto the schedule on its own.
@@ -1784,6 +2056,15 @@ export default function WeldingScheduler() {
             >
               {readOnly ? <Pin size={14} /> : <PinOff size={14} />} {readOnly ? 'View only' : 'Editing'}
             </button>
+            {!readOnly && !displayMode && (
+              <button
+                onClick={() => setTimeLogDate(isoDate(new Date()))}
+                className={btnGhost}
+                title="Record the hours actually worked on each job today"
+              >
+                <Clock size={14} /> Log hours
+              </button>
+            )}
             <button
               onClick={() => setDisplayMode((d) => !d)}
               className={`${btnGhost} ${displayMode ? 'border-amber-500 text-amber-300' : ''}`}
@@ -1827,6 +2108,7 @@ export default function WeldingScheduler() {
             jobs={jobs}
             equipment={equipment}
             staff={staff}
+            timeLog={timeLog}
             readOnly={readOnly}
             onAdd={() => setEditingJob('new')}
             onImport={() => setImportOpen(true)}
@@ -1852,11 +2134,13 @@ export default function WeldingScheduler() {
             templates={templates}
             equipment={equipment}
             processes={processes}
+            categories={categories}
             readOnly={readOnly}
             onAdd={() => setEditingTemplate('new')}
             onEdit={(t) => setEditingTemplate(t)}
             onDelete={(t) => setConfirmDelete({ type: 'template', id: t.id, name: t.name })}
             onSaveProcesses={saveProcesses}
+            onSaveCategories={saveCategories}
           />
         )}
 
@@ -1926,6 +2210,17 @@ export default function WeldingScheduler() {
         />
       )}
 
+      {timeLogDate && (
+        <TimeLogModal
+          date={timeLogDate}
+          jobs={jobs}
+          staff={staff}
+          entries={timeLog}
+          onClose={() => setTimeLogDate(null)}
+          onSave={saveTimeLog}
+        />
+      )}
+
       {parkedOpen && (
         <ImportJobsModal
           templates={templates}
@@ -1945,7 +2240,7 @@ export default function WeldingScheduler() {
           procedures={procedures}
           costCentres={costCentres}
           allTags={allTags}
-          categorySuggestions={templateCategories}
+          categorySuggestions={categories}
           onClose={() => setEditingTemplate(null)}
           onSave={(data) => saveTemplate(data, editingTemplate === 'new')}
         />
@@ -1992,6 +2287,7 @@ export default function WeldingScheduler() {
 
       {pendingComplete && (
         <ActualHoursModal
+          logged={loggedHours(timeLog, pendingComplete.id)}
           job={pendingComplete}
           onCancel={() => setPendingComplete(null)}
           onConfirm={completeWithHours}
@@ -2390,7 +2686,7 @@ function ScheduleView({
    BACKLOG VIEW (table of all jobs)
    ============================================================ */
 
-function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onOpenParked, parkedCount = 0, onEdit, onToggleComplete, onUnpin, onDelete }) {
+function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, onImport, onOpenParked, parkedCount = 0, onEdit, onToggleComplete, onUnpin, onDelete }) {
   const [filter, setFilter] = useState('active');
   const filtered = jobs.filter((j) => (filter === 'all' ? true : filter === 'complete' ? j.status === 'complete' : j.status !== 'complete'));
   // Same ordering the scheduler uses, so the list reads in the order the work
@@ -2465,7 +2761,22 @@ function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onOpen
                   </td>
                   <td className="px-3 py-2 text-slate-400">{j.process}</td>
                   <td className="px-3 py-2 text-slate-400">{j.quantity}</td>
-                  <td className="px-3 py-2 text-slate-400">{j.hoursTotal}h</td>
+                  <td className="px-3 py-2 text-slate-400">
+                    {j.hoursTotal}h
+                    {(() => {
+                      // Actual hours logged day by day, shown against the
+                      // estimate so drift is visible before completion.
+                      const lg = loggedHours(timeLog, j.id);
+                      if (!lg) return null;
+                      const over = lg > j.hoursTotal;
+                      return (
+                        <span
+                          className={`block text-[10px] ${over ? 'text-amber-400' : 'text-emerald-400'}`}
+                          title={over ? 'More hours logged than estimated' : 'Hours logged so far'}
+                        >{lg}h logged</span>
+                      );
+                    })()}
+                  </td>
                   <td className="px-3 py-2 text-slate-400">
                     <div className="flex items-center gap-2 w-24">
                       <div className="h-1.5 flex-1 bg-slate-800 rounded-full overflow-hidden">
@@ -2538,8 +2849,9 @@ function groupTemplatesByCategory(templates) {
   return Object.keys(map).sort().map((k) => [k, map[k]]);
 }
 
-function TemplatesView({ templates, equipment, processes, readOnly, onAdd, onEdit, onDelete, onSaveProcesses }) {
+function TemplatesView({ templates, equipment, processes, categories = [], readOnly, onAdd, onEdit, onDelete, onSaveProcesses, onSaveCategories }) {
   const [newProcess, setNewProcess] = useState('');
+  const [newCategory, setNewCategory] = useState('');
   return (
     <div className="grid lg:grid-cols-3 gap-4">
       <div className="lg:col-span-2">
@@ -2582,6 +2894,47 @@ function TemplatesView({ templates, equipment, processes, readOnly, onAdd, onEdi
         ))}
       </div>
       <div>
+        <h2 className="text-lg font-bold text-slate-100 mb-4">Template categories</h2>
+        <div className="border border-slate-800 bg-slate-900 rounded-lg p-4 mb-6">
+          <div className="space-y-1.5 mb-3">
+            {categories.length === 0 && <p className="text-xs text-slate-500 italic">None yet — add one to group your templates.</p>}
+            {categories.map((c) => {
+              const used = templates.filter((t) => t.category === c).length;
+              return (
+                <div key={c} className="flex items-center justify-between text-sm text-slate-300 bg-slate-800/60 rounded px-2 py-1.5">
+                  <span>{c} <span className="text-[11px] text-slate-500">· {used}</span></span>
+                  {!readOnly && (
+                    <button onClick={() => onSaveCategories(categories.filter((x) => x !== c))} className="text-slate-500 hover:text-red-400"><X size={13} /></button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {!readOnly && (
+            <div className="flex gap-2">
+              <input
+                value={newCategory}
+                onChange={(e) => setNewCategory(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  const v = newCategory.trim();
+                  if (v && !categories.includes(v)) { onSaveCategories([...categories, v].sort()); setNewCategory(''); }
+                }}
+                placeholder="Add a category…"
+                className={inputCls}
+              />
+              <button
+                className={btnGhost}
+                onClick={() => {
+                  const v = newCategory.trim();
+                  if (v && !categories.includes(v)) { onSaveCategories([...categories, v].sort()); setNewCategory(''); }
+                }}
+              ><Plus size={14} /></button>
+            </div>
+          )}
+        </div>
+
         <h2 className="text-lg font-bold text-slate-100 mb-4">Welding &amp; coating processes</h2>
         <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
           <div className="space-y-1.5 mb-3">
@@ -2622,6 +2975,7 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
   const [leaveStart, setLeaveStart] = useState(isoDate(new Date()));
   const [leaveEnd, setLeaveEnd] = useState(isoDate(new Date()));
   const [leaveReason, setLeaveReason] = useState('');
+  const [leaveKind, setLeaveKind] = useState('leave');
 
   function updateDay(member, dayKey, patch) {
     const roster = { ...(member.weeklyRoster || defaultWeeklyRoster()) };
@@ -2631,10 +2985,11 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
 
   function addLeave() {
     if (!leaveModalFor) return;
-    const periods = [...(leaveModalFor.leavePeriods || []), { id: uid('lv'), startDate: leaveStart, endDate: leaveEnd, reason: leaveReason.trim() }];
+    const periods = [...(leaveModalFor.leavePeriods || []), { id: uid('lv'), kind: leaveKind, startDate: leaveStart, endDate: leaveEnd, reason: leaveReason.trim() }];
     onUpdateStaff({ ...leaveModalFor, leavePeriods: periods });
     setLeaveModalFor(null);
     setLeaveReason('');
+    setLeaveKind('leave');
   }
   function removeLeave(member, id) {
     onUpdateStaff({ ...member, leavePeriods: (member.leavePeriods || []).filter((p) => p.id !== id) });
@@ -2663,25 +3018,29 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
                 <tr key={m.id} className="border-b border-slate-800/60">
                   <td className="px-3 py-2 font-medium text-slate-200 sticky left-0 bg-slate-900 whitespace-nowrap">{m.name}</td>
                   {DAY_COLS.map(([key]) => {
-                    const pattern = (m.weeklyRoster || {})[key] || { working: false, shift: 'day', hours: 0 };
+                    const pattern = (m.weeklyRoster || {})[key] || { working: false, production: true, shift: 'day', hours: 0 };
+                    const nonProd = pattern.working && pattern.production === false;
                     return (
                       <td key={key} className="px-1.5 py-2 text-center">
                         <div className="flex flex-col items-center gap-1">
                           <select
                             disabled={readOnly}
-                            className="bg-slate-800 border border-slate-700 rounded text-[11px] px-1 py-1 text-slate-200 w-[74px]"
-                            value={pattern.working ? pattern.shift : 'off'}
+                            title={nonProd ? 'On site but not available for scheduled production work' : undefined}
+                            className={`bg-slate-800 border rounded text-[11px] px-1 py-1 w-[74px] ${nonProd ? 'border-sky-800 text-sky-300' : 'border-slate-700 text-slate-200'}`}
+                            value={!pattern.working ? 'off' : nonProd ? 'nonprod' : pattern.shift}
                             onChange={(e) => {
                               const v = e.target.value;
-                              if (v === 'off') updateDay(m, key, { working: false, hours: 0 });
-                              else updateDay(m, key, { working: true, shift: v, hours: pattern.hours || SHIFT_DEFS[v].defaultHours });
+                              if (v === 'off') updateDay(m, key, { working: false, production: true, hours: 0 });
+                              else if (v === 'nonprod') updateDay(m, key, { working: true, production: false, hours: 0 });
+                              else updateDay(m, key, { working: true, production: true, shift: v, hours: pattern.hours || SHIFT_DEFS[v].defaultHours });
                             }}
                           >
                             <option value="off">Off</option>
                             <option value="day">Day</option>
                             <option value="afternoon">Afternoon</option>
+                            <option value="nonprod">No prod.</option>
                           </select>
-                          {pattern.working && (
+                          {pattern.working && !nonProd && (
                             <input
                               type="number"
                               min={0}
@@ -2708,17 +3067,21 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
         <p className="text-[11px] text-slate-500 mt-2">
           Day and Afternoon shifts don't overlap in time, so if one person covers the day shift and another covers the afternoon on the same machine, a job can be worked on by both across that day — the schedule will show it as spanning two shifts.
         </p>
+        <p className="text-[11px] text-slate-500 mt-1">
+          <span className="text-sky-300">No prod.</span> means rostered on but not available for scheduled production work — training, covering the office, on the tools elsewhere. The scheduler skips the day the same as an off day, but the roster still shows the person is in, so you don't have to book leave or zero their hours to get the same effect.
+        </p>
       </div>
 
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2"><CalendarOff size={17} /> Leave</h2>
+          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2"><CalendarOff size={17} /> Leave &amp; absences</h2>
         </div>
         <div className="border border-slate-800 bg-slate-900 rounded-lg overflow-hidden">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
                 <th className="px-3 py-2 font-medium">Staff</th>
+                <th className="px-3 py-2 font-medium">Type</th>
                 <th className="px-3 py-2 font-medium">From</th>
                 <th className="px-3 py-2 font-medium">To</th>
                 <th className="px-3 py-2 font-medium">Reason</th>
@@ -2729,6 +3092,14 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
               {allLeave.map((p) => (
                 <tr key={p.id} className="border-b border-slate-800/60">
                   <td className="px-3 py-2 text-slate-200">{p.staffName}</td>
+                  <td className="px-3 py-2">
+                    <span className={`text-[11px] px-2 py-0.5 rounded-full ${
+                      p.kind === 'sick' ? 'bg-red-950/50 text-red-300'
+                        : p.kind === 'training' ? 'bg-sky-950/50 text-sky-300'
+                        : p.kind === 'other' ? 'bg-slate-800 text-slate-300'
+                        : 'bg-amber-950/50 text-amber-300'
+                    }`}>{absenceKindLabel(p.kind)}</span>
+                  </td>
                   <td className="px-3 py-2 text-slate-400">{fmtDate(p.startDate)}</td>
                   <td className="px-3 py-2 text-slate-400">{fmtDate(p.endDate)}</td>
                   <td className="px-3 py-2 text-slate-400">{p.reason || '—'}</td>
@@ -2740,7 +3111,7 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
                 </tr>
               ))}
               {allLeave.length === 0 && (
-                <tr><td colSpan={5} className="px-3 py-6 text-center text-slate-600 text-sm">No upcoming leave booked.</td></tr>
+                <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-600 text-sm">No upcoming leave or absences booked.</td></tr>
               )}
             </tbody>
           </table>
@@ -2751,9 +3122,9 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
               <button
                 key={m.id}
                 className={btnGhost}
-                onClick={() => { setLeaveModalFor(m); setLeaveStart(isoDate(new Date())); setLeaveEnd(isoDate(new Date())); setLeaveReason(''); }}
+                onClick={() => { setLeaveModalFor(m); setLeaveStart(isoDate(new Date())); setLeaveEnd(isoDate(new Date())); setLeaveReason(''); setLeaveKind('leave'); }}
               >
-                <Plus size={13} /> Leave for {m.name}
+                <Plus size={13} /> Absence for {m.name}
               </button>
             ))}
           </div>
@@ -2761,7 +3132,13 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
       </div>
 
       {leaveModalFor && (
-        <Modal title={`Add leave — ${leaveModalFor.name}`} onClose={() => setLeaveModalFor(null)}>
+        <Modal title={`Add absence — ${leaveModalFor.name}`} onClose={() => setLeaveModalFor(null)}>
+          <Field label="Type">
+            <select className={inputCls} value={leaveKind} onChange={(e) => setLeaveKind(e.target.value)}>
+              {ABSENCE_KINDS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+            <p className="text-xs text-slate-500 mt-1">All types make the person unavailable to the scheduler — the type is for your records, so a course or a stint on other duties doesn't have to be booked as leave.</p>
+          </Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="From"><input type="date" className={inputCls} value={leaveStart} onChange={(e) => setLeaveStart(e.target.value)} /></Field>
             <Field label="To"><input type="date" className={inputCls} value={leaveEnd} onChange={(e) => setLeaveEnd(e.target.value)} /></Field>
@@ -2769,7 +3146,7 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
           <Field label="Reason (optional)"><input className={inputCls} value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="e.g. Annual leave" /></Field>
           <div className="flex justify-end gap-2 pt-2 border-t border-slate-800 mt-3">
             <button className={btnGhost} onClick={() => setLeaveModalFor(null)}>Cancel</button>
-            <button className={btnPrimary} onClick={addLeave}><Check size={14} /> Save leave</button>
+            <button className={btnPrimary} onClick={addLeave}><Check size={14} /> Save absence</button>
           </div>
         </Modal>
       )}
@@ -3308,6 +3685,19 @@ const WIP_SETTINGS_KEY = 'wf_wipsettings';
 // Replaced wholesale by each import, so it always describes the most recent
 // export rather than accumulating rows that no longer exist in BC.
 const PARKED_KEY = 'wf_wipparked';
+
+// One row per job per day of hours actually worked:
+// { id, jobId, date, hours, staffId, note }. Deliberately keyed by job rather
+// than by assignment, so a day's work still records against the right job when
+// the plan it was entered against later moves.
+const TIMELOG_KEY = 'wf_timelog';
+
+// Hours logged against a job so far, across every day.
+function loggedHours(timeLog, jobId) {
+  return Math.round(
+    (timeLog || []).filter((e) => e.jobId === jobId).reduce((s, e) => s + (Number(e.hours) || 0), 0) * 100
+  ) / 100;
+}
 
 // Chip editor for the include/exclude keyword lists. Deliberately plain: type
 // a word, Enter or Add, click × to drop it.
@@ -4189,13 +4579,25 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
 
   const compatibleEquip = equipment.filter((e) => e.processes.includes(process));
   const procsForProcess = procedures.filter((p) => p.process === process);
+  // Keep a template's existing category selectable even if it has since been
+  // removed from the list, so opening an old template doesn't silently
+  // reassign it just by being opened.
+  const categoryOptions = [...new Set([...categorySuggestions, ...(category ? [category] : [])])].sort();
 
   return (
     <Modal title={isNew ? 'New template' : 'Edit template'} onClose={onClose}>
       <Field label="Template name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
       <Field label="Category">
-        <input className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)} list="tpl-cats" placeholder="e.g. Nozzle Inserts, Elbows / Spools, Valves" />
-        <datalist id="tpl-cats">{[...new Set(categorySuggestions)].filter(Boolean).sort().map((c) => <option key={c} value={c} />)}</datalist>
+        <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
+          <option value="">— Uncategorised —</option>
+          {categoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        {category && !categorySuggestions.includes(category) && (
+          <p className="text-xs text-amber-400 mt-1">“{category}” isn’t in the category list any more — pick another, or re-add it under Templates.</p>
+        )}
+        {categorySuggestions.length === 0 && (
+          <p className="text-xs text-slate-500 mt-1">Define categories in the Templates tab to group templates here.</p>
+        )}
       </Field>
       <Field label="Process">
         <select className={inputCls} value={process} onChange={(e) => {
