@@ -280,6 +280,69 @@ grid no longer cares about calendar month boundaries at all, just an
 arbitrary contiguous window the user controls, from a detailed few days up to
 a couple of months for a broad workload view.
 
+### Template categories
+
+Categories are a managed list (`wf_categories`), not free text typed per
+template: the template modal offers a drop-down. On first load the list is
+**seeded from whatever categories the existing templates already use**, so
+nothing an existing user set up disappears. Removing a category cascades — the
+templates using it move to Uncategorised — exactly like `saveProcesses`, and
+for the same reason: a value the drop-down can no longer offer is a value with
+no way back out. A template whose stored category has since been removed keeps
+it selectable while its modal is open, so merely opening an old template can't
+silently reassign it.
+
+### Capability requirements follow the template
+
+`applyTemplate` copies a template's `tags` onto a job when the template is
+picked, and the job never consulted the template again — so editing a
+template's capability requirements left every existing job on the old set.
+`saveTemplate` now pushes changed tags onto the open jobs made from that
+template.
+
+A job whose tags have since been **edited by hand keeps them**: a manual
+decision is the more specific instruction here, the same principle as pinning,
+a hand-assigned person, or a WIP tick override. The toast reports both counts,
+so a customised job that ought to follow the template can be fixed
+deliberately instead of being silently overwritten. Only tags propagate —
+pushing `hoursPerUnit` or `process` retroactively would rewrite jobs already
+being worked to a plan.
+
+### Roster availability
+
+A roster day is `{ working, production, shift, hours }`. `production: false`
+means **rostered on but not available for scheduled production work** —
+training, covering the office, on the tools elsewhere. `getStaffDayInfo`
+treats it exactly like a day off, so the scheduler never places work there;
+the difference is that the roster still shows the person is in. It exists
+because the only ways to express this before were booking leave or zeroing
+someone's hours, both of which say something untrue. The flag post-dates the
+roster, so `normalizeStaff` defaults it to `true` when absent — absent has to
+mean available, or every roster saved before this would read as non-production.
+
+Absence periods (still `leavePeriods`, for back-compat) carry a `kind` from
+`ABSENCE_KINDS` — leave / sick / training / other duties. All of them make
+someone unavailable; the kind is for the record, so a course doesn't have to
+be booked as annual leave. `normalizeStaff` defaults `kind` to `'leave'`.
+
+### The daily hours log
+
+`wf_timelog` holds one row per job per day: `{ id, jobId, date, hours,
+staffId, note }`. Reconstructing a total weeks later at completion time is
+guesswork; this is entered while it's still fresh, and `ActualHoursModal`
+then **pre-fills from the logged total** instead of asking (falling back to a
+stored actual, then the estimate). The Backlog shows the running logged total
+against the estimate, amber-coloured once it exceeds it, so drift is visible
+before completion.
+
+`TimeLogModal` opens on a date and lists the jobs the schedule expected that
+day, so the common case is confirming numbers rather than hunting for jobs;
+any other active job can be added for when reality differed from the plan.
+Saving **replaces every entry for that date** with what the dialog showed, so
+clearing a row to blank removes its entry rather than leaving a stale one.
+Entries are keyed by `jobId`, not by assignment, so a day's work stays
+attached to the right job when the plan it was entered against later moves.
+
 ### Splitting a job
 
 For when a job has to come off equipment before it's done (an urgent job
@@ -355,7 +418,7 @@ start.
 
 Data keys: `wf_equipment`, `wf_staff`, `wf_templates`, `wf_processes`,
 `wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`,
-`wf_wipparked` (each a JSON blob).
+`wf_wipparked`, `wf_categories`, `wf_timelog` (each a JSON blob).
 
 ### Live sync (shared mode)
 
