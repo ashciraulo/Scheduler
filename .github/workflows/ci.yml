@@ -16,11 +16,11 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: |
             scheduler/package-lock.json
@@ -29,6 +29,13 @@ jobs:
       - name: Install app dependencies
         working-directory: scheduler
         run: npm ci
+
+      # Fast and dependency-free (node:test against src/scheduler.js), so it runs
+      # before the browser steps — an engine regression fails in seconds rather
+      # than after a Chromium download.
+      - name: Unit tests (scheduling engine)
+        working-directory: scheduler
+        run: npm test
 
       - name: Build
         working-directory: scheduler
@@ -75,9 +82,13 @@ jobs:
 
       # Screenshots are taken at the end of every suite, so they are just as
       # useful for seeing what a failing run actually rendered.
+      # v6, not v5: v5 only had preliminary Node 24 support and still ran on
+      # Node 20 by default, so it kept tripping the deprecation warning. v6
+      # actually runs on node24 and needs runner >= 2.327.1 (github-hosted is
+      # well past that; matters only for self-hosted).
       - name: Upload screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-screenshots
           path: e2e/artifacts/
