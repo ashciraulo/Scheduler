@@ -29,7 +29,8 @@ index.html
 src/
   main.jsx            # entry; installs window.storage, mounts <App/>
   App.jsx             # renders <WeldingScheduler/>
-  WeldingScheduler.jsx# the entire application (large; ~3900 lines)
+  WeldingScheduler.jsx# the React application (large; ~4300 lines)
+  scheduler.js        # the scheduling engine + roster/date model (pure, no JSX)
   wipImport.js        # BC .xlsx reader + keyword/dupe analysis (see below)
   storage.js          # window.storage: shared /api store, else localStorage
   liveSync.js         # polls for other people's changes (shared mode)
@@ -38,6 +39,7 @@ deploy/               # hand-written pieces of the deployable (SOURCE)
   serve.py serve.js   # the little host server + /api key-value store
   start-*.bat/.command# double-click launchers for the host PC
   README.txt          # end-user instructions, ships at the package root
+test/                 # node:test unit tests for scheduler.js (npm test)
 scripts/package.mjs   # assembles ../offline-package from dist/ + deploy/
 tailwind.config.js
 postcss.config.js
@@ -52,6 +54,12 @@ vite.config.js
 - `npm run preview` — preview the production build
 - `npm run package` — build, then assemble `../offline-package/` (the folder
   that gets copied to the host PC)
+- `npm test` — unit tests for the scheduling engine (`node --test`, no
+  framework and no build step)
+
+Browser end-to-end suites live in `../e2e` and run against a preview server —
+see `e2e/README.md`. CI (`.github/workflows/ci.yml`) runs the unit tests, the
+build, an `offline-package` staleness check, and the e2e suites on every PR.
 
 ### offline-package is BUILD OUTPUT
 
@@ -77,12 +85,21 @@ Top-to-bottom, the single component file contains:
    empty.
 3. **Date helpers** — ISO date maths, calendar-day generation, roster/leave
    lookups.
-4. **Scheduling engine** — `buildCapacityMaps`, `tryFit`, `consume`,
-   `runScheduler`. This is the core. Capacity is tracked per
+4. **Scheduling engine** — lives in `src/scheduler.js`, not here:
+   `buildCapacityMaps`, `tryFit`, `consume`, `runScheduler`, plus the
+   roster/date model they run on (`getStaffDayInfo`, `isOnLeave`,
+   `generateCalendarDays`, the shift constants). Capacity is tracked per
    equipment/day/shift and per staff/day. `runScheduler` places pinned
    (manually dragged) jobs first, then auto-schedules the rest earliest-due
    first, choosing the machine that finishes each job soonest and keeping one
-   person on a job for continuity where possible. The capacity maps are passed
+   person on a job for continuity where possible.
+
+   It was pulled out of this file so it can be unit-tested: it is plain
+   JavaScript with no JSX and no imports, so `node --test` loads it directly
+   with no build step and no test framework. **Keep it that way** — a React or
+   DOM import here would cost the whole arrangement. It is pure in and out:
+   plain data to `runScheduler`, plain data back, which is what makes the
+   invariants below testable at all. The capacity maps are passed
    around as one `caps` object (`equipDayLock`, `equipShiftUsed`,
    `staffDayRemain`, `staffDayShift`, `staffLoad`) rather than five positional
    arguments.
@@ -222,7 +239,14 @@ exports sensibly.
   less slack than one that ships straight from here. `BacklogView` sorts the
   same way so the list reads in the order work is taken up.
 - Pinned jobs keep the slot the user dropped them on; only unpinned jobs are
-  auto-placed. Overbooked pinned jobs are flagged `conflict: true`, not moved.
+  auto-placed. A pin that can't be honoured — before the job's ready date, onto
+  equipment that no longer exists, or with nobody signed off on the process —
+  keeps its slot and is flagged `conflict: true` rather than moved or dropped.
+  **Known gap:** when the pinned day is merely *full*, `tryFit` searches forward
+  from that day and the job slides to the next free one with `conflict: false`,
+  so the pin is quietly not honoured. `test/scheduler.test.js` pins both the
+  actual behaviour and the intended behaviour (the latter as a `todo`), so
+  changing it is a deliberate decision rather than an accident.
 - Auto-placement picks the compatible machine that **finishes soonest**. When
   multiple machines finish a job equally soon (a genuine tie — never at the
   cost of the current job's own completion time), it prefers whichever

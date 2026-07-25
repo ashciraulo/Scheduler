@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "package": "vite build && node scripts/package.mjs"
+    "package": "vite build && node scripts/package.mjs",
+    "test": "node --test \"test/*.test.js\""
   },
   "dependencies": {
     "lucide-react": "^0.383.0",
