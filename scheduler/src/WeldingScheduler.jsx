@@ -142,7 +142,7 @@ function seedJobs() {
   ];
 }
 
-function mkJob({ name, process, quantity, hoursPerUnit, dueDate, readyDate = null, templateId = null, notes = '', totalValue = 0, departmentValue = 0, percentComplete = 0 }) {
+function mkJob({ name, process, quantity, hoursPerUnit, dueDate, readyDate = null, templateId = null, notes = '', totalValue = 0, departmentValue = 0, percentComplete = 0, needsFurtherProcessing = false }) {
   return {
     id: uid('job'),
     name,
@@ -156,6 +156,11 @@ function mkJob({ name, process, quantity, hoursPerUnit, dueDate, readyDate = nul
     totalValue: Number(totalValue) || 0,
     departmentValue: Number(departmentValue) || 0,
     percentComplete: Number(percentComplete) || 0,
+    // Work still has a downstream scope after this department (machining,
+    // manual finishing, …). Such a job has to clear our cell earlier than one
+    // with the same due date that ships straight from here, so it wins the
+    // due-date tiebreak in runScheduler.
+    needsFurtherProcessing: !!needsFurtherProcessing,
     status: 'active',
     completedDate: null,
     tags: [],
@@ -549,9 +554,15 @@ function runScheduler(jobsIn, equipment, staff, days) {
           _partIndex: i,
           name: j.name,
           process: j.process,
+          // Capability tags are a property of the work, so they apply to every
+          // part of it. Without this the parts arrived with no `tags` at all
+          // and tagOk waved them onto any machine — a split job that needed a
+          // 5T positioner could be placed on equipment that hasn't got one.
+          tags: j.tags || [],
           hoursTotal: part.hoursTotal,
           readyDate: j.readyDate,
           dueDate: j.dueDate,
+          needsFurtherProcessing: !!j.needsFurtherProcessing,
           percentComplete: part.percentComplete,
           status: part.status,
           assignment: part.assignment ? { ...part.assignment } : null,
@@ -617,8 +628,14 @@ function runScheduler(jobsIn, equipment, staff, days) {
     };
   });
 
-  // 2. Auto-schedule unpinned jobs, earliest due date first, into earliest available slot.
-  unpinned.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+  // 2. Auto-schedule unpinned jobs, earliest due date first, into earliest
+  // available slot. On an equal due date a job flagged `needsFurtherProcessing`
+  // goes first: it still has machining or manual work to go through after us,
+  // so the same due date leaves it strictly less slack than one that ships
+  // straight from this department.
+  unpinned.sort((a, b) =>
+    (new Date(a.dueDate) - new Date(b.dueDate))
+    || ((b.needsFurtherProcessing ? 1 : 0) - (a.needsFurtherProcessing ? 1 : 0)));
 
   // How many pending jobs can run on ONLY this one piece of equipment (no
   // alternative machine). Used below so that when a job with a choice of
@@ -2177,7 +2194,11 @@ function ScheduleView({
 function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit, onToggleComplete, onUnpin, onDelete }) {
   const [filter, setFilter] = useState('active');
   const filtered = jobs.filter((j) => (filter === 'all' ? true : filter === 'complete' ? j.status === 'complete' : j.status !== 'complete'));
-  const sorted = [...filtered].sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+  // Same ordering the scheduler uses, so the list reads in the order the work
+  // will actually be taken up.
+  const sorted = [...filtered].sort((a, b) =>
+    (new Date(a.dueDate) - new Date(b.dueDate))
+    || ((b.needsFurtherProcessing ? 1 : 0) - (a.needsFurtherProcessing ? 1 : 0)));
 
   return (
     <div>
@@ -2246,7 +2267,14 @@ function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit
                     </div>
                   </td>
                   <td className="px-3 py-2 text-slate-400">{fmtDate(j.readyDate)}</td>
-                  <td className="px-3 py-2 text-slate-400">{fmtDate(j.dueDate)}</td>
+                  <td className="px-3 py-2 text-slate-400">
+                    <span className="flex items-center gap-1 whitespace-nowrap">
+                      {fmtDate(j.dueDate)}
+                      {j.needsFurtherProcessing && (
+                        <span title="Needs further processing after this department — takes priority on an equal due date" className="text-[10px] px-1 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-900">+proc</span>
+                      )}
+                    </span>
+                  </td>
                   <td className="px-3 py-2 text-slate-400">
                     {j.status === 'complete' ? <span className="text-slate-600">—</span> : isSplit ? (
                       <span className="text-slate-400">{scheduledParts}/{j.parts.length} parts scheduled</span>
@@ -2619,6 +2647,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [quantity, setQuantity] = useState(job?.quantity ?? 1);
   const [hoursPerUnit, setHoursPerUnit] = useState(job ? (job.quantity ? job.hoursTotal / job.quantity : job.hoursTotal) : (templates[0]?.hoursPerUnit ?? 1));
   const [readyDate, setReadyDate] = useState(job?.readyDate || isoDate(new Date()));
+  const [needsFurtherProcessing, setNeedsFurtherProcessing] = useState(!!job?.needsFurtherProcessing);
   const [dueDate, setDueDate] = useState(job?.dueDate || addDays(isoDate(new Date()), 14));
   const [notes, setNotes] = useState(job?.notes || '');
   const [custom, setCustom] = useState(isNew ? false : !job.templateId);
@@ -2678,6 +2707,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       quantity: Number(quantity) || 1,
       readyDate,
       dueDate,
+      needsFurtherProcessing,
       templateId: custom ? null : templateId,
       notes,
       totalValue: Number(totalValue) || 0,
@@ -2792,6 +2822,19 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
         </Field>
       </div>
       <p className="text-xs text-slate-500 -mt-2 mb-3">The job will never be auto-scheduled — or allowed to be dragged — before the ready date, since materials/prior-stage work won't be in your department yet.</p>
+
+      <label className="flex items-start gap-2 mb-3 cursor-pointer">
+        <input
+          type="checkbox"
+          className="accent-amber-500 mt-0.5"
+          checked={needsFurtherProcessing}
+          onChange={(e) => setNeedsFurtherProcessing(e.target.checked)}
+        />
+        <span className="text-sm text-slate-300">
+          Needs further processing after this department
+          <span className="block text-xs text-slate-500">Machining, manual work, etc. Scheduled ahead of a job with the same due date that ships straight from here.</span>
+        </span>
+      </label>
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="Total job value ($)">
@@ -3043,6 +3086,63 @@ function KeywordChips({ words, onChange, placeholder, tone }) {
   );
 }
 
+// Chip editor for combination rules — the "include body, include elbow, but
+// not when a row is both" case that plain keyword lists can't express. A rule
+// is two or more words that must ALL appear in the description (whole-word,
+// see hasWord in wipImport) for it to fire; a fired rule excludes the row.
+// The engine has always supported these, but until now there was no way to
+// enter one, so the feature was unreachable.
+function ComboChips({ rules, onChange }) {
+  const [input, setInput] = useState('');
+  const words = input.split(/[+,]/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const keyOf = (ws) => [...ws].sort().join('+');
+  const add = () => {
+    // A single word is just an exclude keyword; a combination needs two.
+    if (words.length < 2) return;
+    const key = keyOf(words);
+    if (!rules.some((r) => keyOf(r.words || []) === key)) onChange([...rules, { words }]);
+    setInput('');
+  };
+  return (
+    <div>
+      <div className="flex flex-wrap gap-1 mb-2">
+        {rules.length === 0 && <span className="text-[11px] text-slate-500 italic">None</span>}
+        {rules.map((r) => {
+          const key = keyOf(r.words || []);
+          return (
+            <span key={key} className="text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1 bg-slate-700/60 text-slate-200 border border-slate-600">
+              {(r.words || []).join(' + ')}
+              <button
+                type="button"
+                className="text-slate-400 hover:text-red-400"
+                onClick={() => onChange(rules.filter((x) => keyOf(x.words || []) !== key))}
+              >×</button>
+            </span>
+          );
+        })}
+      </div>
+      <div className="flex gap-2">
+        <input
+          className={smallInput}
+          value={input}
+          placeholder="body + elbow"
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+        />
+        <button
+          type="button"
+          disabled={words.length < 2}
+          className="text-xs px-2 py-1 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800"
+          onClick={add}
+        >Add</button>
+      </div>
+      {input.trim() && words.length < 2 && (
+        <p className="text-[10px] text-slate-500 mt-1">Separate two or more words with + or a comma.</p>
+      )}
+    </div>
+  );
+}
+
 // Highlight the matched keywords inside a description, so it's obvious *why* a
 // row matched when auditing keyword coverage. Built from React nodes, never
 // innerHTML — file content must never be treated as markup.
@@ -3088,6 +3188,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
   const [mapping, setMapping] = useState({});      // logical field -> header name
   const [wipSettings, setWipSettings] = useState({ include: DEFAULT_INCLUDE, exclude: DEFAULT_EXCLUDE, combos: DEFAULT_COMBOS });
   const [selected, setSelected] = useState(() => new Set());
+  const [tickOverrides, setTickOverrides] = useState({}); // record id -> ticked by hand
   const [wipView, setWipView] = useState('matched');
   const [wipSearch, setWipSearch] = useState('');
   const [showMapping, setShowMapping] = useState(false);
@@ -3110,9 +3211,21 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
     () => (parsed ? analyse(parsed.rows, mapping, wipSettings) : null),
     [parsed, mapping, wipSettings]
   );
-  // Re-analysing (a mapping or keyword change) resets the ticks to the new
-  // default selection — same as the standalone tool.
-  useEffect(() => { if (analysis) setSelected(new Set(analysis.defaultSelected)); }, [analysis]);
+  // Re-analysing (a mapping or keyword change) recomputes the default tick set,
+  // then re-applies whatever the user has ticked or unticked by hand on top.
+  // It used to just reset to the new default, the way the standalone tool did:
+  // adding one more keyword silently re-ticked every row you had gone through
+  // and dismissed, so a long review had to be redone from scratch each time.
+  // Record ids are row indices into the parsed sheet, so they stay valid across
+  // a re-analysis; `tickOverrides` is cleared when a different file is loaded.
+  useEffect(() => {
+    if (!analysis) return;
+    const next = new Set(analysis.defaultSelected);
+    Object.entries(tickOverrides).forEach(([id, on]) => {
+      if (on) next.add(Number(id)); else next.delete(Number(id));
+    });
+    setSelected(next);
+  }, [analysis, tickOverrides]);
 
   const existingKeys = useMemo(() => {
     const keys = new Set();
@@ -3146,6 +3259,9 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
         totalValue: Number(raw?.totalValue) || 0,
         departmentValue: Number(raw?.departmentValue) || 0,
         percentComplete: Number(raw?.percentComplete) || 0,
+        // Old .json exports from the retired standalone importer predate this
+        // field, so it falls back to false rather than undefined.
+        needsFurtherProcessing: !!raw?.needsFurtherProcessing,
         status: 'active',
         completedDate: null,
         bcJobNo,
@@ -3172,6 +3288,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
       setMapping(autoMap(p.headers));
       setWipView('matched');
       setWipSearch('');
+      setTickOverrides({}); // ids are row indices — meaningless against a new sheet
     } catch (err) {
       setParseError(err?.message || 'That .xlsx could not be read.');
       setParsed(null);
@@ -3203,7 +3320,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
   }
 
   function resetFile() {
-    setRows(null); setParsed(null); setFileName(''); setParseError('');
+    setRows(null); setParsed(null); setFileName(''); setParseError(''); setTickOverrides({});
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
@@ -3240,13 +3357,16 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
     return recs;
   }, [analysis, wipView, wipSearch]);
 
+  // Ticking records the user's intent in `tickOverrides`; the effect above
+  // derives `selected` from the current default set plus those overrides, so a
+  // hand-made decision survives the next keyword or mapping change.
   function toggleRec(id, on) {
-    setSelected((s) => { const n = new Set(s); if (on) n.add(id); else n.delete(id); return n; });
+    setTickOverrides((o) => ({ ...o, [id]: on }));
   }
   function tickVisible(on) {
-    setSelected((s) => {
-      const n = new Set(s);
-      visibleRecs.forEach((r) => { if (on) n.add(r.id); else n.delete(r.id); });
+    setTickOverrides((o) => {
+      const n = { ...o };
+      visibleRecs.forEach((r) => { n[r.id] = on; });
       return n;
     });
   }
@@ -3365,12 +3485,16 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
           )}
           {counts.held > 0 && (
             <p className="text-[11px] text-slate-400 mb-3">
-              {counts.held} row{counts.held === 1 ? '' : 's'} held by a combination rule — they sit under “Not matched” for you to decide on.
+              {counts.held} row{counts.held === 1 ? '' : 's'} excluded by a combination rule — under “Not matched”, still tickable if one should come in.
             </p>
           )}
 
-          {/* keywords */}
-          <div className="grid sm:grid-cols-2 gap-3 mb-3">
+          {/* Two columns: the keyword editors live in a fixed-width rail on the
+              left, where growing a chip list scrolls the rail instead of
+              resizing the modal and shoving the whole UI around, and the row
+              list gets the full remaining width. */}
+          <div className="grid lg:grid-cols-[250px_1fr] gap-3">
+          <aside className="space-y-3 lg:max-h-[58vh] lg:overflow-y-auto lg:pr-1">
             <div className="bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
               <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Include if the description contains</div>
               <KeywordChips words={wipSettings.include} placeholder="weld, spray, hvof…" onChange={(w) => updateSettings({ include: w })} />
@@ -3379,36 +3503,43 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
               <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Never include if it contains</div>
               <KeywordChips words={wipSettings.exclude} tone="exclude" placeholder="machining, hire…" onChange={(w) => updateSettings({ exclude: w })} />
             </div>
-          </div>
-
-          {/* column mapping */}
-          <button
-            type="button"
-            className="text-xs text-slate-400 hover:text-slate-200 mb-2 inline-flex items-center gap-1.5"
-            onClick={() => setShowMapping((v) => !v)}
-          >
-            <Settings2 size={13} /> {showMapping ? 'Hide' : 'Check'} column mapping
-          </button>
-          {showMapping && (
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2 mb-3 bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
-              {FIELDS.map((f) => (
-                <label key={f.key} className="block">
-                  <span className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">
-                    {f.label}{f.need && <span className="text-amber-400"> *</span>}
-                  </span>
-                  <select
-                    className={smallInput}
-                    value={mapping[f.key] || ''}
-                    onChange={(e) => setMapping((m) => ({ ...m, [f.key]: e.target.value }))}
-                  >
-                    <option value="">— not mapped —</option>
-                    {parsed.headers.map((h) => <option key={h} value={h}>{h}</option>)}
-                  </select>
-                </label>
-              ))}
+            <div className="bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
+              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Exclude only in combination</div>
+              <ComboChips rules={wipSettings.combos || []} onChange={(c) => updateSettings({ combos: c })} />
             </div>
-          )}
 
+            {/* column mapping */}
+            <div>
+              <button
+                type="button"
+                className="text-xs text-slate-400 hover:text-slate-200 mb-2 inline-flex items-center gap-1.5"
+                onClick={() => setShowMapping((v) => !v)}
+              >
+                <Settings2 size={13} /> {showMapping ? 'Hide' : 'Check'} column mapping
+              </button>
+              {showMapping && (
+                <div className="space-y-2 bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
+                  {FIELDS.map((f) => (
+                    <label key={f.key} className="block">
+                      <span className="block text-[10px] uppercase tracking-wide text-slate-500 mb-1">
+                        {f.label}{f.need && <span className="text-amber-400"> *</span>}
+                      </span>
+                      <select
+                        className={smallInput}
+                        value={mapping[f.key] || ''}
+                        onChange={(e) => setMapping((m) => ({ ...m, [f.key]: e.target.value }))}
+                      >
+                        <option value="">— not mapped —</option>
+                        {parsed.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          </aside>
+
+          <div className="min-w-0">
           {/* view tabs + search */}
           <div className="flex items-center gap-2 flex-wrap mb-2">
             {viewTabs.map(([id, label, n]) => (
@@ -3436,7 +3567,10 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
             <button type="button" className="hover:text-amber-400" onClick={() => tickVisible(false)}>Untick all in view</button>
           </div>
 
-          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto max-h-[40vh] overflow-y-auto">
+          {/* Fixed height, not max-height: the row count changes as keywords
+              are edited, and letting that resize the modal moved the whole
+              dialog under the pointer mid-edit. */}
+          <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto h-[46vh] overflow-y-auto">
             <table className="w-full text-sm min-w-[900px]">
               <thead className="sticky top-0 bg-slate-900 z-10">
                 <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -3467,7 +3601,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                       <div className="flex flex-wrap gap-1 mt-0.5">
                         {r.isDupe && <span className="text-[10px] text-slate-400">duplicate of job {r.jobNo}</span>}
                         {r.doneConfirmed && <span className="text-[10px] text-emerald-400">complete in BC</span>}
-                        {r.combos.length > 0 && <span className="text-[10px] text-amber-400">held: {r.combos.map((c) => c.words.join('+')).join(', ')}</span>}
+                        {r.combos.length > 0 && <span className="text-[10px] text-red-400">excluded: {r.combos.map((c) => c.words.join(' + ')).join(', ')}</span>}
                         {r.excHits.length > 0 && <span className="text-[10px] text-red-400">excluded: {r.excHits.join(', ')}</span>}
                       </div>
                       {r.warnings.map((w) => (
@@ -3485,6 +3619,8 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                 ))}
               </tbody>
             </table>
+          </div>
+          </div>
           </div>
 
           <div className="flex items-center justify-between pt-4 mt-3 border-t border-slate-800">
@@ -3553,6 +3689,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                   <th className="px-3 py-2 font-medium">Template</th>
                   <th className="px-3 py-2 font-medium">Process</th>
                   <th className="px-3 py-2 font-medium">Hours</th>
+                  <th className="px-3 py-2 font-medium" title="Needs further processing after this department">+Proc</th>
                 </tr>
               </thead>
               <tbody>
@@ -3601,6 +3738,15 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                         className="w-16 bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
                         value={r.hoursTotal}
                         onChange={(e) => updateRow(r._rowId, { hoursTotal: Number(e.target.value) || 0, templateId: null })}
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        className="accent-sky-500"
+                        title="Needs machining, manual work or similar after this department"
+                        checked={!!r.needsFurtherProcessing}
+                        onChange={(e) => updateRow(r._rowId, { needsFurtherProcessing: e.target.checked })}
                       />
                     </td>
                   </tr>
