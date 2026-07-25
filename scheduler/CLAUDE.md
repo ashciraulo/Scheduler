@@ -239,14 +239,22 @@ exports sensibly.
   less slack than one that ships straight from here. `BacklogView` sorts the
   same way so the list reads in the order work is taken up.
 - Pinned jobs keep the slot the user dropped them on; only unpinned jobs are
-  auto-placed. A pin that can't be honoured — before the job's ready date, onto
-  equipment that no longer exists, or with nobody signed off on the process —
-  keeps its slot and is flagged `conflict: true` rather than moved or dropped.
-  **Known gap:** when the pinned day is merely *full*, `tryFit` searches forward
-  from that day and the job slides to the next free one with `conflict: false`,
-  so the pin is quietly not honoured. `test/scheduler.test.js` pins both the
-  actual behaviour and the intended behaviour (the latter as a `todo`), so
-  changing it is a deliberate decision rather than an accident.
+  auto-placed. A pin that **can't be honoured** — before the job's ready date,
+  onto equipment that no longer exists, or with nobody signed off on the
+  process — keeps its slot and is flagged `conflict: true` rather than moved
+  or silently dropped.
+- **A pin onto an occupied day is not a conflict — the incumbent slides.**
+  Dropping a job where another one already sits is the user saying this job
+  matters more than what is there, so the newly dropped job takes the slot and
+  the job already there is rescheduled forward (still pinned, `conflict:
+  false`). Refusing the drop, or flagging it, would be arguing with a decision
+  the user just made.
+  The most recent drop wins because `claimOrder` is stamped on every
+  assignment at the end of each run, so a pin *without* one is a drop the
+  scheduler hasn't seen yet and sorts first. The default for a missing
+  `claimOrder` must stay **-1, not 0**: 0 is a real value (the first job placed
+  last run), and `?? 0` made a fresh drop tie with it, handing the day to
+  whichever came first in the jobs array — arbitrary, and wrong half the time.
 - Auto-placement picks the compatible machine that **finishes soonest**. When
   multiple machines finish a job equally soon (a genuine tie — never at the
   cost of the current job's own completion time), it prefers whichever

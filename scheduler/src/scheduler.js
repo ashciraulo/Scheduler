@@ -415,7 +415,17 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
     const ad = a.assignment.startDate;
     const bd = b.assignment.startDate;
     if (ad !== bd) return ad < bd ? -1 : 1;
-    return (a.assignment.claimOrder ?? 0) - (b.assignment.claimOrder ?? 0);
+    // Same day: the most recent human decision wins. `claimOrder` is stamped on
+    // every assignment at the end of each run, so a pin that has none is one
+    // the user has just dropped and the scheduler hasn't seen yet — it places
+    // first and keeps the slot, and the job already sitting there slides. That
+    // is the point of dragging a job onto an occupied day: you are saying it
+    // matters more than what is there.
+    //
+    // Defaulting to -1 rather than 0 matters: 0 is a real claimOrder (the first
+    // job placed last run), so `?? 0` made a fresh drop tie with it and the
+    // winner fell through to array order.
+    return (a.assignment.claimOrder ?? -1) - (b.assignment.claimOrder ?? -1);
   });
   pinned.forEach((job) => {
     const a = job.assignment;
