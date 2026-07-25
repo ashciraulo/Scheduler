@@ -1132,6 +1132,11 @@ export default function WeldingScheduler() {
   const [jobs, setJobs] = useState([]);
   const [costCentres, setCostCentres] = useState([]);
   const [procedures, setProcedures] = useState([]);
+  // Rows the last WIP import didn't claim, kept so a job whose scope later
+  // grows into our work can be pulled in without re-running the whole import.
+  // See PARKED_KEY for what is and isn't stored.
+  const [parked, setParked] = useState([]);
+  const [parkedOpen, setParkedOpen] = useState(false);
 
   const [tab, setTab] = useState('schedule');
   const [readOnly, setReadOnly] = useState(false);
@@ -1169,7 +1174,7 @@ export default function WeldingScheduler() {
   // ---------- initial load ----------
   useEffect(() => {
     (async () => {
-      const [eq, st, tp, pr, jb, cc, pc] = await Promise.all([
+      const [eq, st, tp, pr, jb, cc, pc, pk] = await Promise.all([
         loadKey('wf_equipment', null),
         loadKey('wf_staff', null),
         loadKey('wf_templates', null),
@@ -1177,7 +1182,9 @@ export default function WeldingScheduler() {
         loadKey('wf_jobs', null),
         loadKey('wf_costcentres', null),
         loadKey('wf_procedures', null),
+        loadKey(PARKED_KEY, null),
       ]);
+      if (pk) setParked(pk);
       const finalEq = eq || seedEquipment();
       const finalSt = (st || seedStaff()).map(normalizeStaff);
       const finalTp = tp || seedTemplates();
@@ -1219,7 +1226,7 @@ export default function WeldingScheduler() {
   // write anything back: a save would bump the server's version and every
   // other screen would see *that* as a change, and so on around the loop.
   const reloadFromStore = useCallback(async () => {
-    const [eq, st, tp, pr, jb, cc, pc] = await Promise.all([
+    const [eq, st, tp, pr, jb, cc, pc, pk] = await Promise.all([
       loadKey('wf_equipment', null),
       loadKey('wf_staff', null),
       loadKey('wf_templates', null),
@@ -1227,6 +1234,7 @@ export default function WeldingScheduler() {
       loadKey('wf_jobs', null),
       loadKey('wf_costcentres', null),
       loadKey('wf_procedures', null),
+      loadKey(PARKED_KEY, null),
     ]);
     const nextEq = eq || latest.current.equipment;
     const nextSt = st ? st.map(normalizeStaff) : latest.current.staff;
@@ -1237,6 +1245,7 @@ export default function WeldingScheduler() {
     if (cc) setCostCentres(cc);
     if (pc) setProcedures(pc);
     if (jb) setJobs(runScheduler(jb, nextEq, nextSt, workingDays));
+    if (pk) setParked(pk);
   }, [workingDays]);
 
   const [remoteChange, setRemoteChange] = useState(false);
@@ -1274,12 +1283,26 @@ export default function WeldingScheduler() {
     recompute(newJobs, equipment, staff);
     setEditingJob(null);
   }
-  function importJobs(newJobs) {
+  function importJobs(newJobs, consumedParkIds) {
     const now = new Date().toISOString();
     const stamped = newJobs.map((j) => ({ ...j, id: uid('job'), updatedAt: now, assignment: null }));
     recompute([...jobs, ...stamped], equipment, staff);
+    // A parked row that has now been brought in stops being parked.
+    if (consumedParkIds && consumedParkIds.size) {
+      const rest = parked.filter((p) => !consumedParkIds.has(p.parkId));
+      setParked(rest);
+      saveKey(PARKED_KEY, rest);
+    }
     setImportOpen(false);
+    setParkedOpen(false);
     showToast(`Imported ${stamped.length} job${stamped.length === 1 ? '' : 's'} from WIP export.`);
+  }
+
+  // Called when an .xlsx import is committed: whatever that export offered and
+  // we didn't take is kept for review. Job-shaped only — see PARKED_KEY.
+  function parkUnmatched(list) {
+    setParked(list);
+    saveKey(PARKED_KEY, list);
   }
   function deleteJob(id) {
     recompute(jobs.filter((j) => j.id !== id), equipment, staff);
@@ -1663,6 +1686,8 @@ export default function WeldingScheduler() {
             readOnly={readOnly}
             onAdd={() => setEditingJob('new')}
             onImport={() => setImportOpen(true)}
+            onOpenParked={() => setParkedOpen(true)}
+            parkedCount={parked.length}
             onEdit={(j) => setEditingJob(j)}
             onToggleComplete={toggleComplete}
             onUnpin={unpinJob}
@@ -1753,6 +1778,18 @@ export default function WeldingScheduler() {
           existingJobs={jobs}
           onClose={() => setImportOpen(false)}
           onImport={importJobs}
+          onParkUnmatched={parkUnmatched}
+        />
+      )}
+
+      {parkedOpen && (
+        <ImportJobsModal
+          templates={templates}
+          processes={processes}
+          existingJobs={jobs}
+          onClose={() => setParkedOpen(false)}
+          onImport={importJobs}
+          initialRows={parked}
         />
       )}
 
@@ -2191,7 +2228,7 @@ function ScheduleView({
    BACKLOG VIEW (table of all jobs)
    ============================================================ */
 
-function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit, onToggleComplete, onUnpin, onDelete }) {
+function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onOpenParked, parkedCount = 0, onEdit, onToggleComplete, onUnpin, onDelete }) {
   const [filter, setFilter] = useState('active');
   const filtered = jobs.filter((j) => (filter === 'all' ? true : filter === 'complete' ? j.status === 'complete' : j.status !== 'complete'));
   // Same ordering the scheduler uses, so the list reads in the order the work
@@ -2212,6 +2249,15 @@ function BacklogView({ jobs, equipment, staff, readOnly, onAdd, onImport, onEdit
         </div>
         {!readOnly && (
           <div className="flex items-center gap-2">
+            {parkedCount > 0 && (
+              <button
+                className={btnGhost}
+                onClick={onOpenParked}
+                title="Jobs the last WIP import left behind — pull one in if its scope has changed"
+              >
+                <FileWarning size={15} /> Parked <span className="opacity-70">{parkedCount}</span>
+              </button>
+            )}
             <button className={btnGhost} onClick={onImport}><Upload size={15} /> Import from BC WIP export</button>
             <button className={btnPrimary} onClick={onAdd}><Plus size={15} /> New job</button>
           </div>
@@ -3047,6 +3093,21 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
 
 const WIP_SETTINGS_KEY = 'wf_wipsettings';
 
+// Rows a WIP import left behind, so a job whose scope later grows into our
+// work can be pulled in without re-running the import just for it.
+//
+// This is a DELIBERATE, NARROW exception to "WIP data is never persisted"
+// (see both CLAUDE.md files) and the only one. What is stored is exactly the
+// job-shaped record an imported row becomes — the same fields a matched row
+// contributes, nothing more. The parsed spreadsheet, its columns, the analysis
+// records and every unmapped column are still discarded when the modal closes.
+// Don't widen this to the raw rows: in shared mode it lands in
+// scheduler-data.json on the host PC, readable by everyone on the network.
+//
+// Replaced wholesale by each import, so it always describes the most recent
+// export rather than accumulating rows that no longer exist in BC.
+const PARKED_KEY = 'wf_wipparked';
+
 // Chip editor for the include/exclude keyword lists. Deliberately plain: type
 // a word, Enter or Add, click × to drop it.
 function KeywordChips({ words, onChange, placeholder, tone }) {
@@ -3175,7 +3236,11 @@ function highlightHits(text, hits) {
   return out;
 }
 
-function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport }) {
+// `initialRows` opens the modal straight at the review step on rows that came
+// from the parked list rather than a file — same table, same template
+// assignment, same splitting, so there is only one review flow to maintain.
+function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport, onParkUnmatched, initialRows = null }) {
+  const fromParked = !!initialRows;
   const [rows, setRows] = useState(null); // set once we reach the review step
   const [fileName, setFileName] = useState('');
   const [parseError, setParseError] = useState('');
@@ -3189,6 +3254,14 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
   const [wipSettings, setWipSettings] = useState({ include: DEFAULT_INCLUDE, exclude: DEFAULT_EXCLUDE, combos: DEFAULT_COMBOS });
   const [selected, setSelected] = useState(() => new Set());
   const [tickOverrides, setTickOverrides] = useState({}); // record id -> ticked by hand
+
+  // Opened on the parked list: jump straight to the review table.
+  useEffect(() => {
+    // Nothing ticked by default here — the point is to go and find the one
+    // job whose scope changed, not to re-import everything left behind.
+    if (initialRows) setRows(toReviewRows(initialRows).map((r) => ({ ...r, include: false })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [wipView, setWipView] = useState('matched');
   const [wipSearch, setWipSearch] = useState('');
   const [showMapping, setShowMapping] = useState(false);
@@ -3247,6 +3320,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
         _rowId: i,
         _invalid: !name,
         _dup: dup,
+        _parkId: raw?.parkId ?? null, // set when the row came from the parked list
         include: !!name && !dup,
         name: name || 'Untitled job',
         process: raw?.process || '',
@@ -3466,12 +3540,25 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
   const invalidCount = rows ? rows.filter((r) => r._invalid).length : 0;
 
   function handleImportClick() {
-    const toImport = includedRows.map(({ _rowId, _invalid, _dup, _splitGroup, include, ...job }) => job);
-    onImport(toImport);
+    const toImport = includedRows.map(({ _rowId, _invalid, _dup, _splitGroup, _parkId, include, ...job }) => job);
+    const consumed = new Set(includedRows.map((r) => r._parkId).filter(Boolean));
+
+    // Whatever this export offered and we didn't take is kept for review. Only
+    // for a .xlsx import — a parked-list session has no analysis of its own,
+    // and a .json export carries no notion of "unmatched".
+    if (analysis && onParkUnmatched) {
+      const leftover = new Set(
+        analysis.records.filter((r) => !r.matched && !r.isDupe && !selected.has(r.id)).map((r) => r.id)
+      );
+      onParkUnmatched(buildSchedulerJobs(analysis.records, leftover).map((j, i) => ({ ...j, parkId: `pk_${Date.now()}_${i}` })));
+    }
+    onImport(toImport, consumed);
   }
 
   const stage = rows ? 'review' : parsed ? 'wip' : 'pick';
-  const title = stage === 'wip' ? 'WIP export — choose the jobs that are ours' : 'Import jobs from a WIP export';
+  const title = fromParked ? 'Parked jobs — bring one into the backlog'
+    : stage === 'wip' ? 'WIP export — choose the jobs that are ours'
+    : 'Import jobs from a WIP export';
 
   const viewTabs = counts ? [
     ['matched', 'Ours', counts.matched],
@@ -3703,11 +3790,11 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
         <div>
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <p className="text-xs text-slate-400">
-              {fileName} · {rows.length} job{rows.length === 1 ? '' : 's'}
+              {fromParked ? 'Parked from a previous WIP import' : fileName} · {rows.length} job{rows.length === 1 ? '' : 's'}
               {dupCount > 0 && <span className="text-amber-400"> · {dupCount} look already imported (same BC job/task no.) — unchecked</span>}
               {invalidCount > 0 && <span className="text-red-400"> · {invalidCount} skipped (no name)</span>}
             </p>
-            {parsed ? (
+            {fromParked ? null : parsed ? (
               <button type="button" className="text-xs text-amber-400 hover:underline inline-flex items-center gap-1" onClick={() => setRows(null)}>
                 <ChevronLeft size={12} /> Back to the WIP review
               </button>

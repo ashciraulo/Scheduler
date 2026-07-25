@@ -142,10 +142,14 @@ The modal is three steps:
 
    Changing a keyword or mapping re-analyses and recomputes the default tick
    set, then **re-applies the user's own ticks and unticks on top**
-   (`tickOverrides`). This deliberately departs from the standalone tool, which
-   reset every tick: that threw away a long review the moment another keyword
-   was added. Overrides are keyed by record id — a row index into the parsed
-   sheet — so they are cleared whenever a different file is loaded.
+   (`tickOverrides`). Rows the user has never touched still follow the current
+   keywords — that's an exclude keyword doing its job — but a decision made by
+   hand is never undone. This deliberately departs from the standalone tool,
+   which reset every tick; that was not a behaviour worth preserving, just one
+   nobody had noticed, and it threw away a long review the moment another
+   keyword was added. Don't "restore" it. Overrides are keyed by record id — a
+   row index into the parsed sheet — so they are cleared whenever a different
+   file is loaded.
 3. **Set hours** — the same review table both sources land on: assign a
    Template per row (or bulk-apply one to all ticked rows without one), which
    fills `process` and `hoursTotal` from `hoursPerUnit`/
@@ -169,9 +173,38 @@ export doesn't create copies unless the user deliberately re-ticks them.
 Imported jobs get fresh `id`s and go through the normal `recompute`/scheduler
 pass like any other job.
 
-The keyword lists persist under `wf_wipsettings`; **the WIP data itself is
-never written to storage** — it lives in component state and is gone when the
-modal closes. Keep that property.
+### The parked list
+
+Rows an import left behind are kept under `wf_wipparked` so a job whose scope
+later grows into our work can be pulled in without re-running the whole import
+for it. The Backlog shows a "Parked N" button when the list is non-empty;
+opening it reuses `ImportJobsModal` via its `initialRows` prop, landing
+straight on the review table — same template assignment, same splitting, same
+`+proc`, so there is only one review flow to maintain. Nothing is ticked by
+default there (the point is to find the one job that changed), and a row that
+gets imported is dropped from the list via the `parkId` carried through as
+`_parkId`.
+
+The list is **replaced wholesale by each import**, so it always describes the
+most recent export rather than accumulating rows that no longer exist in BC.
+It is written on import commit, and only for the `.xlsx` path — a `.json`
+export carries no notion of "unmatched", and a parked-list session has no
+analysis of its own.
+
+### What is and isn't persisted
+
+The keyword lists (`wf_wipsettings`) and the parked list (`wf_wipparked`)
+persist. **The spreadsheet itself never does** — the parsed rows, the analysis
+records and every unmapped column live in component state and are gone when
+the modal closes. Keep that property.
+
+The parked list is the one deliberate exception, and a narrow one: it stores
+exactly the job-shaped record an imported row becomes (what `buildSchedulerJobs`
+emits, plus a `parkId`) — the same fields a matched row contributes, nothing
+more. Don't widen it to the raw rows. In shared mode this lands in
+`scheduler-data.json` on the host PC, readable by everyone on the network, so
+the difference between "the fields we'd import anyway" and "the whole
+commercially sensitive export" is the whole point.
 
 `buildSchedulerJobs` is the job-shape contract: if the job shape changes,
 update it too, and check `toReviewRows` in the modal still reads old `.json`
@@ -321,8 +354,8 @@ reads false until it lands. That exact mistake made live sync silently never
 start.
 
 Data keys: `wf_equipment`, `wf_staff`, `wf_templates`, `wf_processes`,
-`wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`
-(each a JSON blob).
+`wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`,
+`wf_wipparked` (each a JSON blob).
 
 ### Live sync (shared mode)
 
