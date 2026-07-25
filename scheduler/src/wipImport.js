@@ -504,7 +504,8 @@ export function analyse(rows, mapping, settings) {
     const excHits = findHits(hay, excludeKw);
     const combos = firedCombos(hay, comboRules);
     // Precedence: a hard exclusion wins outright; then a fired combination rule
-    // holds the row back for review (NOT auto-included, NOT discarded);
+    // excludes the row too (it lands under "Not matched" — never auto-included,
+    // but never discarded either, so it can still be ticked back in on review);
     // otherwise an include keyword matches it in.
     const matched = incHits.length > 0 && excHits.length === 0 && combos.length === 0;
 
@@ -627,6 +628,9 @@ export function buildSchedulerJobs(records, selectedIds) {
     totalValue: r.value || 0,
     departmentValue: 0,
     percentComplete: 0,
+    // BC's WIP carries no notion of downstream scope, so this always starts
+    // false and is ticked per row on the review step.
+    needsFurtherProcessing: false,
     status: 'active',
     completedDate: null,
     bcJobNo: r.jobNo || '',

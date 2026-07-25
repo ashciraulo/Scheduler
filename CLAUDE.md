@@ -52,9 +52,16 @@ must not be regressed**:
 - **No network.** `.xlsx` is parsed in-browser (ZIP of XML via
   `DecompressionStream` + `DOMParser`) with no library and no upload. WIP data
   is commercially sensitive and must never leave the machine.
-- **WIP data is never persisted.** Only the keyword settings are saved
-  (`wf_wipsettings`); the spreadsheet's contents live in component state and
-  are gone when the modal closes.
+- **The spreadsheet is never persisted.** Its contents — the parsed rows, the
+  analysis records, every unmapped column — live in component state and are
+  gone when the modal closes. Saved instead are the keyword settings
+  (`wf_wipsettings`) and, since the parked list was added, the **job-shaped**
+  records of rows an import left behind (`wf_wipparked`): exactly the fields a
+  matched row contributes to a job, so a job whose scope later grows into the
+  department can be pulled in without re-running the import. That one
+  narrow exception is deliberate — don't widen it to the raw rows, which in
+  shared mode would put the whole export on the host PC for the network to
+  read.
 
 ## Working here
 

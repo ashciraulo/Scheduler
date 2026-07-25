@@ -125,12 +125,34 @@ tickable, only the default *selection* changes.
 The modal is three steps:
 
 1. **Pick a file** — `.xlsx` (BC export) or `.json` (standalone importer).
-2. **WIP review** (`.xlsx` only) — counts, the include/exclude keyword chip
-   editors, a collapsible column-mapping panel, and Ours / Not matched /
-   Duplicates / All row views with search. Keyword hits are highlighted in the
-   description so it's obvious *why* a row matched. Changing a keyword or a
-   mapping re-analyses and resets the ticks to the new default selection, same
-   as the standalone tool. Only ticked rows go on.
+2. **WIP review** (`.xlsx` only) — counts, the keyword chip editors, a
+   collapsible column-mapping panel, and Ours / Not matched / Duplicates / All
+   row views with search. Keyword hits are highlighted in the description so
+   it's obvious *why* a row matched. Only ticked rows go on.
+
+   The editors sit in a **fixed-width left rail that scrolls internally**, and
+   the row table has a **fixed** height, not a max-height. Both are deliberate:
+   the dialog used to grow and shrink as chips and rows came and went, and
+   because it is centred, that moved the whole thing under the pointer
+   mid-edit. Don't restore auto-sizing here.
+
+   There are three keyword lists: include, exclude, and **combination rules**
+   (`settings.combos`) — two or more whole words that must all appear, for the
+   "include *body*, include *elbow*, but not a row that is both" case. A fired
+   rule excludes the row into "Not matched", where it stays visible and
+   tickable. The engine always had these; the editor did not exist until
+   recently, so `DEFAULT_COMBOS` is empty and any rules are the user's own.
+
+   Changing a keyword or mapping re-analyses and recomputes the default tick
+   set, then **re-applies the user's own ticks and unticks on top**
+   (`tickOverrides`). Rows the user has never touched still follow the current
+   keywords — that's an exclude keyword doing its job — but a decision made by
+   hand is never undone. This deliberately departs from the standalone tool,
+   which reset every tick; that was not a behaviour worth preserving, just one
+   nobody had noticed, and it threw away a long review the moment another
+   keyword was added. Don't "restore" it. Overrides are keyed by record id — a
+   row index into the parsed sheet — so they are cleared whenever a different
+   file is loaded.
 3. **Set hours** — the same review table both sources land on: assign a
    Template per row (or bulk-apply one to all ticked rows without one), which
    fills `process` and `hoursTotal` from `hoursPerUnit`/
@@ -138,15 +160,54 @@ The modal is three steps:
    hours (BC's WIP has none), so both arrive with `process: ''` and
    `hoursTotal: 0`.
 
+   Row names are editable here, and a row can be **split into independent
+   jobs** (`splitRow`) for a BC line covering several components, or stages
+   scheduled separately. This is not the job-level `parts` split: parts share
+   one name and one backlog row, which is the opposite of what's wanted when
+   the pieces are different components. Quantity, hours and both $ figures
+   divide across the pieces so the totals still match what BC exported, and
+   every piece keeps the same BC job/task number. Pieces are numbered past the
+   highest suffix in the group, not by group size, so splitting an already-split
+   row can't reissue a number.
+
 Rows are matched against existing jobs by `bcJobNo` + `bcJobTaskNo` and
 flagged/unticked (not hidden) as probable duplicates, so re-importing the same
 export doesn't create copies unless the user deliberately re-ticks them.
 Imported jobs get fresh `id`s and go through the normal `recompute`/scheduler
 pass like any other job.
 
-The keyword lists persist under `wf_wipsettings`; **the WIP data itself is
-never written to storage** — it lives in component state and is gone when the
-modal closes. Keep that property.
+### The parked list
+
+Rows an import left behind are kept under `wf_wipparked` so a job whose scope
+later grows into our work can be pulled in without re-running the whole import
+for it. The Backlog shows a "Parked N" button when the list is non-empty;
+opening it reuses `ImportJobsModal` via its `initialRows` prop, landing
+straight on the review table — same template assignment, same splitting, same
+`+proc`, so there is only one review flow to maintain. Nothing is ticked by
+default there (the point is to find the one job that changed), and a row that
+gets imported is dropped from the list via the `parkId` carried through as
+`_parkId`.
+
+The list is **replaced wholesale by each import**, so it always describes the
+most recent export rather than accumulating rows that no longer exist in BC.
+It is written on import commit, and only for the `.xlsx` path — a `.json`
+export carries no notion of "unmatched", and a parked-list session has no
+analysis of its own.
+
+### What is and isn't persisted
+
+The keyword lists (`wf_wipsettings`) and the parked list (`wf_wipparked`)
+persist. **The spreadsheet itself never does** — the parsed rows, the analysis
+records and every unmapped column live in component state and are gone when
+the modal closes. Keep that property.
+
+The parked list is the one deliberate exception, and a narrow one: it stores
+exactly the job-shaped record an imported row becomes (what `buildSchedulerJobs`
+emits, plus a `parkId`) — the same fields a matched row contributes, nothing
+more. Don't widen it to the raw rows. In shared mode this lands in
+`scheduler-data.json` on the host PC, readable by everyone on the network, so
+the difference between "the fields we'd import anyway" and "the whole
+commercially sensitive export" is the whole point.
 
 `buildSchedulerJobs` is the job-shape contract: if the job shape changes,
 update it too, and check `toReviewRows` in the modal still reads old `.json`
@@ -155,6 +216,11 @@ exports sensibly.
 ### Scheduling invariants (don't break these)
 
 - A job never schedules before its `readyDate`.
+- Unpinned jobs are placed earliest-due first. On an **equal** due date, a job
+  flagged `needsFurtherProcessing` goes first — it still faces machining or
+  manual work after this department, so the same due date leaves it strictly
+  less slack than one that ships straight from here. `BacklogView` sorts the
+  same way so the list reads in the order work is taken up.
 - Pinned jobs keep the slot the user dropped them on; only unpinned jobs are
   auto-placed. Overbooked pinned jobs are flagged `conflict: true`, not moved.
 - Auto-placement picks the compatible machine that **finishes soonest**. When
@@ -293,7 +359,10 @@ gets `job.parts = [{ id, hoursTotal, percentComplete, status, assignment },
   stay at the job level, unsplit.
 - Each part is scheduled as its own independent unit. `runScheduler` flattens
   every split job's parts into separate schedulable pseudo-units up front
-  (carrying the parent's process/dates), runs the normal pinned/unpinned
+  (carrying the parent's process, dates, `tags` and `needsFurtherProcessing` —
+  they describe the work, so they apply to every part of it; omitting `tags`
+  meant `tagOk` saw no requirements and let a part onto any machine), runs the
+  normal pinned/unpinned
   placement logic on them exactly like regular jobs (no special-casing there),
   then collapses the results back: the parent's `hoursTotal` becomes the sum
   of parts, `percentComplete` an hours-weighted average, `status` is
@@ -349,8 +418,8 @@ reads false until it lands. That exact mistake made live sync silently never
 start.
 
 Data keys: `wf_equipment`, `wf_staff`, `wf_templates`, `wf_processes`,
-`wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`
-(each a JSON blob).
+`wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`,
+`wf_wipparked` (each a JSON blob).
 
 ### Live sync (shared mode)
 
@@ -388,6 +457,20 @@ fields exist so a future sync layer has a clean contract.
   dark slate with amber accents; match it.
 - Don't use browser storage APIs directly in components — go through
   `window.storage` / the storage.js seam.
+- The shared `Modal` closes on a backdrop click only when the gesture both
+  **started and ended** on the backdrop. A plain `onClick={onClose}` there is
+  wrong: `click` fires on the nearest common ancestor of mousedown and mouseup,
+  so selecting text inside a dialog and releasing outside it discarded the
+  edit. Don't simplify it back.
+- Deleting a process (Templates page) cascades: `saveProcesses` strips it from
+  every piece of equipment and every staff member. Templates and jobs keep
+  their process string on purpose — it records what the work is, and blanking
+  it would silently unschedule them — so the toast names how many still refer
+  to it. `MultiCheck`'s opt-in `showOrphans` renders a selected value that is
+  no longer an option so it can still be unticked, which is how data saved
+  before the cascade existed gets repaired. Leave it off where options are
+  filtered dynamically (TemplateModal's equipment list narrows by process, and
+  an id outside that list is ordinary filtering, not stale data).
 - Work on a branch and commit checkpoints before large refactors.
 - After changes, run `npm run dev` and verify the Schedule, Roster, Backlog and
   Reports tabs still render and that data persists across a refresh.
