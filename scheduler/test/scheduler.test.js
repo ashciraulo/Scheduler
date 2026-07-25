@@ -318,30 +318,40 @@ describe('pinned jobs', () => {
     assert.equal(byId(out, 'gone').assignment.conflict, true);
   });
 
-  // Current behaviour, pinned here deliberately so a change to it is a visible
-  // decision rather than an accident. NOTE: it does not match the invariant in
-  // CLAUDE.md ("Overbooked pinned jobs are flagged conflict: true, not moved").
-  // tryFit searches *forward* from the pinned index, so when the dropped day is
-  // simply full the job slides to the next free day with conflict false — the
-  // pin is quietly not honoured. See the `todo` test below.
-  test('a pin onto a day that is already full slides forward instead of conflicting', () => {
-    const out = runScheduler(
-      [job('a', { hoursTotal: 8, assignment: pin(MONDAY) }), job('b', { hoursTotal: 8, assignment: pin(MONDAY) })],
-      [equip('e1')], [person('s1')], days(),
-    );
-    const b = byId(out, 'b').assignment;
-    assert.equal(b.startDate, '2026-03-03');
-    assert.equal(b.conflict, false);
+  // Dropping a job onto an occupied day is the user saying it matters more
+  // than what is already there, so the incumbent slides rather than the drop
+  // being refused. Only a pin that is *impossible* (above) is flagged instead.
+  test('dropping onto an occupied day gives the day to the dropped job', () => {
+    // A fresh drop has no claimOrder — the scheduler has not seen it yet.
+    const dropped = { ...pin(MONDAY), seedStaffId: null };
+    const settled = (claimOrder) => ({ ...pin(MONDAY), claimOrder });
+
+    for (const incumbentOrder of [0, 3]) {
+      for (const arrayOrder of [['old', 'new'], ['new', 'old']]) {
+        const jobs = arrayOrder.map((k) => (k === 'old'
+          ? job('old', { hoursTotal: 8, assignment: settled(incumbentOrder) })
+          : job('new', { hoursTotal: 8, assignment: { ...dropped } })));
+        const out = runScheduler(jobs, [equip('e1')], [person('s1')], days());
+
+        assert.equal(byId(out, 'new').assignment.startDate, MONDAY,
+          `dropped job should hold the day (incumbent claimOrder ${incumbentOrder}, array ${arrayOrder})`);
+        assert.ok(byId(out, 'old').assignment.startDate > MONDAY,
+          'the job already there should slide, not stay overlapped');
+      }
+    }
   });
 
-  test('an overbooked pin should keep its slot and be flagged', { todo: 'engine slides it forward instead — see the test above' }, () => {
+  test('the job that slides is rescheduled cleanly, not flagged as a conflict', () => {
     const out = runScheduler(
-      [job('a', { hoursTotal: 8, assignment: pin(MONDAY) }), job('b', { hoursTotal: 8, assignment: pin(MONDAY) })],
+      [
+        job('old', { hoursTotal: 8, assignment: { ...pin(MONDAY), claimOrder: 0 } }),
+        job('new', { hoursTotal: 8, assignment: pin(MONDAY) }),
+      ],
       [equip('e1')], [person('s1')], days(),
     );
-    const b = byId(out, 'b').assignment;
-    assert.equal(b.startDate, MONDAY);
-    assert.equal(b.conflict, true);
+    const slid = byId(out, 'old').assignment;
+    assert.equal(slid.conflict, false, 'sliding is the intended outcome, not an error state');
+    assert.equal(slid.pinned, true, 'and it stays pinned — the user still placed it deliberately');
   });
 });
 
