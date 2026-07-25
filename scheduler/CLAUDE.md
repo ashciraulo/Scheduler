@@ -82,7 +82,10 @@ Top-to-bottom, the single component file contains:
    equipment/day/shift and per staff/day. `runScheduler` places pinned
    (manually dragged) jobs first, then auto-schedules the rest earliest-due
    first, choosing the machine that finishes each job soonest and keeping one
-   person on a job for continuity where possible.
+   person on a job for continuity where possible. The capacity maps are passed
+   around as one `caps` object (`equipDayLock`, `equipShiftUsed`,
+   `staffDayRemain`, `staffDayShift`, `staffLoad`) rather than five positional
+   arguments.
 5. **Storage helpers** — `loadKey` / `saveKey` wrap `window.storage`.
 6. **UI primitives** — small styled building blocks (Field, Modal, MultiCheck,
    buttons).
@@ -162,7 +165,37 @@ exports sensibly.
   one machine a less-flexible job has no alternative to. Remaining ties break
   on fewer staff handovers / fewer chunks.
 - Within one job, the same person stays on it across days where their roster
-  allows; a handover only happens when they're genuinely unavailable.
+  allows; a handover only happens when they're genuinely unavailable — but
+  "available" means *able to cover as much of the job today as anyone else
+  could*, not merely having a few minutes left. Holding a job for someone with
+  half an hour spare used to stretch it across days while a colleague with a
+  whole free shift sat idle. If one person can't fill the shift, the rest of
+  the equipment's shift capacity is topped up from the next-best person rather
+  than left idle.
+- **Staff assignment is sticky across recomputes.** Every recompute re-derives
+  assignments from scratch, so without this the people on a job were free to
+  change for no visible reason — most obviously when dragging a job to another
+  machine, which makes it pinned, moves it to the front of the placement order,
+  and used to cascade a reshuffle through everything else. `runScheduler`
+  captures each unit's previous primary person (`primaryStaffOf`) up front and
+  feeds it back into `tryFit` as `seedStaffId`. A drag throws the day plan away,
+  so `handleDrop` carries the person forward explicitly on
+  `assignment.seedStaffId`; don't drop that field.
+- **A genuine tie between people is broken by who has least on so far**
+  (`staffLoad` in the caps object), never by the order of the staff list.
+  List order was the de-facto tie-break and it handed a whole queue of jobs to
+  whoever sat at the top of Equipment & Staff while everyone else sat idle.
+- **`job.staffId` is a manual staff assignment and a hard restriction.** When
+  set, `eligibleStaffIds` narrows the job to that one person: the scheduler
+  waits for them rather than handing the work to someone else, and the job
+  shows a `UserCheck` marker on the timeline. If they can't take it the job
+  lands in "Needs scheduling" with a reason naming them — `whyUnscheduled`
+  covers "no longer on staff" and "not signed off on this process". Manually
+  assigned jobs place *before* automatic ones in the unpinned phase, since they
+  have only one person to draw on. Split jobs carry the lock at job level; it
+  applies to every part.
+- Pinned jobs are placed **earliest-start-first**, not in array order, so a
+  pinned job starting sooner gets first call on the roster.
 - **Equipment is exclusively "set up" for one job at a time, for that job's
   entire contiguous span.** Once a job claims a piece of equipment, no other
   job may use it — not even an idle shift or gap day within that span — until
@@ -213,6 +246,37 @@ rangeStart + rangeLength)`. Prev/next page by `rangeLength`, clamped to
 grid no longer cares about calendar month boundaries at all, just an
 arbitrary contiguous window the user controls, from a detailed few days up to
 a couple of months for a broad workload view.
+
+**The timeline includes the past.** `workingDays` starts `HISTORY_DAYS` (90)
+*behind* today and runs to the forward `HORIZON_DAYS` horizon; `todayIdx` is
+today's index in it, and `rangeStart` opens there. It used to begin at today,
+so work dropped off the left edge as its dates passed and there was no way to
+look back at what the department actually ran. Past columns are shaded and the
+header shows a "Completed work — history only" note plus a **Today** button
+whenever today is off screen.
+
+`todayIdx` is also passed to `runScheduler` as `earliestIdx`: **nothing is ever
+auto-placed into the past** (a job's `floorIdx` is the later of `earliestIdx`
+and its `readyDate`). Pinned jobs are deliberately exempt — a job the user
+dropped on a past date is a record of what happened and keeps that slot. If you
+add another `runScheduler` call site, pass `todayIdx`; omitting it defaults to
+0 and lets the scheduler backfill history.
+
+Note `.bg-slate-950/30` (used for past day cells) needed an explicit entry in
+`index.css` — that file remaps only the specific dark-slate utilities the app
+uses, so any *new* opacity variant falls through to raw Tailwind dark slate and
+renders as a heavy grey block in the light theme. Add a mapping when you reach
+for one.
+
+## Assigning staff by hand
+
+A job's people are normally derived by the scheduler and shown, not chosen. The
+JobModal's **Assigned to** select (below the ready/due dates, with the other
+scheduling constraints) sets `job.staffId`, which overrides that — see the
+scheduling invariants above for what the engine does with it. The select lists
+staff signed off on the job's process, plus, if the lock points at someone who
+no longer qualifies, that person as a visible bad option rather than silently
+reverting to automatic. Empty string in the UI, `null` on the job.
 
 ### Splitting a job
 
