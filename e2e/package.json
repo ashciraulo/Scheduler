@@ -1,0 +1,14 @@
+{
+  "name": "weldcell-scheduler-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser end-to-end suites for the Weldcell Scheduler. Kept out of scheduler/package.json so the app itself gains no test dependencies.",
+  "scripts": {
+    "test": "node run.mjs",
+    "fixture": "node fixtures/make-wip-xlsx.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}
