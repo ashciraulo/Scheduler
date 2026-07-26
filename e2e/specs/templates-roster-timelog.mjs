@@ -90,6 +90,48 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('#9 a typed-but-unconfirmed tag is not silently discarded on Save',
         afterUnconfirmed.includes('Unconfirmed Tag'), JSON.stringify(afterUnconfirmed));
 
+  // ---- #23: "equipment this can run on" is derived, not manually picked ----
+  // Chassis Frame Weld (tp_2) is untouched by the #9 checks above (those
+  // operate on tp_1, the first template with an open job) — seeded with
+  // process "Robotic TIG Welding" and tag "5T Positioner", which only
+  // Weld Robot 2 and Weld Robot 4 carry.
+  await page.locator('h3:has-text("Chassis Frame Weld")').first()
+    .locator('xpath=../..').locator('button').first().click();
+  await page.waitForSelector(modalSel);
+  // Field renders as a <label> wrapping its own content directly (see
+  // WeldingScheduler.jsx's Field component) — this locator IS the field,
+  // no need to walk up to a parent (which would broaden the scope to the
+  // whole form and quietly defeat these checks).
+  const equipField = modal().locator('label:has-text("Equipment this can run on")');
+  check('#23 the equipment list has no checkboxes — nothing to pick by hand',
+        (await equipField.locator('input[type=checkbox]').count()) === 0);
+  const equipChips = await equipField.locator('span').allInnerTexts();
+  check('#23 it lists only equipment actually matching process + capability tags',
+        equipChips.includes('Weld Robot 2') && equipChips.includes('Weld Robot 4')
+        && !equipChips.includes('Weld Robot 1') && !equipChips.includes('Weld Robot 3'),
+        JSON.stringify(equipChips));
+
+  // adding a requirement no equipment satisfies flips the list to a live
+  // warning, before Save — proving it's recomputed from the form state, not
+  // read back from some stored list.
+  const tagInput3 = modal().locator('input[list="cap-tags"]');
+  await tagInput3.fill('Nonexistent Rig');
+  await tagInput3.press('Enter');
+  await page.waitForTimeout(200);
+  check('#23 an unsatisfiable requirement updates the list live, before Save',
+        (await modal().locator('text=No equipment currently has every required capability tag').count()) === 1);
+
+  await page.mouse.click(5, 5);
+  await page.waitForTimeout(200);
+  await modal().locator('button:has-text("Discard changes")').click();
+  await page.waitForTimeout(300);
+
+  const templatesAfter = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('wf::wf_templates') || '[]'));
+  check('#23 templates no longer persist a manually-picked equipmentIds list',
+        templatesAfter.every((t) => t.equipmentIds === undefined),
+        JSON.stringify(templatesAfter.map((t) => t.equipmentIds)));
+
   // ---- #11: roster availability ----
   // #20 merged the old "Roster" tab into "Staff" — the weekly roster table
   // is still there, just alongside the staff list rather than on its own tab.
