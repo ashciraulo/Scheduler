@@ -813,7 +813,10 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
   );
 }
 
-function CostingView({ procedures, costCentres, processes, readOnly, onImport, onNewProcedure, onEditProcedure, onNewCentre, onEditCentre }) {
+function CostingView({
+  procedures, costCentres, processes, readOnly, onImport, onNewProcedure, onEditProcedure, onNewCentre, onEditCentre,
+  equipment, onAddEquip, onEditEquip, onDeleteEquip,
+}) {
   const fileRef = useRef(null);
   const byProcess = {};
   (procedures || []).forEach((p) => {
@@ -823,6 +826,40 @@ function CostingView({ procedures, costCentres, processes, readOnly, onImport, o
   const groups = Object.keys(byProcess).sort();
   return (
     <div>
+      {/* Equipment used to have its own "Equipment & Staff" tab. Moved here
+          (#20) — it has no data-model link to cost centres or procedures
+          (equipment carries no $ fields), this is purely giving it a home now
+          that Staff absorbed the other half of that old tab. */}
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2"><Wrench size={17} /> Equipment</h2>
+        {!readOnly && <button className={btnPrimary} onClick={onAddEquip}><Plus size={15} /> Add</button>}
+      </div>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-8">
+        {(equipment || []).map((e) => {
+          const color = EQUIP_COLOR[e.type] || EQUIP_COLOR['Welding Robot'];
+          return (
+            <div key={e.id} className={`border border-slate-800 bg-slate-900 rounded-lg p-3 border-l-[3px] ${color.border}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h3 className="font-semibold text-slate-100 text-sm">{e.name}</h3>
+                  <p className={`text-[11px] ${color.text}`}>{e.type}</p>
+                </div>
+                {!readOnly && (
+                  <div className="flex gap-1 shrink-0">
+                    <button onClick={() => onEditEquip(e)} className="p-1 rounded hover:bg-slate-700 text-slate-400"><Pencil size={13} /></button>
+                    <button onClick={() => onDeleteEquip(e)} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1 mt-2">
+                {e.processes.map((p) => <span key={p} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{p}</span>)}
+              </div>
+              {e.unavailableDates?.length > 0 && <p className="text-[10px] text-slate-600 mt-2">{e.unavailableDates.length} day(s) marked unavailable</p>}
+            </div>
+          );
+        })}
+      </div>
+
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
           <h2 className="text-lg font-bold text-slate-100">Costing</h2>
@@ -1368,11 +1405,11 @@ export default function WeldingScheduler() {
   }
   function saveProcesses(list) {
     // Removing a process here used to leave it behind on every piece of
-    // equipment and every staff member that had it: ResourcesView still drew
-    // it as a capability chip, but the editors only offer a checkbox per
-    // *current* process, so there was no control left to untick it with.
-    // Cascade the removal so resources can't keep a capability that no longer
-    // exists.
+    // equipment and every staff member that had it: StaffView and the
+    // Equipment section of CostingView still drew it as a capability chip,
+    // but the editors only offer a checkbox per *current* process, so there
+    // was no control left to untick it with. Cascade the removal so
+    // resources can't keep a capability that no longer exists.
     const removed = processes.filter((p) => !list.includes(p));
     setProcesses(list);
     saveKey('wf_processes', list);
@@ -1510,9 +1547,8 @@ export default function WeldingScheduler() {
               {[
                 { id: 'schedule', label: 'Schedule', icon: LayoutGrid },
                 { id: 'backlog', label: 'Job Backlog', icon: ClipboardList },
-                { id: 'roster', label: 'Roster', icon: Clock },
+                { id: 'staff', label: 'Staff', icon: Clock },
                 { id: 'templates', label: 'Templates', icon: Calendar },
-                { id: 'resources', label: 'Equipment & Staff', icon: Wrench },
                 { id: 'costing', label: 'Costing', icon: DollarSign },
                 { id: 'reports', label: 'Value Reports', icon: DollarSign },
               ].map((t) => (
@@ -1601,11 +1637,14 @@ export default function WeldingScheduler() {
           />
         )}
 
-        {tab === 'roster' && !displayMode && (
-          <RosterView
+        {tab === 'staff' && !displayMode && (
+          <StaffView
             staff={staff}
             readOnly={readOnly}
             onUpdateStaff={(item) => saveStaff(item, false)}
+            onAddStaff={() => setEditingStaff('new')}
+            onEditStaff={(s) => setEditingStaff(s)}
+            onDeleteStaff={(s) => setConfirmDelete({ type: 'staff', id: s.id, name: s.name })}
           />
         )}
 
@@ -1635,26 +1674,15 @@ export default function WeldingScheduler() {
             onEditProcedure={(p) => setEditingProcedure(p)}
             onNewCentre={() => setEditingCentre('new')}
             onEditCentre={(c) => setEditingCentre(c)}
+            equipment={equipment}
+            onAddEquip={() => setEditingEquipment('new')}
+            onEditEquip={(e) => setEditingEquipment(e)}
+            onDeleteEquip={(e) => setConfirmDelete({ type: 'equipment', id: e.id, name: e.name })}
           />
         )}
 
         {tab === 'reports' && !displayMode && (
           <ReportsView jobs={jobs} equipment={equipment} staff={staff} procedures={procedures} costCentres={costCentres} />
-        )}
-
-        {tab === 'resources' && !displayMode && (
-          <ResourcesView
-            equipment={equipment}
-            staff={staff}
-            processes={processes}
-            readOnly={readOnly}
-            onAddEquip={() => setEditingEquipment('new')}
-            onEditEquip={(e) => setEditingEquipment(e)}
-            onDeleteEquip={(e) => setConfirmDelete({ type: 'equipment', id: e.id, name: e.name })}
-            onAddStaff={() => setEditingStaff('new')}
-            onEditStaff={(s) => setEditingStaff(s)}
-            onDeleteStaff={(s) => setConfirmDelete({ type: 'staff', id: s.id, name: s.name })}
-          />
         )}
       </main>
 
@@ -2443,14 +2471,17 @@ function TemplatesView({ templates, equipment, processes, categories = [], readO
 }
 
 /* ============================================================
-   RESOURCES VIEW (equipment + staff)
+   STAFF VIEW (identity + capabilities + weekly roster + leave)
    ============================================================ */
 
-/* ============================================================
-   ROSTER VIEW (weekly shift pattern + leave per staff member)
-   ============================================================ */
-
-function RosterView({ staff, readOnly, onUpdateStaff }) {
+// Staff identity/capabilities (name, certified processes, add/edit/delete) and
+// roster (weekly working pattern, leave/absences) used to be two separate
+// tabs — "Equipment & Staff" and "Roster" — so everything about one person
+// was split across two screens with no link between them. Merged here (#20):
+// one tab, the weekly roster table doubles as the staff list (its sticky
+// name column now also carries capability tags and edit/delete), with leave
+// underneath as before.
+function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, onUpdateStaff }) {
   const [leaveModalFor, setLeaveModalFor] = useState(null); // staff object or null
   const [leaveStart, setLeaveStart] = useState(isoDate(new Date()));
   const [leaveEnd, setLeaveEnd] = useState(isoDate(new Date()));
@@ -2483,20 +2514,36 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
   return (
     <div>
       <div className="mb-6">
-        <h2 className="text-lg font-bold text-slate-100 mb-1">Weekly roster</h2>
-        <p className="text-xs text-slate-500 mb-4">Set each person's normal working pattern — which days, which shift, and how many hours. The scheduler uses this instead of assuming an 8-hour, 5-day week for everyone.</p>
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-lg font-bold text-slate-100">Weekly roster</h2>
+          {!readOnly && <button className={btnPrimary} onClick={onAddStaff}><Plus size={15} /> Add staff</button>}
+        </div>
+        <p className="text-xs text-slate-500 mb-4">Set each person's normal working pattern — which days, which shift, and how many hours. The scheduler uses this instead of assuming an 8-hour, 5-day week for everyone. The same table is your staff list — edit or remove someone from their row.</p>
         <div className="border border-slate-800 bg-slate-900 rounded-lg overflow-x-auto">
-          <table className="w-full text-sm min-w-[760px]">
+          <table className="w-full text-sm min-w-[900px]">
             <thead>
               <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
-                <th className="px-3 py-2 font-medium sticky left-0 bg-slate-900">Staff</th>
+                <th className="px-3 py-2 font-medium sticky left-0 bg-slate-900" style={{ minWidth: 200 }}>Staff</th>
                 {DAY_COLS.map(([key, label]) => <th key={key} className="px-2 py-2 font-medium text-center">{label}</th>)}
               </tr>
             </thead>
             <tbody>
               {staff.map((m) => (
                 <tr key={m.id} className="border-b border-slate-800/60">
-                  <td className="px-3 py-2 font-medium text-slate-200 sticky left-0 bg-slate-900 whitespace-nowrap">{m.name}</td>
+                  <td className="px-3 py-2 sticky left-0 bg-slate-900 align-top" style={{ minWidth: 200 }}>
+                    <div className="flex items-start justify-between gap-1.5">
+                      <span className="font-medium text-slate-200 whitespace-nowrap">{m.name}</span>
+                      {!readOnly && (
+                        <div className="flex gap-0.5 shrink-0">
+                          <button onClick={() => onEditStaff(m)} className="p-1 rounded hover:bg-slate-700 text-slate-400"><Pencil size={12} /></button>
+                          <button onClick={() => onDeleteStaff(m)} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={12} /></button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {m.processes.map((p) => <span key={p} className="text-[9px] px-1 py-0.5 rounded bg-slate-800 text-slate-500">{p}</span>)}
+                    </div>
+                  </td>
                   {DAY_COLS.map(([key]) => {
                     const pattern = (m.weeklyRoster || {})[key] || { working: false, production: true, shift: 'day', hours: 0 };
                     const nonProd = pattern.working && pattern.production === false;
@@ -2539,7 +2586,7 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
                 </tr>
               ))}
               {staff.length === 0 && (
-                <tr><td colSpan={8} className="px-3 py-6 text-center text-slate-600 text-sm">Add staff under Equipment &amp; Staff first.</td></tr>
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-slate-600 text-sm">No staff yet — add one above.</td></tr>
               )}
             </tbody>
           </table>
@@ -2630,69 +2677,6 @@ function RosterView({ staff, readOnly, onUpdateStaff }) {
           </div>
         </Modal>
       )}
-    </div>
-  );
-}
-
-function ResourcesView({ equipment, staff, processes, readOnly, onAddEquip, onEditEquip, onDeleteEquip, onAddStaff, onEditStaff, onDeleteStaff }) {
-  return (
-    <div className="grid lg:grid-cols-2 gap-6">
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2"><Wrench size={17} /> Equipment</h2>
-          {!readOnly && <button className={btnPrimary} onClick={onAddEquip}><Plus size={15} /> Add</button>}
-        </div>
-        <div className="space-y-2">
-          {equipment.map((e) => {
-            const color = EQUIP_COLOR[e.type] || EQUIP_COLOR['Welding Robot'];
-            return (
-              <div key={e.id} className={`border border-slate-800 bg-slate-900 rounded-lg p-3 border-l-[3px] ${color.border}`}>
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <h3 className="font-semibold text-slate-100 text-sm">{e.name}</h3>
-                    <p className={`text-[11px] ${color.text}`}>{e.type}</p>
-                  </div>
-                  {!readOnly && (
-                    <div className="flex gap-1 shrink-0">
-                      <button onClick={() => onEditEquip(e)} className="p-1 rounded hover:bg-slate-700 text-slate-400"><Pencil size={13} /></button>
-                      <button onClick={() => onDeleteEquip(e)} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
-                    </div>
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {e.processes.map((p) => <span key={p} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{p}</span>)}
-                </div>
-                {e.unavailableDates?.length > 0 && <p className="text-[10px] text-slate-600 mt-2">{e.unavailableDates.length} day(s) marked unavailable</p>}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2"><Users size={17} /> Staff</h2>
-          {!readOnly && <button className={btnPrimary} onClick={onAddStaff}><Plus size={15} /> Add</button>}
-        </div>
-        <div className="space-y-2">
-          {staff.map((s) => (
-            <div key={s.id} className="border border-slate-800 bg-slate-900 rounded-lg p-3">
-              <div className="flex items-start justify-between gap-2">
-                <h3 className="font-semibold text-slate-100 text-sm">{s.name}</h3>
-                {!readOnly && (
-                  <div className="flex gap-1 shrink-0">
-                    <button onClick={() => onEditStaff(s)} className="p-1 rounded hover:bg-slate-700 text-slate-400"><Pencil size={13} /></button>
-                    <button onClick={() => onDeleteStaff(s)} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
-                  </div>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-1 mt-2">
-                {s.processes.map((p) => <span key={p} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{p}</span>)}
-              </div>
-              {s.leavePeriods?.length > 0 && <p className="text-[10px] text-slate-600 mt-2">{s.leavePeriods.length} leave period(s) on file — see Roster tab</p>}
-            </div>
-          ))}
-        </div>
-      </div>
     </div>
   );
 }

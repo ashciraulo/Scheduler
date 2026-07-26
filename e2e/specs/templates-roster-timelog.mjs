@@ -91,7 +91,9 @@ export default async function run({ page, check, errors, baseUrl }) {
         afterUnconfirmed.includes('Unconfirmed Tag'), JSON.stringify(afterUnconfirmed));
 
   // ---- #11: roster availability ----
-  await page.click('nav >> text=Roster');
+  // #20 merged the old "Roster" tab into "Staff" — the weekly roster table
+  // is still there, just alongside the staff list rather than on its own tab.
+  await page.click('nav >> text=Staff');
   await page.waitForTimeout(600);
   const firstDaySelect = page.locator('table select').first();
   const opts = await firstDaySelect.locator('option').allInnerTexts();

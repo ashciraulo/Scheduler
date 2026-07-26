@@ -88,7 +88,10 @@ export default async function run({ page, check, errors, offOrigin, baseUrl }) {
   check('#10 removing a process reports what it cleaned up',
         /Robotic TIG Welding/.test(toastText || ''), `toast="${(toastText || '').slice(0, 120)}"`);
 
-  await page.click('nav >> text=Equipment');
+  // #20 merged the old "Equipment & Staff" tab into Staff (+ an Equipment
+  // section under Costing) — Staff still shows a capability chip per person,
+  // so it's an equally valid place to check the cascade landed.
+  await page.click('nav >> text=Staff');
   // the toast names the process and lingers ~3.2s — wait it out, or the
   // assertion below reads the toast rather than the resource list
   await clearToast(page);

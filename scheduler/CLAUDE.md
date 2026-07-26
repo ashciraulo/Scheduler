@@ -108,8 +108,14 @@ Top-to-bottom, the single component file contains:
    buttons).
 7. **Main component** `WeldingScheduler` — top-level state, load/recompute/save,
    all the CRUD handlers, the header, and tab routing.
-8. **Views** — ScheduleView (the gantt/drag-drop grid), BacklogView, RosterView,
-   TemplatesView, ResourcesView, ReportsView.
+8. **Views** — ScheduleView (the gantt/drag-drop grid), BacklogView, StaffView
+   (staff identity, capabilities and weekly roster/leave — merged from the
+   former separate "Roster" and "Equipment & Staff" tabs, #20), TemplatesView,
+   CostingView (also carries an Equipment section, since equipment ended up
+   without a tab of its own once StaffView absorbed the rest of the old
+   "Equipment & Staff" tab — it has no data-model link to cost centres or
+   procedures, so the placement is purely a home for it, not a data
+   relationship), ReportsView.
 9. **Modals** — JobModal, ImportJobsModal, TemplateModal, EquipmentModal, StaffModal.
 
 ## Importing jobs from a Business Central WIP export

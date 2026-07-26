@@ -10,6 +10,7 @@ import importAndModals from './specs/import-and-modals.mjs';
 import parkedList from './specs/parked-list.mjs';
 import templatesRosterTimelog from './specs/templates-roster-timelog.mjs';
 import splitJobParts from './specs/split-job-parts.mjs';
+import staffCostingMerge from './specs/staff-costing-merge.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -19,6 +20,7 @@ const SUITES = [
   ['parked list (#8)', parkedList],
   ['templates, roster, time log (#9, #11, #12)', templatesRosterTimelog],
   ['split-job parts (#18)', splitJobParts],
+  ['staff + costing merge (#20)', staffCostingMerge],
 ];
 
 const only = process.argv[2]; // optional substring filter
