@@ -444,13 +444,29 @@ For when a job has to come off equipment before it's done (an urgent job
 pre-empts it) and the remainder needs to be rescheduled separately, possibly
 on different equipment or at a different time. From the job's edit modal,
 "Split job into two parts" divides `hoursTotal` into two hour amounts; the job
-gets `job.parts = [{ id, hoursTotal, percentComplete, status, assignment },
-...]` and its own top-level `hoursTotal`/`percentComplete`/`status`/
-`assignment` become **derived, not authoritative** — see below.
+gets `job.parts = [{ id, name, hoursTotal, percentComplete, status,
+assignment }, ...]` and its own top-level `hoursTotal`/`percentComplete`/
+`status`/`assignment` become **derived, not authoritative** — see below.
 
 - A split job is still **one row** in the Backlog and **one entity** everywhere
-  outside the scheduler — `id`, name, process, dates, notes, and $ values all
-  stay at the job level, unsplit.
+  outside the scheduler — `id`, process, dates, notes, and $ values all stay at
+  the job level, unsplit.
+- **Each part has its own `name`**, independent of the parent's and of the
+  other part(s) (#18) — pre-filled as `"<job name> (Part N)"` when the split is
+  made, but a real, independently editable field from then on, not a label
+  recomputed at render time. A part saved before this field existed has no
+  `name`; every render site that shows one falls back to the same computed
+  `"<name> (Part N)"` label in that case, so old data still reads sensibly.
+  **`name` must survive `runScheduler`'s flatten/collapse round trip** or the
+  very next recompute — which happens on nearly every action, not just a
+  drag — would silently overwrite whatever the user just typed. Collapse
+  writes back the *original* `parent.parts[i].name` (possibly `undefined`),
+  never the flattened unit's computed fallback — round-tripping the fallback
+  would permanently bake the bare parent name onto every legacy part on its
+  first recompute, erasing the "(Part 1)"/"(Part 2)" distinction the UI
+  depends on `name` being absent to derive. See
+  `'a custom part name survives repeated recomputes'` in
+  `test/scheduler.test.js`.
 - Each part is scheduled as its own independent unit. `runScheduler` flattens
   every split job's parts into separate schedulable pseudo-units up front
   (carrying the parent's process, dates, `tags` and `needsFurtherProcessing` —
@@ -462,10 +478,11 @@ gets `job.parts = [{ id, hoursTotal, percentComplete, status, assignment },
   of parts, `percentComplete` an hours-weighted average, `status` is
   `'complete'` only when every part is, and the parent's own `assignment` is
   always `null` (look at `job.parts[i].assignment` instead).
-- `ScheduleView` renders each active part as its own block (labelled
-  `"<name> (Part N)"`), tied back to the parent job for editing — clicking any
-  part opens the parent's `JobModal`, not a separate view. Complete parts
-  don't render, same as any complete job.
+- `ScheduleView` renders each active part as its own block, labelled with
+  `part.name` (falling back to `"<job name> (Part N)"` for a part with none),
+  tied back to the parent job for editing — clicking any part opens the
+  parent's `JobModal`, not a separate view. Complete parts don't render, same
+  as any complete job.
 - **Parts are individually draggable**, exactly like a whole job. Drag
   identity is the part's own `id`; `findDragTarget` in the main component
   resolves a dragged id back to either a whole job or a `{ job, partIndex }`
@@ -556,6 +573,24 @@ fields exist so a future sync layer has a clean contract.
   wrong: `click` fires on the nearest common ancestor of mousedown and mouseup,
   so selecting text inside a dialog and releasing outside it discarded the
   edit. Don't simplify it back.
+- `Modal` takes a `size` prop (`'md'` default, `'lg'` = the old `wide` boolean,
+  `'xl'` for a dense multi-column table like the WIP import) via the
+  `MODAL_WIDTH` map. When a table inside a modal still looks cramped after
+  bumping the dialog's own width, check whether that's the real cause first:
+  `table-auto` doesn't stretch a column to fill left-over space on its own —
+  give the one free-text column (`Description`, a name field, …) `w-full` on
+  its `<th>` so it absorbs whatever the fixed-width columns don't need, and
+  pair it with `truncate w-0 min-w-full` on the cell's inner div (needs a
+  bounded width to actually clip against; a bare `max-w-[Npx]` cap just moves
+  the wasted space inside the column instead of removing it).
+- The three chip/tag input widgets (`TagEditor`, `KeywordChips`, `ComboChips`)
+  commit on blur, not just on Enter/Add. Typing a value and clicking straight
+  to Save — a completely natural thing to do — used to discard it silently:
+  no error, nothing in the saved record, which is exactly what "this doesn't
+  do anything" looks like from the outside (#9). `onBlur={() => { if
+  (input.trim()) add(); }}` on the text input fixes all three; keep that
+  guard (not a bare `onBlur={add}`) so blurring an empty field doesn't fire a
+  no-op `onChange` on every unrelated click around the form.
 - Deleting a process (Templates page) cascades: `saveProcesses` strips it from
   every piece of equipment and every staff member. Templates and jobs keep
   their process string on purpose — it records what the work is, and blanking

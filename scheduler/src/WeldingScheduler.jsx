@@ -360,7 +360,13 @@ const btnGhost = "inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-7
 const btnDanger = "inline-flex items-center gap-1.5 bg-red-950 hover:bg-red-900 text-red-300 text-sm px-3 py-2 rounded-md transition-colors border border-red-900";
 const smallInput = "w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-amber-500/60";
 
-function Modal({ title, onClose, children, wide }) {
+// `size`: 'md' (default) for a simple form, 'lg' (= the old `wide` prop, kept
+// for existing callers) for a data table with a few columns, 'xl' for the
+// import modal's dense multi-column review table, which was still cramped —
+// truncated descriptions, cut-off customer names — even at 'lg' (1024px).
+const MODAL_WIDTH = { md: 'max-w-md', lg: 'max-w-5xl', xl: 'max-w-[1400px]' };
+
+function Modal({ title, onClose, children, wide, size }) {
   // A backdrop click closes the modal, but "click" fires on the nearest common
   // ancestor of mousedown and mouseup — so selecting text inside the modal and
   // releasing the mouse outside it counted as a backdrop click and threw away
@@ -378,7 +384,7 @@ function Modal({ title, onClose, children, wide }) {
       }}
     >
       <div
-        className={`bg-slate-900 border border-slate-700 rounded-lg shadow-2xl w-full ${wide ? 'max-w-5xl' : 'max-w-md'} max-h-[85vh] overflow-y-auto`}
+        className={`bg-slate-900 border border-slate-700 rounded-lg shadow-2xl w-full ${MODAL_WIDTH[size || (wide ? 'lg' : 'md')]} max-h-[85vh] overflow-y-auto`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 sticky top-0 bg-slate-900">
@@ -1139,9 +1145,12 @@ export default function WeldingScheduler() {
   function splitJob(job, hoursA) {
     const a = Math.max(0, Math.round(Number(hoursA) * 100) / 100);
     const b = Math.max(0, Math.round((job.hoursTotal - a) * 100) / 100);
+    // Pre-filled so a freshly split job still reads sensibly everywhere it's
+    // shown, but this is a real, independently editable field from here on —
+    // not a label recomputed from the parent's name at render time (#18).
     const parts = [
-      { id: uid('part'), hoursTotal: a, percentComplete: job.percentComplete || 0, status: 'active', assignment: null },
-      { id: uid('part'), hoursTotal: b, percentComplete: 0, status: 'active', assignment: null },
+      { id: uid('part'), name: `${job.name} (Part 1)`, hoursTotal: a, percentComplete: job.percentComplete || 0, status: 'active', assignment: null },
+      { id: uid('part'), name: `${job.name} (Part 2)`, hoursTotal: b, percentComplete: 0, status: 'active', assignment: null },
     ];
     const updated = { ...job, parts, assignment: null, updatedAt: new Date().toISOString() };
     recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
@@ -1401,7 +1410,9 @@ export default function WeldingScheduler() {
         if (p.status === 'complete') return;
         const unit = {
           id: p.id,
-          name: j.parts.length > 1 ? `${j.name} (Part ${i + 1})` : j.name,
+          // p.name is real from #18 on; the computed label only covers parts
+          // saved before that field existed.
+          name: p.name || (j.parts.length > 1 ? `${j.name} (Part ${i + 1})` : j.name),
           process: j.process,
           hoursTotal: p.hoursTotal,
           readyDate: j.readyDate,
@@ -1832,7 +1843,7 @@ function ScheduleView({
         j.parts.forEach((part, i) => {
           pushUnit({
             id: part.id,
-            name: j.parts.length > 1 ? `${j.name} (Part ${i + 1})` : j.name,
+            name: part.name || (j.parts.length > 1 ? `${j.name} (Part ${i + 1})` : j.name),
             staffId: j.staffId || null,
             hoursTotal: part.hoursTotal,
             percentComplete: part.percentComplete,
@@ -2929,7 +2940,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
             {parts.map((part, i) => (
               <div key={part.id} className="bg-slate-800/50 border border-slate-700 rounded-md p-2.5">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold text-slate-300">Part {i + 1}</span>
+                  <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wide">Part {i + 1}</span>
                   <button
                     type="button"
                     className="text-[11px] text-amber-400 hover:underline flex items-center gap-1"
@@ -2938,6 +2949,19 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                     <CircleCheck size={12} /> {part.status === 'complete' ? 'Mark active' : 'Mark complete'}
                   </button>
                 </div>
+                <Field label="Name">
+                  <input
+                    type="text"
+                    className={inputCls}
+                    // Parts saved before this field existed have no `name` —
+                    // fall back to the label they used to be shown under, so
+                    // the box isn't blank the first time an old split job is
+                    // reopened. Editing it here is real from now on, not a
+                    // label recomputed from the parent's name (#18).
+                    value={part.name ?? `${name || 'Untitled job'} (Part ${i + 1})`}
+                    onChange={(e) => setParts((ps) => ps.map((p, pi) => (pi === i ? { ...p, name: e.target.value } : p)))}
+                  />
+                </Field>
                 <div className="grid grid-cols-2 gap-2 items-end">
                   <Field label="Hours">
                     <input
@@ -3150,6 +3174,11 @@ function KeywordChips({ words, onChange, placeholder, tone }) {
           placeholder={placeholder}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+          // Typed-but-not-confirmed text used to vanish with no warning the
+          // moment focus left the field — including by clicking Save, which is
+          // exactly what looked like "adding this doesn't do anything" (#9).
+          // Commit it wherever focus goes, same as a tag/topic input elsewhere.
+          onBlur={() => { if (input.trim()) add(); }}
         />
         <button type="button" className="text-xs px-2 py-1 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700" onClick={add}>Add</button>
       </div>
@@ -3199,6 +3228,8 @@ function ComboChips({ rules, onChange }) {
           placeholder="body + elbow"
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+          // See TagEditor's onBlur — same fix, same reason.
+          onBlur={() => { if (input.trim()) add(); }}
         />
         <button
           type="button"
@@ -3578,7 +3609,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
   ] : [];
 
   return (
-    <Modal title={title} onClose={onClose} wide>
+    <Modal title={title} onClose={onClose} size="xl">
       {/* ---------------- step 1: choose a file ---------------- */}
       {stage === 'pick' && (
         <div>
@@ -3731,12 +3762,17 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
               are edited, and letting that resize the modal moved the whole
               dialog under the pointer mid-edit. */}
           <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto flex-1 min-h-0 overflow-y-auto">
-            <table className="w-full text-sm min-w-[760px]">
+            <table className="w-full text-sm min-w-[1000px]">
               <thead className="sticky top-0 bg-slate-900 z-10">
                 <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
                   <th className="px-3 py-2 font-medium"></th>
                   <th className="px-3 py-2 font-medium">Job / task</th>
-                  <th className="px-3 py-2 font-medium">Description</th>
+                  {/* w-full on an otherwise-unconstrained table-auto column
+                      makes it absorb whatever width the other columns don't
+                      need, instead of the table stopping short of the dialog's
+                      edge and leaving a blank margin — the "unused horizontal
+                      space" complaint. */}
+                  <th className="px-3 py-2 font-medium w-full">Description</th>
                   <th className="px-3 py-2 font-medium">Customer</th>
                   <th className="px-3 py-2 font-medium">Value</th>
                   <th className="px-3 py-2 font-medium">Qty</th>
@@ -3756,8 +3792,14 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                     <td className="px-3 py-2 align-top text-xs text-slate-400 whitespace-nowrap">
                       {r.jobNo || '—'}{r.taskNo ? ` / ${r.taskNo}` : ''}
                     </td>
-                    <td className="px-3 py-2 align-top text-slate-200 max-w-[300px]">
-                      <div className="truncate" title={r.desc}>{highlightHits(r.desc, r.incHits)}</div>
+                    <td className="px-3 py-2 align-top text-slate-200">
+                      {/* w-0 min-w-full: truncate needs a bounded width to clip
+                          against, but the column itself is now flexible (see
+                          the header's w-full above) — this ties the div to
+                          whatever width the column actually resolves to,
+                          rather than a fixed cap that left space unused on a
+                          wide dialog or clipped text on a narrow one. */}
+                      <div className="truncate w-0 min-w-full" title={r.desc}>{highlightHits(r.desc, r.incHits)}</div>
                       <div className="flex flex-wrap gap-1 mt-0.5">
                         {r.isDupe && <span className="text-[10px] text-slate-400">duplicate of job {r.jobNo}</span>}
                         {r.doneConfirmed && <span className="text-[10px] text-emerald-400">complete in BC</span>}
@@ -3770,11 +3812,11 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                         </div>
                       ))}
                     </td>
-                    <td className="px-3 py-2 align-top text-slate-400 text-xs max-w-[140px] truncate" title={r.customer}>{r.customer || '—'}</td>
+                    <td className="px-3 py-2 align-top text-slate-400 text-xs max-w-[220px] truncate" title={r.customer}>{r.customer || '—'}</td>
                     <td className="px-3 py-2 align-top text-slate-400 font-mono text-xs whitespace-nowrap">{r.value == null ? '—' : `$${Math.round(r.value).toLocaleString()}`}</td>
                     <td className="px-3 py-2 align-top text-slate-400 text-xs">{r.qty == null ? '—' : r.qty}</td>
                     <td className="px-3 py-2 align-top text-slate-400 text-xs whitespace-nowrap">{r.target ? fmtDate(r.target) : '—'}</td>
-                    <td className="px-3 py-2 align-top text-slate-400 text-xs max-w-[130px] truncate" title={r.status}>{r.status || '—'}</td>
+                    <td className="px-3 py-2 align-top text-slate-400 text-xs max-w-[170px] truncate" title={r.status}>{r.status || '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -3837,11 +3879,15 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
           )}
 
           <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto max-h-[45vh] overflow-y-auto">
-            <table className="w-full text-sm min-w-[860px]">
+            <table className="w-full text-sm min-w-[1080px]">
               <thead className="sticky top-0 bg-slate-900 z-10">
                 <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
                   <th className="px-3 py-2 font-medium"></th>
-                  <th className="px-3 py-2 font-medium">Job</th>
+                  {/* w-full: same trick as the WIP-review table's Description
+                      column — an otherwise-unconstrained table-auto column
+                      absorbs whatever space the fixed-width ones don't need,
+                      so the job-name field actually grows on a wide dialog. */}
+                  <th className="px-3 py-2 font-medium w-full">Job</th>
                   <th className="px-3 py-2 font-medium">BC Job/Task</th>
                   <th className="px-3 py-2 font-medium">Qty</th>
                   <th className="px-3 py-2 font-medium">Due</th>
@@ -3868,7 +3914,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                       <div className={`flex items-center gap-1.5 ${r._splitGroup != null ? 'border-l-2 border-amber-600/60 pl-2' : ''}`}>
                         <input
                           type="text"
-                          className="w-[180px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
+                          className="w-full min-w-[200px] max-w-[520px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
                           value={r.name}
                           title={r.name}
                           onChange={(e) => updateRow(r._rowId, { name: e.target.value })}
@@ -3897,7 +3943,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                     <td className="px-3 py-2 text-slate-400 font-mono">${Number(r.totalValue || 0).toLocaleString()}</td>
                     <td className="px-3 py-2">
                       <select
-                        className="w-[150px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
+                        className="w-[180px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
                         value={r.templateId || ''}
                         onChange={(e) => applyTemplateToRow(r._rowId, e.target.value)}
                       >
@@ -3907,7 +3953,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                     </td>
                     <td className="px-3 py-2">
                       <select
-                        className="w-[140px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
+                        className="w-[160px] bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-200"
                         value={r.process}
                         onChange={(e) => updateRow(r._rowId, { process: e.target.value, templateId: null })}
                       >
@@ -3980,7 +4026,21 @@ function TagEditor({ value, onChange, suggestions }) {
         </div>
       )}
       <div className="flex gap-2">
-        <input className={inputCls} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} list="cap-tags" placeholder="e.g. 1T Positioner, 5T Positioner…" />
+        <input
+          className={inputCls}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+          // Typing a tag and clicking Save without pressing Enter/Add first
+          // discarded it silently — no error, nothing in the saved template —
+          // which is exactly what "adding a capability requirement does
+          // nothing" looks like from the outside (#9). Commit on blur, same as
+          // KeywordChips/ComboChips: whatever takes focus next (including the
+          // Save button) gets the tag included rather than losing it.
+          onBlur={() => { if (input.trim()) add(); }}
+          list="cap-tags"
+          placeholder="e.g. 1T Positioner, 5T Positioner…"
+        />
         <button type="button" className={btnGhost} onClick={add}>Add</button>
       </div>
       <datalist id="cap-tags">{(suggestions || []).filter((x) => !value.includes(x)).map((x) => <option key={x} value={x} />)}</datalist>

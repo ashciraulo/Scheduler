@@ -361,7 +361,12 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
           id: part.id,
           _parentId: j.id,
           _partIndex: i,
-          name: j.name,
+          // Each part can carry its own name, independent of the parent's
+          // (#18) — purely cosmetic as far as the engine's concerned (nothing
+          // here reads it for a scheduling decision), but it has to survive
+          // the round trip through flatten/collapse or the next recompute
+          // would silently overwrite whatever the user just typed.
+          name: part.name || j.name,
           process: j.process,
           // Capability tags are a property of the work, so they apply to every
           // part of it. Without this the parts arrived with no `tags` at all
@@ -583,15 +588,24 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   const all = [];
   flatResult.forEach((unit) => {
     if (!unit._parentId) { all.push(unit); return; }
+    const parent = splitParents.get(unit._parentId);
     let collapsed = collapsedByParent.get(unit._parentId);
     if (!collapsed) {
-      const parent = splitParents.get(unit._parentId);
       collapsed = { ...parent, parts: new Array(parent.parts.length) };
       collapsedByParent.set(unit._parentId, collapsed);
       all.push(collapsed);
     }
     collapsed.parts[unit._partIndex] = {
       id: unit.id,
+      // The exact original value, not unit.name — flatten falls back to the
+      // parent's name for a part that has none, purely so the engine (and
+      // whyUnscheduled's messages) always has *something* to work with, but
+      // that fallback must not get written back as if the user had set it.
+      // Round-tripping it here would leave every legacy part's name equal to
+      // the bare parent name after the very next recompute, permanently
+      // erasing the "(Part 1)"/"(Part 2)" distinction the UI derives when
+      // this field is absent.
+      name: parent.parts[unit._partIndex].name,
       hoursTotal: unit.hoursTotal,
       percentComplete: unit.percentComplete,
       status: unit.status,

@@ -12,6 +12,9 @@
      - a repeated Job No. (duplicate detection)
      - a completion date on a row whose status says it hasn't started
      - rows that match no keyword at all, which are what the parked list keeps
+     - a matched row with quantity 0 — legitimate in BC for a quantity-less
+       department job, and used to trigger a "Qty 0" warning on nearly every
+       real row before that was removed as noise (#8)
 
    An .xlsx is a ZIP of XML. Entries are written STORED (no compression), which
    is valid and what wipImport.js's unzip() reads as method 0 — so this needs no
@@ -33,7 +36,7 @@ const ROWS = [
   ['J002', '1000', 'HVOF coat hydraulic shaft', 'WIP 0%', 'Borg', '6', '7680', '45905', '0', 'Planned'],
   ['J003', '1000', 'Body elbow spray', '', 'Cyclo', '4', '3200', '45910', '0', 'Planned'],
   ['J004', '1000', 'Machining only - no weld', '', 'Delta', '2', '1500', '45912', '0', 'Planned'],
-  ['J005', '1000', 'Elbow weld repair', '', 'Echo', '3', '2100', '45915', '0', 'Planned'],
+  ['J005', '1000', 'Elbow weld repair', '', 'Echo', '0', '2100', '45915', '0', 'Planned'],
   ['J001', '1000', 'Weld bracket assembly', 'WIP 20%', 'Acme', '10', '4800', '45900', '0', 'In Progress'],
   ['J006', '1000', 'Spray body section', '', 'Foxtrot', '5', '5000', '45920', '45880', 'Not Started'],
   // genuinely no keyword match — these are what should end up parked
