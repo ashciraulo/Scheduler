@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import {
   Plus, X, Settings2, Calendar, Users, Wrench, Check, AlertTriangle,
   Monitor, ChevronLeft, ChevronRight, Trash2, Pencil, Pin, PinOff,
@@ -366,6 +366,13 @@ const smallInput = "w-full bg-slate-900 border border-slate-700 rounded px-2 py-
 // truncated descriptions, cut-off customer names — even at 'lg' (1024px).
 const MODAL_WIDTH = { md: 'max-w-md', lg: 'max-w-5xl', xl: 'max-w-[1400px]' };
 
+// Lets a form control that isn't a plain native input — MultiCheck's toggle
+// buttons, the chip editors' Add/× buttons — report a change up to the
+// enclosing Modal without every modal-content component needing its own
+// wiring. Defaults to a no-op so these components still work stand-alone
+// (there have never been any, but nothing requires there never to be).
+const DirtyContext = createContext(() => {});
+
 function Modal({ title, onClose, children, wide, size }) {
   // A backdrop click closes the modal, but "click" fires on the nearest common
   // ancestor of mousedown and mouseup — so selecting text inside the modal and
@@ -373,6 +380,22 @@ function Modal({ title, onClose, children, wide, size }) {
   // whatever had been typed. Only close when the gesture both started and
   // ended on the backdrop itself.
   const downOnBackdrop = useRef(false);
+  // Whether anything inside this modal has actually changed. A ref, not
+  // state: it's read once at close time, and turning it into state would
+  // re-render the whole modal (and everything under it) on every keystroke.
+  const dirtyRef = useRef(false);
+  const markDirty = useCallback(() => { dirtyRef.current = true; }, []);
+  const [confirming, setConfirming] = useState(false);
+
+  // A backdrop click or the header ✕ used to call onClose directly, so
+  // clicking outside a modal — including by mistake, a target that was
+  // wider than it looked — discarded whatever had been typed with no
+  // warning (#19). Now it only closes immediately if nothing changed;
+  // otherwise it asks. The explicit "Cancel" button each modal's content
+  // provides is left alone — clicking Cancel is already the deliberate,
+  // unambiguous choice to discard, not an accidental dismissal.
+  const requestClose = () => { if (dirtyRef.current) setConfirming(true); else onClose(); };
+
   return (
     <div
       className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
@@ -380,18 +403,42 @@ function Modal({ title, onClose, children, wide, size }) {
       onClick={(e) => {
         const closed = downOnBackdrop.current && e.target === e.currentTarget;
         downOnBackdrop.current = false;
-        if (closed) onClose();
+        if (closed) requestClose();
       }}
     >
       <div
-        className={`bg-slate-900 border border-slate-700 rounded-lg shadow-2xl w-full ${MODAL_WIDTH[size || (wide ? 'lg' : 'md')]} max-h-[85vh] overflow-y-auto`}
+        className={`relative bg-slate-900 border border-slate-700 rounded-lg shadow-2xl w-full ${MODAL_WIDTH[size || (wide ? 'lg' : 'md')]} max-h-[85vh] overflow-y-auto`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 sticky top-0 bg-slate-900">
           <h3 className="font-semibold text-slate-100 text-base">{title}</h3>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-200"><X size={18} /></button>
+          <button onClick={requestClose} className="text-slate-500 hover:text-slate-200"><X size={18} /></button>
         </div>
-        <div className="p-5">{children}</div>
+        {/* onChange bubbles from any native input/select/textarea a modal's
+            content renders, so this catches typing, checkboxes, selects and
+            range sliders in one place with zero changes to any of the ~10
+            modal-content components. Button-driven state (MultiCheck's
+            toggles, the chip editors' Add/×) doesn't fire a DOM change event,
+            so those call markDirty() via DirtyContext explicitly instead. */}
+        <div className="p-5" onChange={markDirty}>
+          <DirtyContext.Provider value={markDirty}>{children}</DirtyContext.Provider>
+        </div>
+
+        {confirming && (
+          <div
+            className="absolute inset-0 z-20 bg-slate-950/90 flex items-center justify-center rounded-lg p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-slate-900 border border-amber-700/60 rounded-lg p-5 max-w-sm shadow-xl">
+              <p className="text-sm text-slate-200 font-medium mb-1.5">Discard unsaved changes?</p>
+              <p className="text-xs text-slate-400 mb-4">Closing now will lose what you've entered here.</p>
+              <div className="flex justify-end gap-2">
+                <button className={btnGhost} onClick={() => setConfirming(false)}>Keep editing</button>
+                <button className={btnDanger} onClick={onClose}>Discard changes</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -405,6 +452,9 @@ function Modal({ title, onClose, children, wide, size }) {
 // the equipment list narrows to the chosen process, and an id outside it is
 // ordinary filtering, not stale data.
 function MultiCheck({ options, value, onChange, getLabel = (x) => x, getId = (x) => x, showOrphans = false }) {
+  // Toggling one of these buttons doesn't fire a native DOM change event, so
+  // Modal's blanket onChange listener never sees it — report it explicitly.
+  const markDirty = useContext(DirtyContext);
   const optionIds = options.map(getId);
   const orphans = showOrphans ? value.filter((v) => !optionIds.includes(v)) : [];
   return (
@@ -416,7 +466,7 @@ function MultiCheck({ options, value, onChange, getLabel = (x) => x, getId = (x)
           <button
             type="button"
             key={id}
-            onClick={() => onChange(active ? value.filter((v) => v !== id) : [...value, id])}
+            onClick={() => { markDirty(); onChange(active ? value.filter((v) => v !== id) : [...value, id]); }}
             className={`text-xs px-2.5 py-1.5 rounded-full border transition-colors ${
               active ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-800 border-slate-700 text-slate-400'
             }`}
@@ -429,7 +479,7 @@ function MultiCheck({ options, value, onChange, getLabel = (x) => x, getId = (x)
         <button
           type="button"
           key={id}
-          onClick={() => onChange(value.filter((v) => v !== id))}
+          onClick={() => { markDirty(); onChange(value.filter((v) => v !== id)); }}
           title="No longer available — click to remove"
           className="text-xs px-2.5 py-1.5 rounded-full border transition-colors bg-red-950/40 border-red-900 text-red-300 line-through"
         >
@@ -4012,7 +4062,10 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
 // consistent across equipment/templates/jobs.
 function TagEditor({ value, onChange, suggestions }) {
   const [input, setInput] = useState('');
-  const add = () => { const t = input.trim(); if (t && !value.includes(t)) onChange([...value, t]); setInput(''); };
+  // Typing already fires Modal's blanket onChange bubbling; removing a chip
+  // is a plain button click and doesn't, so it needs to say so explicitly.
+  const markDirty = useContext(DirtyContext);
+  const add = () => { const t = input.trim(); if (t && !value.includes(t)) { markDirty(); onChange([...value, t]); } setInput(''); };
   return (
     <div>
       {value.length > 0 && (
@@ -4020,7 +4073,7 @@ function TagEditor({ value, onChange, suggestions }) {
           {value.map((t) => (
             <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 flex items-center gap-1">
               {t}
-              <button type="button" className="text-slate-500 hover:text-red-400" onClick={() => onChange(value.filter((x) => x !== t))}>×</button>
+              <button type="button" className="text-slate-500 hover:text-red-400" onClick={() => { markDirty(); onChange(value.filter((x) => x !== t)); }}>×</button>
             </span>
           ))}
         </div>

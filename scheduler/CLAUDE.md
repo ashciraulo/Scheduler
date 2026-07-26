@@ -573,6 +573,32 @@ fields exist so a future sync layer has a clean contract.
   wrong: `click` fires on the nearest common ancestor of mousedown and mouseup,
   so selecting text inside a dialog and releasing outside it discarded the
   edit. Don't simplify it back.
+- **A genuine backdrop click or the header ✕ asks before discarding a
+  changed modal** (#19). `Modal` tracks a `dirtyRef`, set by a blanket
+  `onChange` on the content wrapper (catches typing, checkboxes, selects and
+  range sliders in every modal for free, via ordinary DOM bubbling from
+  whatever native input a modal's content renders — no per-modal wiring) plus
+  `DirtyContext`, which `MultiCheck` and the chip editors (`TagEditor`,
+  `KeywordChips`, `ComboChips`) call explicitly for the interactions native
+  bubbling can't see: their state changes on a `<button onClick>`, not a
+  native form control, so toggling a `MultiCheck` option or removing a chip
+  fires no DOM change event on its own.
+  `requestClose()` closes immediately if nothing changed; otherwise it shows
+  an in-modal "Discard unsaved changes?" prompt (Keep editing / Discard
+  changes) instead of calling `onClose`. **Deliberately not wired onto the
+  explicit "Cancel" button every modal's content provides** — clicking Cancel
+  is already the unambiguous choice to discard, not an accidental dismissal,
+  and gating it too would put a confirmation in front of a decision the user
+  already made on purpose. `JobModal` has no Cancel button at all (only ✕ and
+  backdrop), so this is its only protection.
+  Known imprecision, accepted rather than engineered around: a modal whose
+  fields only ever *filter* rather than *enter* data — `ImportJobsModal`'s
+  row search box, its keyword editors (already persisted the instant a
+  keyword is added, independent of the modal's own lifecycle) — still flags
+  dirty on typing, since the tracking can't distinguish "this native input's
+  value is form data" from "this native input's value is a live filter" at
+  the `Modal` level. Worst case is one spurious "Discard changes?" click on a
+  search box that had nothing to lose; not worth per-field opt-outs for.
 - `Modal` takes a `size` prop (`'md'` default, `'lg'` = the old `wide` boolean,
   `'xl'` for a dense multi-column table like the WIP import) via the
   `MODAL_WIDTH` map. When a table inside a modal still looks cramped after
