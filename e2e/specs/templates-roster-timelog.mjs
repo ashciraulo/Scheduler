@@ -67,6 +67,29 @@ export default async function run({ page, check, errors, baseUrl }) {
         JSON.stringify(afterTags));
   await clearToast(page);
 
+  // ---- #9 (regression): a tag typed but never confirmed with Enter/Add must
+  // still be saved. This is the actual bug behind "adding a capability
+  // requirement seems to do nothing" — typing then clicking Save discarded
+  // whatever was in the box with no error, which reads exactly like the
+  // feature not working. Fixed by committing on blur (see TagEditor).
+  await page.locator(`h3:has-text("${before.tplName}")`).first()
+    .locator('xpath=../..').locator('button').first().click();
+  await page.waitForTimeout(500);
+  const tagInput2 = modal().locator('input[list="cap-tags"]');
+  await tagInput2.click();
+  await tagInput2.type('Unconfirmed Tag', { delay: 15 });
+  // Straight to Save — no Enter, no Add click.
+  await modal().locator('button:has-text("Save")').click();
+  await page.waitForTimeout(700);
+  await clearToast(page);
+
+  const afterUnconfirmed = await page.evaluate((tplId) => {
+    const tpl = JSON.parse(localStorage.getItem('wf::wf_templates') || '[]');
+    return (tpl.find((t) => t.id === tplId) || {}).tags || [];
+  }, before.tplId);
+  check('#9 a typed-but-unconfirmed tag is not silently discarded on Save',
+        afterUnconfirmed.includes('Unconfirmed Tag'), JSON.stringify(afterUnconfirmed));
+
   // ---- #11: roster availability ----
   await page.click('nav >> text=Roster');
   await page.waitForTimeout(600);

@@ -75,6 +75,17 @@ export default async function run({ page, check, errors, offOrigin, baseUrl }) {
   const comboPanel = modal().locator('div', { hasText: /Exclude only in combination/ }).last();
   check('#8 combination-rule editor is present', (await comboPanel.count()) > 0);
 
+  // #8 (reopened): still cramped even at the old 'lg' (1024px) width — the
+  // dialog needed to be genuinely wider, not just less noisy.
+  const dlgWidth = (await modal().locator('> div').boundingBox()).width;
+  check('#8 the import dialog is wider than the old lg cap (1024px)', dlgWidth > 1200, `${dlgWidth}px`);
+
+  // #8 (reopened): the "Qty 0" warning fired on most rows in real BC exports
+  // (department jobs are often legitimately quantity-less) and was pure noise
+  // eating vertical space — removed outright, qty stays visible in its column.
+  const step2Text = await modal().locator('table tbody').innerText();
+  check('#8 the noisy "Qty 0" warning is gone', !/Qty 0/.test(step2Text));
+
   // the dialog must hold its size while keywords are edited
   const dlg = modal().locator('> div');
   const before = await dlg.boundingBox();

@@ -9,6 +9,7 @@ import { runSpec, BASE_URL } from './lib/harness.mjs';
 import importAndModals from './specs/import-and-modals.mjs';
 import parkedList from './specs/parked-list.mjs';
 import templatesRosterTimelog from './specs/templates-roster-timelog.mjs';
+import splitJobParts from './specs/split-job-parts.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -17,6 +18,7 @@ const SUITES = [
   ['import + modals (#7, #10, #8)', importAndModals],
   ['parked list (#8)', parkedList],
   ['templates, roster, time log (#9, #11, #12)', templatesRosterTimelog],
+  ['split-job parts (#18)', splitJobParts],
 ];
 
 const only = process.argv[2]; // optional substring filter

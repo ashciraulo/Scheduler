@@ -284,6 +284,36 @@ describe('split jobs', () => {
     split.parts[1] = { ...split.parts[1], percentComplete: 100, status: 'complete' };
     assert.equal(byId(runScheduler([split], [equip('e1')], [person('s1')], d), 'split').status, 'complete');
   });
+
+  // #18: each part can carry its own name, independent of the parent's and of
+  // the other part's. The engine doesn't use it for anything — the risk is
+  // purely that flatten/collapse silently drops it, which would erase a
+  // user-typed name on the very next recompute (drag, save, anything).
+  test('a custom part name survives repeated recomputes', () => {
+    const d = days();
+    const split = job('split', {
+      hoursTotal: 16,
+      parts: [
+        { id: 'p1', name: 'My Custom Part Name', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null }, // no name — legacy part
+      ],
+    });
+    const equipment = [equip('e1'), equip('e2')];
+    const staff = [person('s1'), person('s2')];
+
+    const out1 = runScheduler([split], equipment, staff, d);
+    const p1 = byId(out1, 'split');
+    assert.equal(p1.parts[0].name, 'My Custom Part Name');
+    assert.equal(p1.parts[1].name, undefined,
+      'a part that never had a name must not have one backfilled — the UI '
+      + 'falls back to a computed "(Part N)" label exactly when this is absent');
+
+    // A second pass (what a drag or any other edit triggers) must not lose it.
+    const out2 = runScheduler(out1, equipment, staff, d);
+    const p2 = byId(out2, 'split');
+    assert.equal(p2.parts[0].name, 'My Custom Part Name');
+    assert.equal(p2.parts[1].name, undefined);
+  });
 });
 
 describe('pinned jobs', () => {

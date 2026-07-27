@@ -571,7 +571,13 @@ export function analyse(rows, mapping, settings) {
         r.warnings.push(`BC completion date ${r.actualDone} — check if really done`);
       }
     }
-    if (r.matched && r.qty != null && r.qty === 0) r.warnings.push('Qty 0');
+    // A "Qty 0" warning used to fire here whenever a matched row's quantity
+    // was literally 0. Deliberately removed (#8): department jobs are often
+    // legitimately quantity-less in BC, so this fired on most rows in real
+    // exports rather than the rare genuine mistake, drowning out the warnings
+    // that do matter and eating vertical space in the review table for no
+    // benefit — qty is still visible in its own column. A zero/missing qty
+    // still becomes 1 unit on import, in buildSchedulerJobs below.
   }
 
   // Default selection: matched, non-duplicate rows, minus jobs whose completion
