@@ -15,6 +15,9 @@ import scheduleAndModalUx from './specs/schedule-and-modal-ux.mjs';
 import parallelProcessing from './specs/parallel-processing.mjs';
 import shiftCapacity from './specs/shift-capacity.mjs';
 import jobModalLayout from './specs/job-modal-layout.mjs';
+import scheduleAndJobmodalPolish from './specs/schedule-and-jobmodal-polish.mjs';
+import templateProcessEditing from './specs/template-process-editing.mjs';
+import staffColorAndLeaveEditing from './specs/staff-color-and-leave-editing.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -29,6 +32,9 @@ const SUITES = [
   ['parallel processing (#30)', parallelProcessing],
   ['shift capacity scales with roster (#32)', shiftCapacity],
   ['job modal layout (#33)', jobModalLayout],
+  ['schedule + job modal polish (#35, #36, #37)', scheduleAndJobmodalPolish],
+  ['template process editing (#38, #39)', templateProcessEditing],
+  ['staff colour + leave editing (#40, #41)', staffColorAndLeaveEditing],
 ];
 
 const only = process.argv[2]; // optional substring filter
