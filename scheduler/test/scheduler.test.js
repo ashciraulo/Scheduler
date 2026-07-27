@@ -276,6 +276,115 @@ describe('roster availability', () => {
     assert.equal(hoursOn(a, MONDAY), 8, 'unchanged behaviour for an ordinary 8h-rostered person');
     assert.ok(a.endDate > MONDAY, 'the remaining 4h spill to the next working day, same as before');
   });
+
+  test("two ordinarily-rostered people on the same shift don't get stacked into someone else's longer day (#45)", () => {
+    const d = days();
+    const longRoster = rosterOn(['mon', 'tue', 'wed', 'thu', 'fri'], 'day', 12);
+    const out = runScheduler(
+      [
+        // s1's entire 12h Monday goes to a different job on different
+        // equipment — it's here purely so a longer roster genuinely exists
+        // in job j's compatible pool, same as it would on a real shop floor
+        // running more than one process that day.
+        job('hog', { process: 'Weld', hoursTotal: 12, staffId: 's1', dueDate: '2026-03-10' }),
+        job('j', { process: 'Coat', hoursTotal: 12, dueDate: '2026-03-11' }),
+      ],
+      [equip('e1', { processes: ['Weld'] }), equip('e2', { processes: ['Coat'] })],
+      [
+        person('s1', { roster: longRoster, processes: ['Weld', 'Coat'] }),
+        person('s2', { processes: ['Weld', 'Coat'] }),
+        person('s3', { processes: ['Weld', 'Coat'] }),
+      ],
+      d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, MONDAY), 8,
+      "job j should get the ordinary 8h shift on Monday, not 12 stitched together from s2's 8h and s3's 4h just " +
+      'because s1 (fully spoken for on a different job) happens to be rostered 12h that day');
+    const mondayStaff = new Set(a.days.filter((dd) => dd.date === MONDAY).map((dd) => dd.staffId));
+    assert.equal(mondayStaff.size, 1, 'only one person should be needed to cover the ordinary 8h Monday shift');
+    assert.ok(a.endDate > MONDAY, 'the remaining 4h spill to the next working day rather than being squeezed into Monday');
+  });
+});
+
+describe('batches (#47)', () => {
+  test('batch members land on the same equipment, back to back, not scattered across machines', () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('b1', { hoursTotal: 8, batchId: 'batch1', batchOrder: 0 }),
+        job('b2', { hoursTotal: 8, batchId: 'batch1', batchOrder: 1 }),
+      ],
+      [equip('e1'), equip('e2')], [person('s1')], d,
+    );
+    const a1 = byId(out, 'b1').assignment;
+    const a2 = byId(out, 'b2').assignment;
+    assert.ok(a1 && a2, 'both members should be placed');
+    assert.equal(a1.equipmentId, a2.equipmentId, 'a batch runs on one piece of equipment, not scattered across whichever is free first');
+    assert.ok(a2.startDate > a1.endDate, 'the second member starts only once the first is done (one operator, 8h/day)');
+  });
+
+  test('batch members can share one day back to back when the hours fit', () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('b1', { hoursTotal: 5, batchId: 'batch2', batchOrder: 0 }),
+        job('b2', { hoursTotal: 3, batchId: 'batch2', batchOrder: 1 }),
+      ],
+      [equip('e1')], [person('s1')], d,
+    );
+    const a1 = byId(out, 'b1').assignment;
+    const a2 = byId(out, 'b2').assignment;
+    assert.equal(a1.startDate, MONDAY);
+    assert.equal(a2.startDate, MONDAY, 'the second member picks up the same day the first finishes, not the next one');
+    assert.equal(hoursOn(a1, MONDAY) + hoursOn(a2, MONDAY), 8, 'together they use the whole shift');
+  });
+
+  test("a mismatched process doesn't get force-combined — falls back to independent scheduling", () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('b1', { process: 'Weld', hoursTotal: 8, batchId: 'batch3', batchOrder: 0 }),
+        job('b2', { process: 'Coat', hoursTotal: 8, batchId: 'batch3', batchOrder: 1 }),
+      ],
+      [equip('e1', { processes: ['Weld', 'Coat'] })],
+      [person('s1', { processes: ['Weld', 'Coat'] })], d,
+    );
+    assert.ok(byId(out, 'b1').assignment, 'b1 should still be scheduled on its own');
+    assert.ok(byId(out, 'b2').assignment, 'b2 should still be scheduled on its own');
+  });
+
+  test('a member already pinned on its own breaks it out of the group', () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('b1', {
+          hoursTotal: 8, batchId: 'batch4', batchOrder: 0,
+          assignment: { equipmentId: 'e2', startDate: d[3], endDate: d[3], pinned: true, days: [] },
+        }),
+        job('b2', { hoursTotal: 8, batchId: 'batch4', batchOrder: 1 }),
+      ],
+      [equip('e1'), equip('e2')], [person('s1')], d,
+    );
+    const a1 = byId(out, 'b1').assignment;
+    const a2 = byId(out, 'b2').assignment;
+    assert.equal(a1.equipmentId, 'e2', 'the pinned member keeps its own slot');
+    assert.ok(a2, 'the other member is still scheduled, independently');
+  });
+
+  test("an unplaceable batch leaves every member unscheduled together, not partially placed", () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('b1', { hoursTotal: 8, batchId: 'batch5', batchOrder: 0 }),
+        job('b2', { hoursTotal: 8, batchId: 'batch5', batchOrder: 1, readyDate: '2099-01-01' }),
+      ],
+      [equip('e1')], [person('s1')], d,
+    );
+    assert.equal(byId(out, 'b1').assignment, null);
+    assert.equal(byId(out, 'b2').assignment, null);
+    assert.ok(byId(out, 'b1').unschedReason, 'should say why, same as any other unplaced job');
+  });
 });
 
 describe('split jobs', () => {
