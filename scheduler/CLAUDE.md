@@ -398,6 +398,69 @@ modal never force-pins an auto-placed job. Clearing the equipment field back
 to "Automatic" unpins a pinned job the same way the existing "Unpin" button
 does.
 
+### Parallel processing (#30)
+
+By default the scheduler never double-books an operator — `tryFit` requires
+`staffDayRemain[sid][date] > 0` before it'll use someone, so two jobs
+genuinely needing the same person at the same time is a real, unresolvable
+conflict, not something the engine papers over. A pinned job that loses that
+contest doesn't just vanish, though: it still renders where it was placed,
+`assignment.conflict = true`, with an unassigned (`staffId: null`) day-plan —
+same handling as any other overbooked pin.
+
+**The escape hatch is `job.parallelProcessing`** — a plain boolean, off by
+default, meaning "this job is automated enough that an operator can mind a
+second job on other equipment at the same time." Where set, `tryFit`/
+`consume` skip the `staffDayRemain` check and the corresponding deduction
+entirely for that job: it still needs someone qualified *rostered* onto the
+shift (and the equipment's own shift capacity is completely unaffected —
+this only relaxes the *staff* constraint), but it no longer competes for the
+shared pool of that person's hours. This is why it has to be opt-in and
+per-job rather than a scheduling strategy: turning it on for the wrong job
+would let the engine silently double-book someone who's actually needed
+elsewhere.
+
+Deliberately **not** wired into automatic (unpinned) placement's own
+decision-making beyond that — the auto-scheduler never goes looking for an
+opportunity to double-book an operator just because a job *could* tolerate
+it; the tag only ever matters when a job that has it actually lands
+alongside something else needing the same person, which in practice means a
+manual placement (drag, or the job modal's Equipment/Planned start date
+fields — #28) triggered it.
+
+**Surfacing the conflict**: `handleDrop` and `addOrUpdateJob` both call
+`checkParallelConflict(result, jobId)` right after `recompute()` — but only
+for the specific job just placed, never a blanket scan, so an unrelated
+recompute (an equipment edit, say) can't dredge up some job that's been
+sitting conflicted for unrelated reasons. The tricky part: the job that ends
+up `conflict: true` isn't necessarily the one just placed — pinned jobs sort
+by `claimOrder`, and a fresh manual placement has none yet (`?? -1`), so it
+outranks whatever incumbent was already sitting on that slot (see "the pin
+that has none places first" in runScheduler) and the **incumbent** is what
+gets bumped into conflict instead. `checkParallelConflict` checks both
+directions: every currently-conflicted pinned job to see if our action is
+what it's contending with, then falls back to the placed job itself.
+
+`findStaffConflictJobs(conflictedJob, jobs, staff)` (scheduler.js, pure and
+tested) names what a conflicted job is actually contending with: it scans
+every other active job's real day-by-day plan for an entry on one of the
+conflicted dates staffed by someone in the conflicted job's eligible pool —
+i.e. whoever it was actually fighting over, not just "everyone qualified for
+this process." Feeds the "Overbooked — same operator needed at once" dialog
+(`parallelConflict` state), which lists the placed job and every candidate
+as its own "Allow parallel processing on…" button — either side of the pair
+can be the automated one — plus "Leave overbooked" to decline outright.
+
+The tag itself is a completely ordinary job field from there: visible and
+directly toggleable via a checkbox in `JobModal` (so it doesn't only exist as
+a side effect of hitting a conflict), shown on the Schedule view via a small
+icon, and threaded onto every part of a split job during flatten (same as
+`tags`) since the automation is a property of the work, not of which part
+triggered the tag. It survives a move to different equipment/day/pairing
+untouched — it was never scoped to "these two specific jobs," which is the
+whole point: an operator sharing a job with A today can just as well share
+the same job with C next week without re-granting anything.
+
 ### Template categories
 
 Categories are a managed list (`wf_categories`), not free text typed per

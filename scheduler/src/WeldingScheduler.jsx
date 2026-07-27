@@ -16,7 +16,7 @@ import {
   defaultWeeklyRoster, absenceKindLabel, normalizeStaff,
   isoDate, addDays, generateCalendarDays, isWeekendDate, isOnLeave,
   getStaffDayInfo, fmtDay, fmtDate, fmtDateRange,
-  runScheduler, whyUnscheduled, primaryStaffOf, tagOk,
+  runScheduler, whyUnscheduled, primaryStaffOf, tagOk, findStaffConflictJobs,
 } from './scheduler.js';
 
 /* ============================================================
@@ -1000,6 +1000,7 @@ export default function WeldingScheduler() {
   const [editingCentre, setEditingCentre] = useState(null);       // cost-centre object or 'new' or null
   const [pendingComplete, setPendingComplete] = useState(null);   // job awaiting actual-hours entry
   const [confirmDelete, setConfirmDelete] = useState(null); // {type, id, name}
+  const [parallelConflict, setParallelConflict] = useState(null); // {job, candidates}
 
   const [dragJobId, setDragJobId] = useState(null);
   const [dropHint, setDropHint] = useState(null); // {equipId, date}
@@ -1126,7 +1127,7 @@ export default function WeldingScheduler() {
   const busyEditing = !!(
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
-    || timeLogDate
+    || timeLogDate || parallelConflict
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1141,6 +1142,65 @@ export default function WeldingScheduler() {
     return result;
   }, [workingDays, todayIdx]);
 
+  // A manual placement (drag-drop or the job modal's Equipment field) that
+  // lands a job on an operator someone else already has used to just leave
+  // it silently overbooked — an unassigned placeholder block with a
+  // conflict flag buried in the "Overbooked" list (#30). Called right after
+  // recompute() for the specific job just placed (never for jobs that
+  // happened to already be conflicted before this action — that would fire
+  // this dialog on unrelated recomputes like an equipment edit), this looks
+  // for what it's actually contending with and, if found, offers a way out:
+  // tag one of the two as parallel-processing-capable instead of leaving it
+  // overbooked.
+  // Who a conflicted job is actually contending with, for the dialog's
+  // wording — the conflicted job's own day-plan has no staffId (that's what
+  // conflict means), so read it off whichever candidate is holding the
+  // overlapping date(s) instead.
+  function namesHoldingOperator(conflictedJob, candidates) {
+    const dates = new Set((conflictedJob.assignment.days || []).map((d) => d.date));
+    const staffIds = new Set();
+    candidates.forEach((c) => {
+      const dayLists = c.parts ? c.parts.map((p) => p.assignment?.days || []) : [c.assignment?.days || []];
+      dayLists.forEach((ds) => ds.forEach((d) => { if (dates.has(d.date) && d.staffId) staffIds.add(d.staffId); }));
+    });
+    return [...staffIds].map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean);
+  }
+  function checkParallelConflict(result, jobId) {
+    const justPlaced = result.find((j) => j.id === jobId);
+    if (!justPlaced) return;
+    // A freshly pinned job outranks whatever was already sitting on that
+    // slot (same "most recent decision wins" priority a drag gets — see
+    // runScheduler's pinned-sort), so it's just as likely the job we placed
+    // actually WON and it's some OTHER, previously-fine job that got bumped
+    // into conflict as a side effect. Check every currently-conflicted
+    // pinned job for whether our action is what it's now contending with,
+    // before assuming the job we just touched is the one that lost.
+    const conflicted = result.filter((j) => j.id !== jobId && j.assignment?.pinned && j.assignment?.conflict);
+    for (const c of conflicted) {
+      const candidates = findStaffConflictJobs(c, result, staff);
+      if (candidates.some((cand) => cand.id === jobId)) {
+        setParallelConflict({ job: c, candidates, staffNames: namesHoldingOperator(c, candidates) });
+        return;
+      }
+    }
+    if (justPlaced.assignment?.pinned && justPlaced.assignment?.conflict) {
+      const candidates = findStaffConflictJobs(justPlaced, result, staff);
+      if (candidates.length) {
+        setParallelConflict({ job: justPlaced, candidates, staffNames: namesHoldingOperator(justPlaced, candidates) });
+      }
+    }
+  }
+  // Grants (or the dialog could equally target the other job) the tag that
+  // lets this job's operator be shared with whatever it's contending with —
+  // it stays on the job from here on, not just for this one pairing (#30).
+  function allowParallelProcessing(jobId) {
+    const target = jobs.find((j) => j.id === jobId);
+    const updated = jobs.map((j) => (j.id === jobId ? { ...j, parallelProcessing: true, updatedAt: new Date().toISOString() } : j));
+    recompute(updated, equipment, staff);
+    setParallelConflict(null);
+    showToast(`Parallel processing allowed on ${target?.name || 'the job'} — it can now share an operator with other work.`);
+  }
+
   // ---------- job actions ----------
   function addOrUpdateJob(jobData, isNew) {
     const stamped = { ...jobData, updatedAt: new Date().toISOString() };
@@ -1150,7 +1210,8 @@ export default function WeldingScheduler() {
     } else {
       newJobs = jobs.map((j) => (j.id === stamped.id ? stamped : j));
     }
-    recompute(newJobs, equipment, staff);
+    const result = recompute(newJobs, equipment, staff);
+    checkParallelConflict(result, stamped.id);
     setEditingJob(null);
   }
   function importJobs(newJobs, consumedParkIds) {
@@ -1310,7 +1371,12 @@ export default function WeldingScheduler() {
     const updated = partIndex === null
       ? { ...job, updatedAt: new Date().toISOString(), assignment: newAssignment }
       : { ...job, updatedAt: new Date().toISOString(), parts: job.parts.map((p, i) => (i === partIndex ? { ...p, assignment: newAssignment } : p)) };
-    recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
+    const result = recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
+    // Split-job parts aren't covered by the parallel-processing prompt yet —
+    // each part's own conflict is one entry in a shared jobId's day-plan, and
+    // findStaffConflictJobs isn't set up to point at "part 2 of job X"
+    // specifically. Whole-job drops are the common case this solves.
+    if (partIndex === null) checkParallelConflict(result, job.id);
   }
 
   // ---------- equipment / staff / template CRUD ----------
@@ -1836,6 +1902,44 @@ export default function WeldingScheduler() {
           </div>
         </Modal>
       )}
+
+      {parallelConflict && (
+        <Modal title="Overbooked — same operator needed at once" onClose={() => setParallelConflict(null)}>
+          <p className="text-sm text-slate-300 mb-3">
+            <span className="font-semibold text-slate-100">{parallelConflict.job.name}</span> needs{' '}
+            {parallelConflict.staffNames.length ? parallelConflict.staffNames.join(', ') : 'the same operator'} at
+            the same time as {parallelConflict.candidates.map((c) => c.name).join(', ')}. By default the scheduler
+            won't double-book a person — but if one of these is automated enough that an operator can mind it
+            alongside the other, you can allow parallel processing.
+          </p>
+          <div className="space-y-1.5 mb-4">
+            <button
+              type="button"
+              className="w-full text-left text-sm bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-2 text-slate-200"
+              onClick={() => allowParallelProcessing(parallelConflict.job.id)}
+            >
+              Allow parallel processing on <span className="font-semibold">{parallelConflict.job.name}</span>
+            </button>
+            {parallelConflict.candidates.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className="w-full text-left text-sm bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-2 text-slate-200"
+                onClick={() => allowParallelProcessing(c.id)}
+              >
+                Allow parallel processing on <span className="font-semibold">{c.name}</span>
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-slate-500 mb-3">
+            The tag stays on whichever job you pick — it'll be free to share an operator with anything else it's
+            scheduled alongside from now on, not just this pairing.
+          </p>
+          <div className="flex justify-end">
+            <button className={btnGhost} onClick={() => setParallelConflict(null)}>Leave overbooked</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -1948,6 +2052,7 @@ function ScheduleView({
             percentComplete: part.percentComplete,
             status: part.status,
             assignment: part.assignment,
+            parallelProcessing: j.parallelProcessing,
             _parentJob: j,
           });
         });
@@ -2114,7 +2219,7 @@ function ScheduleView({
                       const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Unassigned';
                       const conflict = job.assignment.conflict;
                       const manualStaff = parent.staffId ? staff.find((s) => s.id === parent.staffId) : null;
-                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${conflict ? ' · OVERBOOKED' : ''}`;
+                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}`;
                       const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
                       return (
                         <div key={job.id} className="flex border-b border-slate-800/40">
@@ -2129,6 +2234,7 @@ function ScheduleView({
                               <span className="text-[11px] font-semibold text-slate-200 truncate">{job.name}</span>
                               {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
                               {job.assignment.pinned && !conflict && <Pin size={9} className="text-amber-400 shrink-0" />}
+                              {job.parallelProcessing && <Users size={9} className="text-sky-400 shrink-0" />}
                             </div>
                             <div className="flex items-center gap-1.5 min-w-0">
                               {staffIds.slice(0, 4).map((id) => (
@@ -2749,6 +2855,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [hoursPerUnit, setHoursPerUnit] = useState(job ? (job.quantity ? job.hoursTotal / job.quantity : job.hoursTotal) : (templates[0]?.hoursPerUnit ?? 1));
   const [readyDate, setReadyDate] = useState(job?.readyDate || isoDate(new Date()));
   const [needsFurtherProcessing, setNeedsFurtherProcessing] = useState(!!job?.needsFurtherProcessing);
+  const [parallelProcessing, setParallelProcessing] = useState(!!job?.parallelProcessing);
   const [dueDate, setDueDate] = useState(job?.dueDate || addDays(isoDate(new Date()), 14));
   const [notes, setNotes] = useState(job?.notes || '');
   const [custom, setCustom] = useState(isNew ? false : !job.templateId);
@@ -2859,6 +2966,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       readyDate,
       dueDate,
       needsFurtherProcessing,
+      parallelProcessing,
       templateId: custom ? null : templateId,
       notes,
       totalValue: Number(totalValue) || 0,
@@ -2985,6 +3093,25 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
         <span className="text-sm text-slate-300">
           Needs further processing after this department
           <span className="block text-xs text-slate-500">Machining, manual work, etc. Scheduled ahead of a job with the same due date that ships straight from here.</span>
+        </span>
+      </label>
+
+      {/* Parallel processing (#30). Off by default — the scheduler never
+          double-books an operator on its own. Turning this on lets the
+          job share its operator with whatever else it lands alongside, on
+          any equipment, not just whichever job it happens to conflict with
+          first; that's also what "Allow parallel processing on…" in the
+          overbooked-conflict prompt sets. */}
+      <label className="flex items-start gap-2 mb-3 cursor-pointer">
+        <input
+          type="checkbox"
+          className="accent-amber-500 mt-0.5"
+          checked={parallelProcessing}
+          onChange={(e) => setParallelProcessing(e.target.checked)}
+        />
+        <span className="text-sm text-slate-300">
+          Allow parallel processing
+          <span className="block text-xs text-slate-500">Automated enough that an operator can mind another job on different equipment at the same time. Lets this job share an operator instead of being flagged as overbooked.</span>
         </span>
       </label>
 
