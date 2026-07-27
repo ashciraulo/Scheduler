@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import {
   Plus, X, Settings2, Calendar, Users, Wrench, Check, AlertTriangle,
-  Monitor, ChevronLeft, ChevronRight, Trash2, Pencil, Pin, PinOff,
+  Monitor, ChevronLeft, ChevronRight, ChevronDown, Trash2, Pencil, Pin, PinOff,
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
   Upload, FileWarning, UserCheck, ZoomIn, ZoomOut
 } from 'lucide-react';
@@ -352,6 +352,28 @@ function Field({ label, children }) {
       <span className="block text-xs font-medium text-slate-400 mb-1 tracking-wide uppercase">{label}</span>
       {children}
     </label>
+  );
+}
+// A named, collapsible group of fields — for a modal with enough sections
+// that showing all of them expanded at once is mostly scrolling past ones
+// you're not touching right now. `defaultOpen` should reflect whether the
+// section already holds something worth seeing at a glance (e.g. an
+// optional section a user already filled in) rather than always defaulting
+// one way.
+function Section({ title, defaultOpen = true, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="border border-slate-800 rounded-lg mb-3 bg-slate-900/40">
+      <button
+        type="button"
+        className="w-full flex items-center justify-between px-3 py-2 text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="text-xs font-semibold text-slate-300 uppercase tracking-wide">{title}</span>
+        <ChevronDown size={14} className={`text-slate-500 transition-transform shrink-0 ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && <div className="px-3 pb-3 pt-1 border-t border-slate-800">{children}</div>}
+    </div>
   );
 }
 const inputCls = "w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/60 focus:border-amber-500/60";
@@ -2846,7 +2868,6 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
 function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costCentres = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart }) {
   const isNew = !job;
   const [parts, setParts] = useState(job?.parts ? job.parts.map((p) => ({ ...p })) : null);
-  const [showSplit, setShowSplit] = useState(false);
   const [splitHoursA, setSplitHoursA] = useState(job ? Math.round((job.hoursTotal / 2) * 100) / 100 : 0);
   const [templateId, setTemplateId] = useState(job?.templateId || (templates[0]?.id ?? ''));
   const [name, setName] = useState(job?.name || templates[0]?.name || '');
@@ -2864,7 +2885,6 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [percentComplete, setPercentComplete] = useState(job?.percentComplete ?? 0);
   const [bcJobNo, setBcJobNo] = useState(job?.bcJobNo || '');
   const [bcJobTaskNo, setBcJobTaskNo] = useState(job?.bcJobTaskNo || '');
-  const [showBcLink, setShowBcLink] = useState(!!(job?.bcJobNo || job?.bcJobTaskNo));
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState((templates.find((t) => t.id === templateId) || {}).category || 'Uncategorised');
   const [staffId, setStaffId] = useState(job?.staffId || '');
@@ -2993,9 +3013,9 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   }
 
   return (
-    <Modal title={isNew ? 'New job' : 'Edit job'} onClose={onClose}>
+    <Modal title={isNew ? 'New job' : 'Edit job'} onClose={onClose} size="lg">
       {!parts && !custom && templates.length > 0 && (
-        <div>
+        <Section title="Template" defaultOpen={isNew}>
           <Field label="Search templates">
             <input
               className={inputCls}
@@ -3034,7 +3054,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               </Field>
             </div>
           )}
-        </div>
+        </Section>
       )}
       {!parts && templates.length > 0 && (
         <button type="button" className="text-xs text-amber-400 mb-3 hover:underline" onClick={() => setCustom((c) => !c)}>
@@ -3042,184 +3062,198 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
         </button>
       )}
 
-      <Field label="Job name">
-        <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
-      </Field>
-
-      <Field label="Capability requirements (optional)">
-        <TagEditor value={tags} onChange={setTags} suggestions={[...new Set([...equipment.flatMap((e) => e.tags || []), ...templates.flatMap((t) => t.tags || [])])].sort()} />
-        <p className="text-xs text-slate-500 mt-1">This job will only be scheduled on — or allowed to be dragged onto — equipment carrying every tag.</p>
-      </Field>
-
-      {(parts || custom) && (
-        <Field label="Welding / coating process">
-          <select className={inputCls} value={process} onChange={(e) => setProcess(e.target.value)}>
-            {processes.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </Field>
-      )}
-
-      {!parts && (
-        <>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Quantity">
-              <input type="number" min={1} className={inputCls} value={quantity} onChange={(e) => handleQuantityChange(e.target.value)} />
-            </Field>
-            <Field label="Hours per unit">
-              <input type="number" min={0.1} step={0.1} className={inputCls} value={hoursPerUnit} onChange={(e) => setHoursPerUnit(e.target.value)} />
-            </Field>
-          </div>
-          <p className="text-xs text-slate-500 -mt-2 mb-3">Total: {Math.round(quantity * hoursPerUnit * 100) / 100} hours</p>
-        </>
-      )}
-
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Ready for processing">
-          <input type="date" className={inputCls} value={readyDate} onChange={(e) => setReadyDate(e.target.value)} />
-        </Field>
-        <Field label="Due date">
-          <input type="date" className={inputCls} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
-        </Field>
-      </div>
-      <p className="text-xs text-slate-500 -mt-2 mb-3">The job will never be auto-scheduled — or allowed to be dragged — before the ready date, since materials/prior-stage work won't be in your department yet.</p>
-
-      <label className="flex items-start gap-2 mb-3 cursor-pointer">
-        <input
-          type="checkbox"
-          className="accent-amber-500 mt-0.5"
-          checked={needsFurtherProcessing}
-          onChange={(e) => setNeedsFurtherProcessing(e.target.checked)}
-        />
-        <span className="text-sm text-slate-300">
-          Needs further processing after this department
-          <span className="block text-xs text-slate-500">Machining, manual work, etc. Scheduled ahead of a job with the same due date that ships straight from here.</span>
-        </span>
-      </label>
-
-      {/* Parallel processing (#30). Off by default — the scheduler never
-          double-books an operator on its own. Turning this on lets the
-          job share its operator with whatever else it lands alongside, on
-          any equipment, not just whichever job it happens to conflict with
-          first; that's also what "Allow parallel processing on…" in the
-          overbooked-conflict prompt sets. */}
-      <label className="flex items-start gap-2 mb-3 cursor-pointer">
-        <input
-          type="checkbox"
-          className="accent-amber-500 mt-0.5"
-          checked={parallelProcessing}
-          onChange={(e) => setParallelProcessing(e.target.checked)}
-        />
-        <span className="text-sm text-slate-300">
-          Allow parallel processing
-          <span className="block text-xs text-slate-500">Automated enough that an operator can mind another job on different equipment at the same time. Lets this job share an operator instead of being flagged as overbooked.</span>
-        </span>
-      </label>
-
-      {/* Equipment + planned start date — the same information a drag onto
-          the Schedule view sets, editable straight from here (#28) instead of
-          requiring the job to be visible on-screen to move it. Only equipment
-          matching the process + capability requirements above is offered,
-          same as what a drag would accept. Not shown for a split job — each
-          part is placed independently, in its own section below. */}
-      {!parts && (
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Equipment">
-            <select className={inputCls} value={manualEquipId} onChange={(e) => {
-              const v = e.target.value; setManualEquipId(v);
-              if (v && !manualStartDate) setManualStartDate(readyDate);
-            }}>
-              <option value="">Automatic — best available</option>
-              {qualifiedEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-              {manualEquipId && !qualifiedEquip.some((e) => e.id === manualEquipId) && (
-                <option value={manualEquipId}>
-                  {equipment.find((e) => e.id === manualEquipId)?.name || 'Former equipment'} — no longer compatible
-                </option>
-              )}
-            </select>
+      <div className="grid md:grid-cols-2 gap-x-4">
+        <div>
+          <Field label="Job name">
+            <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
-          <Field label="Planned start date">
-            <input
-              type="date" className={inputCls} min={readyDate} disabled={!manualEquipId}
-              value={manualStartDate} onChange={(e) => setManualStartDate(e.target.value)}
-            />
+
+          <Field label="Capability requirements (optional)">
+            <TagEditor value={tags} onChange={setTags} suggestions={[...new Set([...equipment.flatMap((e) => e.tags || []), ...templates.flatMap((t) => t.tags || [])])].sort()} />
+            <p className="text-xs text-slate-500 mt-1">This job will only be scheduled on — or allowed to be dragged onto — equipment carrying every tag.</p>
+          </Field>
+
+          {(parts || custom) && (
+            <Field label="Welding / coating process">
+              <select className={inputCls} value={process} onChange={(e) => setProcess(e.target.value)}>
+                {processes.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </Field>
+          )}
+
+          {!parts && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Quantity">
+                  <input type="number" min={1} className={inputCls} value={quantity} onChange={(e) => handleQuantityChange(e.target.value)} />
+                </Field>
+                <Field label="Hours per unit">
+                  <input type="number" min={0.1} step={0.1} className={inputCls} value={hoursPerUnit} onChange={(e) => setHoursPerUnit(e.target.value)} />
+                </Field>
+              </div>
+              <p className="text-xs text-slate-500 -mt-2 mb-3">Total: {Math.round(quantity * hoursPerUnit * 100) / 100} hours</p>
+            </>
+          )}
+
+          <Field label="Notes">
+            <textarea className={inputCls} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
           </Field>
         </div>
-      )}
-      {!parts && (
-        <p className="text-xs text-slate-500 -mt-2 mb-3">
-          {manualEquipId
-            ? `Pinned to ${equipment.find((e) => e.id === manualEquipId)?.name || 'this equipment'} starting ${fmtDate(manualStartDate || readyDate)} on Save — same as dragging it there on the Schedule view. Won't move until this is changed or unpinned.`
-            : 'The scheduler will pick whichever compatible, free equipment fits it in soonest.'}
-        </p>
-      )}
 
-      {/* Manual staff assignment. Normally the scheduler picks whoever is free
-          and signed off on the process; naming someone here overrides that for
-          this job — it waits for them rather than handing the work to anyone
-          else, and won't quietly swap them out when the schedule is recomputed
-          or the job is dragged onto other equipment. */}
-      <Field label="Assigned to">
-        <select className={inputCls} value={staffId} onChange={(e) => setStaffId(e.target.value)}>
-          <option value="">Automatic — whoever is free</option>
-          {qualifiedStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          {/* A lock on someone who has since lost the sign-off (or on a job whose
-              process changed) stays selectable, so it's visible rather than
-              silently reverting to automatic. */}
-          {staffId && !qualifiedStaff.some((s) => s.id === staffId) && (
-            <option value={staffId}>
-              {staff.find((s) => s.id === staffId)?.name || 'Former staff member'} — not signed off on {process || 'this process'}
-            </option>
-          )}
-        </select>
-      </Field>
-      <p className="text-xs text-slate-500 -mt-2 mb-3">
-        {staffId
-          ? `Locked to ${staff.find((s) => s.id === staffId)?.name || 'this person'} — the job waits for them instead of going to whoever is free, and stays with them if you move it to other equipment.`
-          : currentlyOn.length
-          ? `Currently on it: ${currentlyOn.join(', ')}. Pick a name to keep the job with one person regardless of how the rest of the schedule reflows.`
-          : 'The scheduler will pick whoever is signed off on this process and has the hours free.'}
-      </p>
-
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Total job value ($)">
-          <input type="number" min={0} step={1} className={inputCls} value={totalValue} onChange={(e) => setTotalValue(e.target.value)} />
-        </Field>
-        <Field label="Value of your department's work ($)">
-          <input type="number" min={0} step={1} className={inputCls} value={departmentValue} onChange={(e) => setDepartmentValue(e.target.value)} />
-        </Field>
-      </div>
-      {valueWarning && (
-        <p className="text-xs text-amber-400 -mt-2 mb-3 flex items-center gap-1"><AlertTriangle size={12} /> Department value is higher than the total job value — double check these numbers.</p>
-      )}
-
-      {procedureId && (() => {
-        const proc = procedures.find((p) => p.id === procedureId);
-        if (!proc) return null;
-        const rate = procedureCost(proc, costCentres);
-        const estHrs = Math.round((Number(quantity) || 0) * (Number(hoursPerUnit) || 0) * 100) / 100;
-        const cost = rate * estHrs;
-        const dep = Number(departmentValue) || 0;
-        const margin = dep - cost;
-        return (
-          <div className="mb-3 rounded-md border border-slate-700 bg-slate-800/60 p-3 text-xs">
-            <div className="flex justify-between text-slate-400"><span>Cost — {fmtMoney(rate)}/hr × {estHrs}h</span><span className="font-mono text-slate-200">{fmtMoney(cost)}</span></div>
-            <div className="flex justify-between text-slate-400 mt-1"><span>Your department value</span><span className="font-mono text-slate-200">{fmtMoney(dep)}</span></div>
-            <div className="flex justify-between mt-1 pt-1 border-t border-slate-700">
-              <span className="text-slate-300 font-medium">{margin >= 0 ? 'Estimated margin' : 'Estimated loss'}</span>
-              <span className={`font-mono font-semibold ${margin >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtMoney(margin)}</span>
+        <div>
+          <Section title="Scheduling">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Ready for processing">
+                <input type="date" className={inputCls} value={readyDate} onChange={(e) => setReadyDate(e.target.value)} />
+              </Field>
+              <Field label="Due date">
+                <input type="date" className={inputCls} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+              </Field>
             </div>
-          </div>
-        );
-      })()}
+            <p className="text-xs text-slate-500 -mt-2 mb-3">The job will never be auto-scheduled — or allowed to be dragged — before the ready date, since materials/prior-stage work won't be in your department yet.</p>
 
-      {!parts && !isNew && (
-        <Field label={`% complete — ${percentComplete}%`}>
-          <input type="range" min={0} max={100} step={5} value={percentComplete} onChange={(e) => setPercentComplete(e.target.value)} className="w-full accent-amber-500" />
-          <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden mt-1">
-            <div className="h-full bg-amber-500 rounded-full transition-all" style={{ width: `${percentComplete}%` }} />
-          </div>
-        </Field>
-      )}
+            <label className="flex items-start gap-2 mb-3 cursor-pointer">
+              <input
+                type="checkbox"
+                className="accent-amber-500 mt-0.5"
+                checked={needsFurtherProcessing}
+                onChange={(e) => setNeedsFurtherProcessing(e.target.checked)}
+              />
+              <span className="text-sm text-slate-300">
+                Needs further processing after this department
+                <span className="block text-xs text-slate-500">Machining, manual work, etc. Scheduled ahead of a job with the same due date that ships straight from here.</span>
+              </span>
+            </label>
+
+            {/* Parallel processing (#30). Off by default — the scheduler never
+                double-books an operator on its own. Turning this on lets the
+                job share its operator with whatever else it lands alongside, on
+                any equipment, not just whichever job it happens to conflict with
+                first; that's also what "Allow parallel processing on…" in the
+                overbooked-conflict prompt sets. */}
+            <label className="flex items-start gap-2 mb-3 cursor-pointer">
+              <input
+                type="checkbox"
+                className="accent-amber-500 mt-0.5"
+                checked={parallelProcessing}
+                onChange={(e) => setParallelProcessing(e.target.checked)}
+              />
+              <span className="text-sm text-slate-300">
+                Allow parallel processing
+                <span className="block text-xs text-slate-500">Automated enough that an operator can mind another job on different equipment at the same time. Lets this job share an operator instead of being flagged as overbooked.</span>
+              </span>
+            </label>
+
+            {/* Equipment + planned start date — the same information a drag onto
+                the Schedule view sets, editable straight from here (#28) instead of
+                requiring the job to be visible on-screen to move it. Only equipment
+                matching the process + capability requirements above is offered,
+                same as what a drag would accept. Not shown for a split job — each
+                part is placed independently, in its own section below. */}
+            {!parts && (
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Equipment">
+                  <select className={inputCls} value={manualEquipId} onChange={(e) => {
+                    const v = e.target.value; setManualEquipId(v);
+                    if (v && !manualStartDate) setManualStartDate(readyDate);
+                  }}>
+                    <option value="">Automatic — best available</option>
+                    {qualifiedEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                    {manualEquipId && !qualifiedEquip.some((e) => e.id === manualEquipId) && (
+                      <option value={manualEquipId}>
+                        {equipment.find((e) => e.id === manualEquipId)?.name || 'Former equipment'} — no longer compatible
+                      </option>
+                    )}
+                  </select>
+                </Field>
+                <Field label="Planned start date">
+                  <input
+                    type="date" className={inputCls} min={readyDate} disabled={!manualEquipId}
+                    value={manualStartDate} onChange={(e) => setManualStartDate(e.target.value)}
+                  />
+                </Field>
+              </div>
+            )}
+            {!parts && (
+              <p className="text-xs text-slate-500 -mt-2 mb-3">
+                {manualEquipId
+                  ? `Pinned to ${equipment.find((e) => e.id === manualEquipId)?.name || 'this equipment'} starting ${fmtDate(manualStartDate || readyDate)} on Save — same as dragging it there on the Schedule view. Won't move until this is changed or unpinned.`
+                  : 'The scheduler will pick whichever compatible, free equipment fits it in soonest.'}
+              </p>
+            )}
+
+            {/* Manual staff assignment. Normally the scheduler picks whoever is free
+                and signed off on the process; naming someone here overrides that for
+                this job — it waits for them rather than handing the work to anyone
+                else, and won't quietly swap them out when the schedule is recomputed
+                or the job is dragged onto other equipment. */}
+            <Field label="Assigned to">
+              <select className={inputCls} value={staffId} onChange={(e) => setStaffId(e.target.value)}>
+                <option value="">Automatic — whoever is free</option>
+                {qualifiedStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {/* A lock on someone who has since lost the sign-off (or on a job whose
+                    process changed) stays selectable, so it's visible rather than
+                    silently reverting to automatic. */}
+                {staffId && !qualifiedStaff.some((s) => s.id === staffId) && (
+                  <option value={staffId}>
+                    {staff.find((s) => s.id === staffId)?.name || 'Former staff member'} — not signed off on {process || 'this process'}
+                  </option>
+                )}
+              </select>
+            </Field>
+            <p className="text-xs text-slate-500 -mt-2 mb-3">
+              {staffId
+                ? `Locked to ${staff.find((s) => s.id === staffId)?.name || 'this person'} — the job waits for them instead of going to whoever is free, and stays with them if you move it to other equipment.`
+                : currentlyOn.length
+                ? `Currently on it: ${currentlyOn.join(', ')}. Pick a name to keep the job with one person regardless of how the rest of the schedule reflows.`
+                : 'The scheduler will pick whoever is signed off on this process and has the hours free.'}
+            </p>
+
+            {!parts && !isNew && (
+              <Field label={`% complete — ${percentComplete}%`}>
+                <input type="range" min={0} max={100} step={5} value={percentComplete} onChange={(e) => setPercentComplete(e.target.value)} className="w-full accent-amber-500" />
+                <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden mt-1">
+                  <div className="h-full bg-amber-500 rounded-full transition-all" style={{ width: `${percentComplete}%` }} />
+                </div>
+              </Field>
+            )}
+          </Section>
+
+          <Section title="Value & costing">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Total job value ($)">
+                <input type="number" min={0} step={1} className={inputCls} value={totalValue} onChange={(e) => setTotalValue(e.target.value)} />
+              </Field>
+              <Field label="Value of your department's work ($)">
+                <input type="number" min={0} step={1} className={inputCls} value={departmentValue} onChange={(e) => setDepartmentValue(e.target.value)} />
+              </Field>
+            </div>
+            {valueWarning && (
+              <p className="text-xs text-amber-400 -mt-2 mb-3 flex items-center gap-1"><AlertTriangle size={12} /> Department value is higher than the total job value — double check these numbers.</p>
+            )}
+
+            {procedureId && (() => {
+              const proc = procedures.find((p) => p.id === procedureId);
+              if (!proc) return null;
+              const rate = procedureCost(proc, costCentres);
+              const estHrs = Math.round((Number(quantity) || 0) * (Number(hoursPerUnit) || 0) * 100) / 100;
+              const cost = rate * estHrs;
+              const dep = Number(departmentValue) || 0;
+              const margin = dep - cost;
+              return (
+                <div className="rounded-md border border-slate-700 bg-slate-800/60 p-3 text-xs">
+                  <div className="flex justify-between text-slate-400"><span>Cost — {fmtMoney(rate)}/hr × {estHrs}h</span><span className="font-mono text-slate-200">{fmtMoney(cost)}</span></div>
+                  <div className="flex justify-between text-slate-400 mt-1"><span>Your department value</span><span className="font-mono text-slate-200">{fmtMoney(dep)}</span></div>
+                  <div className="flex justify-between mt-1 pt-1 border-t border-slate-700">
+                    <span className="text-slate-300 font-medium">{margin >= 0 ? 'Estimated margin' : 'Estimated loss'}</span>
+                    <span className={`font-mono font-semibold ${margin >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtMoney(margin)}</span>
+                  </div>
+                </div>
+              );
+            })()}
+          </Section>
+        </div>
+      </div>
 
       {parts && (
         <div className="mb-3">
@@ -3296,54 +3330,38 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       )}
 
       {!parts && !isNew && onSplit && (
-        <div className="mb-3">
-          <button type="button" className="text-xs text-slate-400 hover:text-slate-200 flex items-center gap-1" onClick={() => setShowSplit((s) => !s)}>
-            {showSplit ? '▾' : '▸'} Split job into two parts
-          </button>
-          {showSplit && (
-            <div className="bg-slate-800/50 border border-slate-700 rounded-md p-3 mt-1.5">
-              <p className="text-[11px] text-slate-500 mb-2">
-                For when this job has to come off before it's done — e.g. an urgent job needs the cell.
-                The remaining hours become a separate, independently-schedulable part; both still count as one job here and on the Backlog.
-              </p>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Hours for part 1">
-                  <input
-                    type="number" min={0} max={job?.hoursTotal ?? 0} step={0.5} className={inputCls}
-                    value={splitHoursA}
-                    onChange={(e) => setSplitHoursA(e.target.value)}
-                  />
-                </Field>
-                <Field label="Hours for part 2">
-                  <input type="number" className={`${inputCls} opacity-60`} value={Math.max(0, Math.round(((job?.hoursTotal ?? 0) - Number(splitHoursA)) * 100) / 100)} disabled />
-                </Field>
-              </div>
-              <button type="button" className={btnPrimary} onClick={() => onSplit(splitHoursA)}>Split</button>
-            </div>
-          )}
-        </div>
-      )}
-
-      <Field label="Notes">
-        <textarea className={inputCls} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
-      </Field>
-
-      <button type="button" className="text-xs text-slate-400 hover:text-slate-200 mb-3 flex items-center gap-1" onClick={() => setShowBcLink((s) => !s)}>
-        {showBcLink ? '▾' : '▸'} Business Central linking (optional)
-      </button>
-      {showBcLink && (
-        <div className="bg-slate-800/50 border border-slate-700 rounded-md p-3 mb-3">
+        <Section title="Split job into two parts" defaultOpen={false}>
+          <p className="text-[11px] text-slate-500 mb-2">
+            For when this job has to come off before it's done — e.g. an urgent job needs the cell.
+            The remaining hours become a separate, independently-schedulable part; both still count as one job here and on the Backlog.
+          </p>
           <div className="grid grid-cols-2 gap-3">
-            <Field label="BC Job No.">
-              <input className={inputCls} value={bcJobNo} onChange={(e) => setBcJobNo(e.target.value)} placeholder="e.g. J00120" />
+            <Field label="Hours for part 1">
+              <input
+                type="number" min={0} max={job?.hoursTotal ?? 0} step={0.5} className={inputCls}
+                value={splitHoursA}
+                onChange={(e) => setSplitHoursA(e.target.value)}
+              />
             </Field>
-            <Field label="BC Job Task No.">
-              <input className={inputCls} value={bcJobTaskNo} onChange={(e) => setBcJobTaskNo(e.target.value)} placeholder="e.g. 1000" />
+            <Field label="Hours for part 2">
+              <input type="number" className={`${inputCls} opacity-60`} value={Math.max(0, Math.round(((job?.hoursTotal ?? 0) - Number(splitHoursA)) * 100) / 100)} disabled />
             </Field>
           </div>
-          <p className="text-[11px] text-slate-500">Not connected yet — these just tag this job with its Business Central reference so a future sync knows which record to update.</p>
-        </div>
+          <button type="button" className={btnPrimary} onClick={() => onSplit(splitHoursA)}>Split</button>
+        </Section>
       )}
+
+      <Section title="Business Central linking (optional)" defaultOpen={!!(job?.bcJobNo || job?.bcJobTaskNo)}>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="BC Job No.">
+            <input className={inputCls} value={bcJobNo} onChange={(e) => setBcJobNo(e.target.value)} placeholder="e.g. J00120" />
+          </Field>
+          <Field label="BC Job Task No.">
+            <input className={inputCls} value={bcJobTaskNo} onChange={(e) => setBcJobTaskNo(e.target.value)} placeholder="e.g. 1000" />
+          </Field>
+        </div>
+        <p className="text-[11px] text-slate-500">Not connected yet — these just tag this job with its Business Central reference so a future sync knows which record to update.</p>
+      </Section>
 
       {!isNew && job.assignment && (
         <div className="text-xs text-slate-400 bg-slate-800/60 rounded-md p-2.5 mb-3">

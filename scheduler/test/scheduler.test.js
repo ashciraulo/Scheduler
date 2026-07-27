@@ -234,6 +234,48 @@ describe('roster availability', () => {
     delete roster.mon.production;
     assert.equal(getStaffDayInfo(person('s1', { roster }), MONDAY).working, true);
   });
+
+  test('someone rostered longer than the default 8h shift can work all of it on one job', () => {
+    const d = days();
+    const longDay = rosterOn(['mon', 'tue', 'wed', 'thu', 'fri'], 'day', 12);
+    const out = runScheduler(
+      [job('j', { hoursTotal: 12, dueDate: '2026-03-10' })],
+      [equip('e1')], [person('s1', { roster: longDay })], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, MONDAY), 12,
+      'the full 12h roster day should go to this one job, not be capped at the default 8h and spill to Tuesday');
+    assert.equal(a.startDate, MONDAY);
+    assert.equal(a.endDate, MONDAY);
+  });
+
+  test('a job under the roster cap keeps its operator all day instead of handing off to a second job', () => {
+    const d = days();
+    const longDay = rosterOn(['mon', 'tue', 'wed', 'thu', 'fri'], 'day', 12);
+    const out = runScheduler(
+      [
+        job('a', { hoursTotal: 12, dueDate: '2026-03-10' }),
+        job('b', { hoursTotal: 12, dueDate: '2026-03-11' }),
+      ],
+      [equip('e1'), equip('e2')], [person('s1', { roster: longDay })], d,
+    );
+    const aAssign = byId(out, 'a').assignment;
+    assert.equal(hoursOn(aAssign, MONDAY), 12,
+      'job a should keep the operator for their whole rostered day before job b gets any of it — the old fixed ' +
+      '8h equipment-shift ceiling used to bounce the last 4h onto job b for no reason');
+    assert.equal(staffOn(aAssign).length, 1, 'one continuous operator, no mid-day handover forced by a fake cap');
+  });
+
+  test('the default 8h ceiling still applies when nobody eligible is rostered longer', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { hoursTotal: 12, dueDate: '2026-03-12' })],
+      [equip('e1')], [person('s1')], d, // default person() roster is 8h/day
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, MONDAY), 8, 'unchanged behaviour for an ordinary 8h-rostered person');
+    assert.ok(a.endDate > MONDAY, 'the remaining 4h spill to the next working day, same as before');
+  });
 });
 
 describe('split jobs', () => {

@@ -162,16 +162,23 @@ export function buildCapacityMaps(equipment, staff, days) {
   });
   const staffDayRemain = {}; // staffDayRemain[staffId][date] = hours available that day
   const staffDayShift = {}; // staffDayShift[staffId][date] = 'day' | 'afternoon' | null
+  // staffDayHours[staffId][date] = their full rostered hours that day — unlike
+  // staffDayRemain (which consume() decrements as the run places jobs), this
+  // stays constant, so tryFit can tell "how long could this shift actually
+  // run today" from "how much of it is left" (see shiftCapacity below).
+  const staffDayHours = {};
   staff.forEach((s) => {
     staffDayRemain[s.id] = {};
     staffDayShift[s.id] = {};
+    staffDayHours[s.id] = {};
     days.forEach((day) => {
       const info = getStaffDayInfo(s, day);
       staffDayRemain[s.id][day] = info.hours;
       staffDayShift[s.id][day] = info.shift;
+      staffDayHours[s.id][day] = info.hours;
     });
   });
-  return { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift, staffLoad };
+  return { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift, staffDayHours, staffLoad };
 }
 
 // Who actually did most of the work on an existing assignment. The scheduler
@@ -214,7 +221,7 @@ export function eligibleStaffIds(job, staff) {
 // deduct this job's hours from anyone's remaining capacity, so a second job
 // can still draw on the same person at the same time.
 export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds, caps, seedStaffId = null, allowParallel = false) {
-  const { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift, staffLoad } = caps;
+  const { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift, staffDayHours, staffLoad } = caps;
   // A job with no positive hours has nothing to place; return null so the
   // caller falls into its conflict/placeholder path instead of accepting an
   // empty (but truthy) plan that would render as a blank block.
@@ -235,7 +242,18 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
     for (const shift of SHIFT_ORDER) {
       if (remaining <= 0.001) break;
       const already = equipShiftUsed[equipId]?.[date]?.[shift] ?? 0;
-      let shiftLeft = SHIFT_DEFS[shift].defaultHours - already;
+      // The equipment's shift-block capacity has to cover whoever's actually
+      // rostered onto it that day — a fixed default ceiling silently
+      // truncated anyone rostered longer than that (e.g. a 12h day shift) at
+      // the default's length, bouncing the rest of their day onto an
+      // unrelated job instead of letting them keep working the one they were
+      // already on. defaultHours only matters as a floor now, for a shift
+      // nobody eligible happens to be rostered onto yet.
+      const rosteredThisShift = compatibleStaffIds
+        .filter((sid) => staffDayShift[sid]?.[date] === shift)
+        .map((sid) => staffDayHours[sid]?.[date] ?? 0);
+      const shiftCapacity = Math.max(SHIFT_DEFS[shift].defaultHours, ...rosteredThisShift);
+      let shiftLeft = shiftCapacity - already;
       if (shiftLeft <= 0.001) continue;
 
       // Everyone qualified, rostered onto this shift today — with hours to
