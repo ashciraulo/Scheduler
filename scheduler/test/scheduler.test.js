@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 
 import {
   runScheduler, whyUnscheduled, getStaffDayInfo, tagOk, primaryStaffOf, eligibleStaffIds,
+  findStaffConflictJobs,
 } from '../src/scheduler.js';
 import {
   MONDAY, days, equip, person, job, rosterOn, datesOf, staffOn, hoursOn, byId,
@@ -421,5 +422,129 @@ describe('stamping', () => {
     const ids = ['c', 'a', 'b'];
     const out = runScheduler(ids.map((i) => job(i)), [equip('e1')], [person('s1')], d);
     assert.deepEqual(out.map((j) => j.id), ids);
+  });
+});
+
+describe('parallel processing (#30)', () => {
+  const pin = (date, equipmentId) => ({ equipmentId, startDate: date, endDate: date, pinned: true, days: [] });
+  // One operator, two machines: both jobs are only ever eligible for s1, so
+  // pinning both to the same day is a genuine double-booking, not a fixture
+  // quirk.
+  const equipment = () => [equip('e1'), equip('e2')];
+  const oneStaff = () => [person('s1')];
+
+  // A 1-day horizon in these two tests specifically: a pinned job that can't
+  // fit its exact day spills forward to the next day it can (that's what the
+  // "does not let a job skip equipment exclusivity" test below relies on) —
+  // with the usual 20-day horizon j2 would just quietly land on Tuesday
+  // instead of genuinely conflicting. Pinning it down to a single day is what
+  // makes this a real double-booking with nowhere to spill to.
+
+  test('by default, two jobs pinned to the same day both needing the only operator conflict', () => {
+    const out = runScheduler(
+      [
+        job('j1', { hoursTotal: 8, assignment: pin(MONDAY, 'e1') }),
+        job('j2', { hoursTotal: 8, assignment: pin(MONDAY, 'e2') }),
+      ],
+      equipment(), oneStaff(), days(1),
+    );
+    const a1 = byId(out, 'j1').assignment;
+    const a2 = byId(out, 'j2').assignment;
+    assert.equal(a1.conflict, false, 'whoever claims the operator first schedules cleanly');
+    assert.equal(a2.conflict, true, 'the second is left overbooked, not silently unassigned with no signal');
+    assert.equal(staffOn(a2).length, 0, 'no operator is force-assigned to the one that lost the contest');
+  });
+
+  test('findStaffConflictJobs names the job actually holding the needed operator', () => {
+    const out = runScheduler(
+      [
+        job('j1', { name: 'First job', hoursTotal: 8, assignment: pin(MONDAY, 'e1') }),
+        job('j2', { name: 'Second job', hoursTotal: 8, assignment: pin(MONDAY, 'e2') }),
+      ],
+      equipment(), oneStaff(), days(1),
+    );
+    const conflicted = byId(out, 'j2');
+    const culprits = findStaffConflictJobs(conflicted, out, oneStaff());
+    assert.deepEqual(culprits.map((j) => j.id), ['j1']);
+  });
+
+  test('findStaffConflictJobs returns nothing for a job that isn\'t actually conflicted', () => {
+    const out = runScheduler(
+      [job('solo', { hoursTotal: 8, assignment: pin(MONDAY, 'e1') })],
+      equipment(), oneStaff(), days(),
+    );
+    assert.deepEqual(findStaffConflictJobs(byId(out, 'solo'), out, oneStaff()), []);
+  });
+
+  test('tagging the losing job parallelProcessing resolves the conflict for both', () => {
+    const out = runScheduler(
+      [
+        job('j1', { hoursTotal: 8, assignment: pin(MONDAY, 'e1') }),
+        job('j2', { hoursTotal: 8, parallelProcessing: true, assignment: pin(MONDAY, 'e2') }),
+      ],
+      equipment(), oneStaff(), days(),
+    );
+    const a1 = byId(out, 'j1').assignment;
+    const a2 = byId(out, 'j2').assignment;
+    assert.equal(a1.conflict, false);
+    assert.equal(a2.conflict, false, 'parallelProcessing lets it share the operator instead of being overbooked');
+    assert.deepEqual(staffOn(a1), ['s1']);
+    assert.deepEqual(staffOn(a2), ['s1'], 'the same operator genuinely covers both at once');
+  });
+
+  test('parallelProcessing does not let a job skip equipment exclusivity', () => {
+    // Two jobs pinned to the SAME equipment, same day — a machine can't run
+    // two jobs at once regardless of the tag. A pinned job that can't fit its
+    // exact day spills forward to the next day it can (same as any pinned
+    // job — see the "pinned jobs" tests above), so the signal to check here
+    // isn't `conflict` (spilling forward is a clean, non-conflict outcome);
+    // it's that the tag didn't let it phase through j1 and keep MONDAY.
+    const out = runScheduler(
+      [
+        job('j1', { hoursTotal: 8, assignment: pin(MONDAY, 'e1') }),
+        job('j2', { hoursTotal: 8, parallelProcessing: true, assignment: pin(MONDAY, 'e1') }),
+      ],
+      equipment(), oneStaff(), days(),
+    );
+    const a2 = byId(out, 'j2').assignment;
+    assert.notEqual(a2.startDate, MONDAY, 'the equipment is still exclusive — j2 must move to a day e1 is actually free');
+  });
+
+  test('the tag survives a move and still allows parallel processing against a different job', () => {
+    const equip3 = [equip('e1'), equip('e2'), equip('e3')];
+    // j2 (tagged) first proved itself against j1 on e2; now re-pin it to e3
+    // against a brand-new j3 it has never met before.
+    const out = runScheduler(
+      [
+        job('j1', { hoursTotal: 8, assignment: pin(MONDAY, 'e1') }),
+        job('j2', { hoursTotal: 8, parallelProcessing: true, assignment: pin(MONDAY, 'e3') }),
+        job('j3', { hoursTotal: 8, assignment: pin(MONDAY, 'e2') }),
+      ],
+      equip3, oneStaff(), days(),
+    );
+    const a2 = byId(out, 'j2').assignment;
+    assert.equal(a2.conflict, false, 'the tag is a property of the job, not of a specific pairing');
+    assert.deepEqual(staffOn(a2), ['s1']);
+  });
+
+  test('a split job\'s parts all inherit the parent\'s parallelProcessing tag', () => {
+    const split = job('split', {
+      hoursTotal: 16,
+      parallelProcessing: true,
+      parts: [
+        { id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: pin(MONDAY, 'e2') },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: pin(MONDAY, 'e3') },
+      ],
+    });
+    const out = runScheduler(
+      [
+        job('blocker1', { hoursTotal: 8, assignment: pin(MONDAY, 'e1') }),
+        split,
+      ],
+      [equip('e1'), equip('e2'), equip('e3')], oneStaff(), days(),
+    );
+    const parent = byId(out, 'split');
+    assert.equal(parent.parts[0].assignment.conflict, false);
+    assert.equal(parent.parts[1].assignment.conflict, false);
   });
 });

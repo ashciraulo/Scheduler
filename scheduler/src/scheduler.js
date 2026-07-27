@@ -204,7 +204,16 @@ export function eligibleStaffIds(job, staff) {
   return qualified.map((s) => s.id);
 }
 
-export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds, caps, seedStaffId = null) {
+// `allowParallel` is set for a job carrying the "parallel processing" tag
+// (#30) — the operator can nominally mind a second job while this one's
+// automation does the work, so it doesn't compete for the shared
+// staffDayRemain pool the way ordinary jobs do. It still needs someone
+// qualified rostered onto the shift (and the equipment's own shift capacity
+// still applies unchanged) — only the "does this person have hours left
+// today" check is bypassed, and consume() (below) correspondingly doesn't
+// deduct this job's hours from anyone's remaining capacity, so a second job
+// can still draw on the same person at the same time.
+export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds, caps, seedStaffId = null, allowParallel = false) {
   const { equipDayLock, equipShiftUsed, staffDayRemain, staffDayShift, staffLoad } = caps;
   // A job with no positive hours has nothing to place; return null so the
   // caller falls into its conflict/placeholder path instead of accepting an
@@ -229,12 +238,15 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
       let shiftLeft = SHIFT_DEFS[shift].defaultHours - already;
       if (shiftLeft <= 0.001) continue;
 
-      // Everyone qualified, rostered onto this shift today, with hours to give.
+      // Everyone qualified, rostered onto this shift today — with hours to
+      // give, unless this job doesn't need them exclusively (allowParallel).
       const pool = compatibleStaffIds.filter(
-        (sid) => staffDayShift[sid]?.[date] === shift && (staffDayRemain[sid]?.[date] ?? 0) > 0.001
+        (sid) => staffDayShift[sid]?.[date] === shift && (allowParallel || (staffDayRemain[sid]?.[date] ?? 0) > 0.001)
       );
       if (!pool.length) continue;
-      const contribution = (sid) => Math.min(staffDayRemain[sid][date], shiftLeft, remaining);
+      const contribution = (sid) => allowParallel
+        ? Math.min(shiftLeft, remaining)
+        : Math.min(staffDayRemain[sid][date], shiftLeft, remaining);
       const bestContribution = Math.max(...pool.map(contribution));
       pool.sort((a, b) => {
         // Continuity first — but only while the person already on the job can
@@ -260,7 +272,9 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
       let preferredStayed = false;
       for (const sid of pool) {
         if (remaining <= 0.001 || shiftLeft <= 0.001) break;
-        const use = Math.min(shiftLeft, staffDayRemain[sid][date], remaining);
+        const use = allowParallel
+          ? Math.min(shiftLeft, remaining)
+          : Math.min(shiftLeft, staffDayRemain[sid][date], remaining);
         if (use <= 0.001) continue;
         plan.push({ date, shift, staffId: sid, hours: use });
         remaining -= use;
@@ -277,7 +291,7 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
   return plan;
 }
 
-export function consume(plan, equipId, jobId, days, caps) {
+export function consume(plan, equipId, jobId, days, caps, allowParallel = false) {
   const { equipDayLock, equipShiftUsed, staffDayRemain, staffLoad } = caps;
   if (!plan.length) return;
   const startDate = plan[0].date;
@@ -295,6 +309,11 @@ export function consume(plan, equipId, jobId, days, caps) {
   plan.forEach(({ date, shift, staffId, hours }) => {
     equipShiftUsed[equipId][date][shift] += hours;
     if (!staffId) return; // an overbooked pinned job's placeholder plan has no one on it
+    // A parallel-processing job never actually claimed this person's time —
+    // tryFit placed them without checking staffDayRemain, so undoing that
+    // here would make their remaining hours negative for no reason, and
+    // would wrongly block a second, unrelated job from also drawing on them.
+    if (allowParallel) return;
     staffDayRemain[staffId][date] -= hours;
     staffLoad[staffId] = (staffLoad[staffId] ?? 0) + hours;
   });
@@ -306,6 +325,37 @@ export function consume(plan, equipId, jobId, days, caps) {
 export function tagOk(job, equip) {
   const need = job.tags || [];
   return !need.length || need.every((t) => (equip.tags || []).includes(t));
+}
+
+// Which other job(s) are actually holding the operator a freshly-pinned,
+// now-overbooked job needed (#30). Used to drive the "allow parallel
+// processing?" prompt: rather than just flagging the drop as overbooked and
+// leaving the user to figure out why, name what it collided with so they can
+// choose which job (this one or the other) is the automated one that can
+// tolerate sharing an operator.
+//
+// `conflictedJob` must already be through runScheduler (so its `.assignment`
+// reflects the failed placement) and its `.assignment.conflict` must be
+// true. Scans every other active job's actual day-by-day plan for an entry
+// on one of the same dates staffed by someone who could have covered
+// `conflictedJob` — i.e. whoever it was actually contending with for that
+// person's time, not just "everyone qualified for this process".
+export function findStaffConflictJobs(conflictedJob, jobs, staff) {
+  if (!conflictedJob.assignment?.conflict) return [];
+  const eligible = new Set(eligibleStaffIds(conflictedJob, staff));
+  if (!eligible.size) return [];
+  const dates = new Set((conflictedJob.assignment.days || []).map((d) => d.date));
+  if (!dates.size) return [];
+  const found = new Map(); // jobId -> job
+  jobs.forEach((j) => {
+    if (j.id === conflictedJob.id || j.status === 'complete') return;
+    const dayLists = Array.isArray(j.parts) && j.parts.length
+      ? j.parts.map((p) => p.assignment?.days || [])
+      : [j.assignment?.days || []];
+    const collides = dayLists.some((ds) => ds.some((d) => dates.has(d.date) && d.staffId && eligible.has(d.staffId)));
+    if (collides) found.set(j.id, j);
+  });
+  return [...found.values()];
 }
 
 // Human-readable reason a job couldn't be auto-placed, shown on its
@@ -377,6 +427,10 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
           // part of it — the parts are separately *placed*, not separately
           // staffed.
           staffId: j.staffId || null,
+          // Same reasoning as tags: parallel-processing is a property of the
+          // work (the automation runs unattended either way), so every part
+          // gets it too, not just whichever part happened to trigger it.
+          parallelProcessing: !!j.parallelProcessing,
           hoursTotal: part.hoursTotal,
           readyDate: j.readyDate,
           dueDate: j.dueDate,
@@ -442,10 +496,10 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
     if (startIdx === -1 || notYetReady || !equipDayLock[a.equipmentId]) {
       conflict = true;
     } else {
-      const fit = tryFit(days, startIdx, job.hoursTotal, a.equipmentId, compatibleStaffIds, caps, stickyStaff.get(job.id));
+      const fit = tryFit(days, startIdx, job.hoursTotal, a.equipmentId, compatibleStaffIds, caps, stickyStaff.get(job.id), !!job.parallelProcessing);
       if (fit) {
         plan = fit;
-        consume(plan, a.equipmentId, job.id, days, caps);
+        consume(plan, a.equipmentId, job.id, days, caps, !!job.parallelProcessing);
       } else {
         conflict = true;
       }
@@ -522,7 +576,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
       const candidates = [];
       for (const e of compatibleEquip) {
         for (let idx = floorIdx; idx < days.length; idx++) {
-          const fit = tryFit(days, idx, job.hoursTotal, e.id, compatibleStaffIds, caps, seedStaffId);
+          const fit = tryFit(days, idx, job.hoursTotal, e.id, compatibleStaffIds, caps, seedStaffId, !!job.parallelProcessing);
           if (fit) {
             candidates.push({ equipId: e.id, plan: fit, startDate: fit[0].date, endDate: fit[fit.length - 1].date });
             break; // this is the earliest start this particular machine can offer
@@ -562,7 +616,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
       }
     }
     if (best) {
-      consume(best.plan, best.equipId, job.id, days, caps);
+      consume(best.plan, best.equipId, job.id, days, caps, !!job.parallelProcessing);
       job.assignment = {
         equipmentId: best.equipId,
         startDate: best.plan[0].date,
