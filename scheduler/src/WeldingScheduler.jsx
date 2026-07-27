@@ -376,6 +376,24 @@ function Section({ title, defaultOpen = true, children }) {
     </div>
   );
 }
+// A plain `<button onClick={fn}>` written directly inside a component that
+// itself renders `<Modal>` (JobModal, StaffModal, ...) can't report itself
+// dirty via `useContext(DirtyContext)` at that component's own top level —
+// Modal's Provider wraps whatever *children* that component passes down to
+// Modal, so the Provider is a descendant of the call, not an ancestor, and
+// useContext can't see it from there (this bit both JobModal's "100% to
+// department" button and StaffModal's colour swatches). Wrapping the button
+// in its own real child component sidesteps this: instantiated as one of
+// those children, its own useContext call resolves against the Provider
+// correctly, exactly like TagEditor/MultiCheck already do.
+function DirtyButton({ onClick, className, style, title, children }) {
+  const markDirty = useContext(DirtyContext);
+  return (
+    <button type="button" className={className} style={style} title={title} onClick={() => { markDirty(); onClick(); }}>
+      {children}
+    </button>
+  );
+}
 const inputCls = "w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/60 focus:border-amber-500/60";
 const btnPrimary = "inline-flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-sm px-3 py-2 rounded-md transition-colors";
 const btnGhost = "inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm px-3 py-2 rounded-md transition-colors border border-slate-700";
@@ -1551,6 +1569,39 @@ export default function WeldingScheduler() {
     }
     showToast(msg);
   }
+  // Unlike deletion, a rename has a direct 1:1 replacement, so — unlike
+  // saveProcesses, which deliberately leaves templates/jobs pointing at a
+  // removed process rather than silently unscheduling them — it's safe (and
+  // wanted) to cascade everywhere: equipment/staff capability lists,
+  // templates, and every job's `process` string, then recompute so the
+  // schedule reflects the new name immediately rather than on the next
+  // unrelated action.
+  function renameProcess(oldName, newName) {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) return;
+    if (processes.includes(trimmed)) { showToast(`"${trimmed}" is already a process name.`); return; }
+
+    const swap = (arr) => arr.map((p) => (p === oldName ? trimmed : p));
+    const list = swap(processes);
+    setProcesses(list);
+    saveKey('wf_processes', list);
+
+    const nextEquip = equipment.map((e) => (e.processes.includes(oldName) ? { ...e, processes: swap(e.processes) } : e));
+    const nextStaff = staff.map((s) => (s.processes.includes(oldName) ? { ...s, processes: swap(s.processes) } : s));
+    setEquipment(nextEquip);
+    saveKey('wf_equipment', nextEquip);
+    setStaff(nextStaff);
+    saveKey('wf_staff', nextStaff);
+
+    const nextTemplates = templates.map((t) => (t.process === oldName ? { ...t, process: trimmed } : t));
+    setTemplates(nextTemplates);
+    saveKey('wf_templates', nextTemplates);
+
+    const nextJobs = jobs.map((j) => (j.process === oldName ? { ...j, process: trimmed, updatedAt: new Date().toISOString() } : j));
+    recompute(nextJobs, nextEquip, nextStaff);
+
+    showToast(`Renamed "${oldName}" to "${trimmed}" everywhere it's used.`);
+  }
 
   // ---------- costing: cost centres + procedures ----------
   function saveCostCentres(list) { setCostCentres(list); saveKey('wf_costcentres', list); }
@@ -1760,6 +1811,7 @@ export default function WeldingScheduler() {
             onEdit={(t) => setEditingTemplate(t)}
             onDelete={(t) => setConfirmDelete({ type: 'template', id: t.id, name: t.name })}
             onSaveProcesses={saveProcesses}
+            onRenameProcess={renameProcess}
             onSaveCategories={saveCategories}
           />
         )}
@@ -2042,11 +2094,18 @@ function ScheduleView({
   const ZOOM_MIN = 0.6, ZOOM_MAX = 1.6, ZOOM_STEP = 0.2;
   const colWidth = Math.round((displayMode ? 92 : 76) * zoom);
   const laneH = Math.round((displayMode ? 56 : 46) * zoom);
+  // 240px cut most job names off mid-word — job number, staff colour dots and
+  // hours all share this column with the name, so it needed real room, not
+  // just enough for a couple of characters before the ellipsis.
+  const JOB_COL_WIDTH = 320;
   const todayIso = useMemo(() => isoDate(new Date()), []);
 
   const staffColor = useMemo(() => {
     const m = {};
-    staff.forEach((s, i) => { m[s.id] = STAFF_PALETTE[i % STAFF_PALETTE.length]; });
+    // An explicit choice (StaffModal's "Timeline colour") wins outright;
+    // otherwise fall back to the palette, indexed by list position same as
+    // always.
+    staff.forEach((s, i) => { m[s.id] = s.color || STAFF_PALETTE[i % STAFF_PALETTE.length]; });
     return (id) => m[id] || UNASSIGNED_COLOR;
   }, [staff]);
 
@@ -2160,10 +2219,10 @@ function ScheduleView({
               inner height, the previous approach, never gives position:sticky
               anything to stick relative to but the page itself. */}
           <div className="overflow-auto" style={{ maxHeight: displayMode ? '80vh' : '65vh' }}>
-            <div style={{ minWidth: 240 + visibleDays.length * colWidth }}>
+            <div style={{ minWidth: JOB_COL_WIDTH + visibleDays.length * colWidth }}>
               {/* Day header row */}
               <div className="flex border-b border-slate-800 bg-slate-900 sticky top-0 z-20">
-                <div className="shrink-0 px-3 py-2 text-[11px] font-semibold text-slate-500 uppercase tracking-wide border-r border-slate-800 sticky left-0 bg-slate-900" style={{ width: 240 }}>
+                <div className="shrink-0 px-3 py-2 text-[11px] font-semibold text-slate-500 uppercase tracking-wide border-r border-slate-800 sticky left-0 bg-slate-900" style={{ width: JOB_COL_WIDTH }}>
                   Equipment / Jobs
                 </div>
                 {visibleDays.map((day) => {
@@ -2228,7 +2287,7 @@ function ScheduleView({
                     </div>
                     {lanes.length === 0 && (
                       <div className="flex">
-                        <div className="shrink-0 px-3 border-r border-slate-800 flex items-center sticky left-0 bg-slate-900" style={{ width: 240 }}>
+                        <div className="shrink-0 px-3 border-r border-slate-800 flex items-center sticky left-0 bg-slate-900" style={{ width: JOB_COL_WIDTH }}>
                           <span className="text-[10px] text-slate-600">No jobs scheduled</span>
                         </div>
                         <div className="relative" style={{ height: 30, width: visibleDays.length * colWidth }}>{cells()}</div>
@@ -2247,7 +2306,7 @@ function ScheduleView({
                         <div key={job.id} className="flex border-b border-slate-800/40">
                           <div
                             className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 bg-slate-900"
-                            style={{ width: 240 }}
+                            style={{ width: JOB_COL_WIDTH }}
                             onClick={() => onEditJob(job._parentJob || job)}
                             title={tip}
                           >
@@ -2538,9 +2597,11 @@ function groupTemplatesByCategory(templates) {
   return Object.keys(map).sort().map((k) => [k, map[k]]);
 }
 
-function TemplatesView({ templates, equipment, processes, categories = [], readOnly, onAdd, onEdit, onDelete, onSaveProcesses, onSaveCategories }) {
+function TemplatesView({ templates, equipment, processes, categories = [], readOnly, onAdd, onEdit, onDelete, onSaveProcesses, onRenameProcess, onSaveCategories }) {
   const [newProcess, setNewProcess] = useState('');
   const [newCategory, setNewCategory] = useState('');
+  const [editingProcess, setEditingProcess] = useState(null); // the process name currently being renamed, or null
+  const [editProcessValue, setEditProcessValue] = useState('');
   return (
     <div className="grid lg:grid-cols-3 gap-4">
       <div className="lg:col-span-2">
@@ -2627,10 +2688,42 @@ function TemplatesView({ templates, equipment, processes, categories = [], readO
         <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
           <div className="space-y-1.5 mb-3">
             {processes.map((p) => (
-              <div key={p} className="flex items-center justify-between text-sm text-slate-300 bg-slate-800/60 rounded px-2 py-1.5">
-                <span>{p}</span>
-                {!readOnly && (
-                  <button onClick={() => onSaveProcesses(processes.filter((x) => x !== p))} className="text-slate-500 hover:text-red-400"><X size={13} /></button>
+              <div key={p} className="flex items-center justify-between text-sm text-slate-300 bg-slate-800/60 rounded px-2 py-1.5 gap-2">
+                {editingProcess === p ? (
+                  <>
+                    <input
+                      autoFocus
+                      className={`${inputCls} py-1`}
+                      value={editProcessValue}
+                      onChange={(e) => setEditProcessValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { onRenameProcess(p, editProcessValue); setEditingProcess(null); }
+                        if (e.key === 'Escape') setEditingProcess(null);
+                      }}
+                    />
+                    <div className="flex gap-1 shrink-0">
+                      <button
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => { onRenameProcess(p, editProcessValue); setEditingProcess(null); }}
+                        className="text-emerald-400 hover:text-emerald-300"
+                      ><Check size={14} /></button>
+                      <button
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => setEditingProcess(null)}
+                        className="text-slate-500 hover:text-slate-300"
+                      ><X size={14} /></button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span>{p}</span>
+                    {!readOnly && (
+                      <div className="flex gap-1 shrink-0">
+                        <button onClick={() => { setEditingProcess(p); setEditProcessValue(p); }} className="text-slate-500 hover:text-amber-400"><Pencil size={13} /></button>
+                        <button onClick={() => onSaveProcesses(processes.filter((x) => x !== p))} className="text-slate-500 hover:text-red-400"><X size={13} /></button>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             ))}
@@ -2663,6 +2756,10 @@ function TemplatesView({ templates, equipment, processes, categories = [], readO
 // underneath as before.
 function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, onUpdateStaff }) {
   const [leaveModalFor, setLeaveModalFor] = useState(null); // staff object or null
+  // Set only when editing an existing period (vs. adding a new one) — same
+  // modal either way, this just decides whether saveLeave replaces an entry
+  // or appends one, and drives the title/button wording.
+  const [editingLeaveId, setEditingLeaveId] = useState(null);
   const [leaveStart, setLeaveStart] = useState(isoDate(new Date()));
   const [leaveEnd, setLeaveEnd] = useState(isoDate(new Date()));
   const [leaveReason, setLeaveReason] = useState('');
@@ -2674,11 +2771,34 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
     onUpdateStaff({ ...member, weeklyRoster: roster });
   }
 
-  function addLeave() {
+  function openAddLeave(member) {
+    setLeaveModalFor(member);
+    setEditingLeaveId(null);
+    setLeaveStart(isoDate(new Date()));
+    setLeaveEnd(isoDate(new Date()));
+    setLeaveReason('');
+    setLeaveKind('leave');
+  }
+  function openEditLeave(period) {
+    const member = staff.find((s) => s.id === period.staffId);
+    if (!member) return;
+    setLeaveModalFor(member);
+    setEditingLeaveId(period.id);
+    setLeaveStart(period.startDate);
+    setLeaveEnd(period.endDate);
+    setLeaveReason(period.reason || '');
+    setLeaveKind(period.kind);
+  }
+  function saveLeave() {
     if (!leaveModalFor) return;
-    const periods = [...(leaveModalFor.leavePeriods || []), { id: uid('lv'), kind: leaveKind, startDate: leaveStart, endDate: leaveEnd, reason: leaveReason.trim() }];
+    const entry = { id: editingLeaveId || uid('lv'), kind: leaveKind, startDate: leaveStart, endDate: leaveEnd, reason: leaveReason.trim() };
+    const existing = leaveModalFor.leavePeriods || [];
+    const periods = editingLeaveId
+      ? existing.map((p) => (p.id === editingLeaveId ? entry : p))
+      : [...existing, entry];
     onUpdateStaff({ ...leaveModalFor, leavePeriods: periods });
     setLeaveModalFor(null);
+    setEditingLeaveId(null);
     setLeaveReason('');
     setLeaveKind('leave');
   }
@@ -2812,7 +2932,10 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
                   <td className="px-3 py-2 text-slate-400">{p.reason || '—'}</td>
                   <td className="px-3 py-2 text-right">
                     {!readOnly && (
-                      <button onClick={() => removeLeave(staff.find((s) => s.id === p.staffId), p.id)} className="p-1.5 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
+                      <div className="flex justify-end gap-0.5">
+                        <button onClick={() => openEditLeave(p)} className="p-1.5 rounded hover:bg-slate-700 text-slate-400"><Pencil size={13} /></button>
+                        <button onClick={() => removeLeave(staff.find((s) => s.id === p.staffId), p.id)} className="p-1.5 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -2829,7 +2952,7 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
               <button
                 key={m.id}
                 className={btnGhost}
-                onClick={() => { setLeaveModalFor(m); setLeaveStart(isoDate(new Date())); setLeaveEnd(isoDate(new Date())); setLeaveReason(''); setLeaveKind('leave'); }}
+                onClick={() => openAddLeave(m)}
               >
                 <Plus size={13} /> Absence for {m.name}
               </button>
@@ -2839,7 +2962,7 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
       </div>
 
       {leaveModalFor && (
-        <Modal title={`Add absence — ${leaveModalFor.name}`} onClose={() => setLeaveModalFor(null)}>
+        <Modal title={`${editingLeaveId ? 'Edit' : 'Add'} absence — ${leaveModalFor.name}`} onClose={() => setLeaveModalFor(null)}>
           <Field label="Type">
             <select className={inputCls} value={leaveKind} onChange={(e) => setLeaveKind(e.target.value)}>
               {ABSENCE_KINDS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
@@ -2853,7 +2976,7 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
           <Field label="Reason (optional)"><input className={inputCls} value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="e.g. Annual leave" /></Field>
           <div className="flex justify-end gap-2 pt-2 border-t border-slate-800 mt-3">
             <button className={btnGhost} onClick={() => setLeaveModalFor(null)}>Cancel</button>
-            <button className={btnPrimary} onClick={addLeave}><Check size={14} /> Save absence</button>
+            <button className={btnPrimary} onClick={saveLeave}><Check size={14} /> {editingLeaveId ? 'Save changes' : 'Save absence'}</button>
           </div>
         </Modal>
       )}
@@ -3226,6 +3349,12 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               </Field>
               <Field label="Value of your department's work ($)">
                 <input type="number" min={0} step={1} className={inputCls} value={departmentValue} onChange={(e) => setDepartmentValue(e.target.value)} />
+                <DirtyButton
+                  className="text-[11px] text-amber-400 hover:underline mt-1"
+                  onClick={() => setDepartmentValue(totalValue)}
+                >
+                  100% to department
+                </DirtyButton>
               </Field>
             </div>
             {valueWarning && (
@@ -3385,7 +3514,12 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
         </div>
       )}
 
-      <div className="flex items-center justify-between pt-2 border-t border-slate-800 mt-2">
+      {/* Sticky rather than just the last thing in the form — this modal has
+          grown long enough (#33) that the footer used to need scrolling past
+          everything else to reach. `-mx-5 px-5`/`-mb-5 pb-5` counteract the
+          parent's `p-5` so it still spans the dialog edge-to-edge, matching
+          the header's own sticky treatment above. */}
+      <div className="flex items-center justify-between pt-2 pb-5 -mx-5 -mb-5 px-5 border-t border-slate-800 mt-2 sticky bottom-0 bg-slate-900">
         <div className="flex gap-2">
           {onDelete && <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button>}
           {onUnpin && <button className={btnGhost} onClick={onUnpin}><PinOff size={14} /> Unpin</button>}
@@ -3488,7 +3622,8 @@ function KeywordChips({ words, onChange, placeholder, tone }) {
           // Commit it wherever focus goes, same as a tag/topic input elsewhere.
           onBlur={() => { if (input.trim()) add(); }}
         />
-        <button type="button" className="text-xs px-2 py-1 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700" onClick={add}>Add</button>
+        {/* See TagEditor's Add button — same blur/click race, same fix. */}
+        <button type="button" className="text-xs px-2 py-1 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700" onMouseDown={(e) => e.preventDefault()} onClick={add}>Add</button>
       </div>
     </div>
   );
@@ -3539,10 +3674,12 @@ function ComboChips({ rules, onChange }) {
           // See TagEditor's onBlur — same fix, same reason.
           onBlur={() => { if (input.trim()) add(); }}
         />
+        {/* See TagEditor's Add button — same blur/click race, same fix. */}
         <button
           type="button"
           disabled={words.length < 2}
           className="text-xs px-2 py-1 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800"
+          onMouseDown={(e) => e.preventDefault()}
           onClick={add}
         >Add</button>
       </div>
@@ -4352,7 +4489,14 @@ function TagEditor({ value, onChange, suggestions }) {
           list="cap-tags"
           placeholder="e.g. 1T Positioner, 5T Positioner…"
         />
-        <button type="button" className={btnGhost} onClick={add}>Add</button>
+        {/* preventDefault on mousedown stops the browser shifting focus off
+            the input before the click lands — without it, clicking Add fired
+            blur (committing via the handler above) *and then* this button's
+            own onClick, both racing to add the same tag from a stale closure:
+            usually harmless, but occasionally the second, stale write landed
+            after the first and the chip that had just appeared vanished
+            again. One commit per click, full stop. */}
+        <button type="button" className={btnGhost} onMouseDown={(e) => e.preventDefault()} onClick={add}>Add</button>
       </div>
       <datalist id="cap-tags">{(suggestions || []).filter((x) => !value.includes(x)).map((x) => <option key={x} value={x} />)}</datalist>
     </div>
@@ -4695,12 +4839,35 @@ function StaffModal({ item, processes, onClose, onSave }) {
   const [name, setName] = useState(item?.name || '');
   const [procs, setProcs] = useState(item?.processes || []);
   const [bcResourceNo, setBcResourceNo] = useState(item?.bcResourceNo || '');
+  // '' means "automatic" — falls back to STAFF_PALETTE[index in staff list],
+  // same as before this existed. An explicit choice here overrides that and
+  // stays fixed regardless of list order (add/remove/reorder no longer
+  // shuffles everyone's colour on the Schedule view).
+  const [color, setColor] = useState(item?.color || '');
 
   return (
     <Modal title={isNew ? 'Add staff member' : 'Edit staff member'} onClose={onClose}>
       <Field label="Name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
       <Field label="Certified / competent processes">
         <MultiCheck options={processes} value={procs} onChange={setProcs} showOrphans />
+      </Field>
+      <Field label="Timeline colour">
+        <div className="flex flex-wrap items-center gap-2">
+          {STAFF_PALETTE.map((c) => (
+            <DirtyButton
+              key={c}
+              onClick={() => setColor(c)}
+              className={`w-7 h-7 rounded-full ${color === c ? 'ring-2 ring-offset-2 ring-offset-slate-900 ring-amber-400' : ''}`}
+              style={{ backgroundColor: c }}
+              title={c}
+            />
+          ))}
+          <DirtyButton
+            onClick={() => setColor('')}
+            className={`text-[11px] px-2 py-1.5 rounded border ${!color ? 'border-amber-400 text-amber-300' : 'border-slate-700 text-slate-400 hover:border-slate-500'}`}
+          >Automatic</DirtyButton>
+        </div>
+        <p className="text-xs text-slate-500 mt-1">Shown as this person's colour on the Schedule view. Automatic assigns one from the palette based on staff order.</p>
       </Field>
       <Field label="Business Central Resource No. (optional)">
         <input className={inputCls} value={bcResourceNo} onChange={(e) => setBcResourceNo(e.target.value)} placeholder="e.g. RES-0042" />
@@ -4713,6 +4880,7 @@ function StaffModal({ item, processes, onClose, onSave }) {
             id: item?.id || uid('st'),
             name: name.trim() || 'Untitled',
             processes: procs,
+            color: color || null,
             bcResourceNo: bcResourceNo.trim(),
             weeklyRoster: item?.weeklyRoster || defaultWeeklyRoster(),
             leavePeriods: item?.leavePeriods || [],

@@ -367,7 +367,7 @@ grid no longer cares about calendar month boundaries at all, just an
 arbitrary contiguous window the user controls, from a detailed few days up to
 a couple of months for a broad workload view.
 
-**Scroll/zoom (#26, #27)**: the day header row and the 240px job-description
+**Scroll/zoom (#26, #27)**: the day header row and the job-description
 column both need to stay on screen while scrolling the grid — a spreadsheet
 frozen row/column. That requires a single element that actually scrolls in
 both axes for `position: sticky` to stick *within*: the previous layout put
@@ -394,6 +394,24 @@ fully-booked machine's stacked jobs don't push the next piece of equipment
 off-screen — without it, dragging a job between two machines can require
 scrolling one of them out of view first. Not persisted; it's a viewing
 preference for the moment, not schedule data.
+
+**Job-name column width (#35)**: `JOB_COL_WIDTH` (320px, up from the original
+240) is a single constant reused everywhere the column's width has to agree
+with itself — the grid's `minWidth`, the day-header corner cell, the empty-lane
+cell, and the job-name cell itself. 240px cut most job names off mid-word: job
+number, staff-colour dots and hours all share this column with the name, so it
+needed real room, not just enough space for a couple of characters before the
+ellipsis.
+
+**Per-staff timeline colour (#40)**: `STAFF_PALETTE` (10 hex colours) used to
+be the *only* source of a staff member's colour, picked by their index in the
+staff list — stable in practice, but not something anyone could choose or
+change without reordering staff. `StaffModal` now has a "Timeline colour" field
+(a swatch per palette entry, plus "Automatic") writing an explicit,
+nullable `staff.color`. `ScheduleView`'s `staffColor` lookup prefers it and
+only falls back to the palette-by-index when it's unset — `normalizeStaff`
+already spread unknown fields through, so no migration was needed for
+existing records.
 
 ### A job's equipment and start date are editable in its own modal (#28)
 
@@ -516,6 +534,47 @@ Parts (when the job is already split) stay a plain, always-visible block —
 not a `Section` — since they're the primary content of the modal at that
 point, not something to tuck away.
 
+**Sticky footer (#36)**: the footer (Delete/Unpin/Mark-complete/Save) is
+`sticky bottom-0 bg-slate-900`, not just the last thing in the form — once the
+modal grew tall enough for `Section` to matter at all, reaching Save meant
+scrolling past whatever else was open first. `-mx-5 px-5`/`-mb-5 pb-5`
+counteract the dialog's own `p-5` so the sticky bar still spans edge-to-edge,
+matching the header's existing sticky treatment.
+
+**"100% to department" (#37)**: a one-click shortcut in the Value & costing
+section that sets the department-value field to the job's total value, for
+the common case where this department did all the work on a job and nobody
+wants to retype the total. It's the first "act as a modal-level button" case
+this codebase hit, and it exposed a real bug rather than being simple to add
+— see `DirtyButton` below.
+
+### `DirtyButton` — why a plain `onClick` button inside JobModal/StaffModal can't self-report dirty (#37, #40)
+
+`useContext` only resolves against a `Provider` that is an **ancestor** of the
+calling component in the React tree. `Modal` wraps its `children` in
+`DirtyContext.Provider`, but `JobModal`/`StaffModal` are the components that
+*render* `<Modal>` — they sit above the Provider, not below it, so a bare
+`const markDirty = useContext(DirtyContext)` declared at their own top level
+always reads the context's default (a no-op) and silently never marks the
+modal dirty. This is not how `TagEditor`/`MultiCheck` get away with the exact
+same call: they're real child components instantiated as JSX *within* what
+becomes `children`, so they're genuine descendants of the Provider.
+
+The bug was invisible under a normal test (click the button, click Save,
+confirm the value persisted — that path never touches `markDirty` at all). It
+only surfaced by testing the *dirty-tracking* path itself: click the button,
+then click the backdrop, and check for "Discard unsaved changes?" — which
+didn't appear, because the click had never registered as a change.
+
+Fix: `DirtyButton` (`onClick`, `className`, `style`, `title`, `children`) is a
+tiny wrapper — `useContext(DirtyContext)` inside its own body, called on
+click alongside the real handler — used wherever JobModal/StaffModal need a
+plain button (not a native input, so no DOM `change` event bubbles) to count
+as an edit: the "100% to department" button and StaffModal's colour swatches.
+Any future button added directly inside a component that itself renders
+`<Modal>` needs this wrapper, not a raw `useContext` call at that component's
+own top level.
+
 ### Template categories
 
 Categories are a managed list (`wf_categories`), not free text typed per
@@ -584,6 +643,15 @@ Absence periods (still `leavePeriods`, for back-compat) carry a `kind` from
 `ABSENCE_KINDS` — leave / sick / training / other duties. All of them make
 someone unavailable; the kind is for the record, so a course doesn't have to
 be booked as annual leave. `normalizeStaff` defaults `kind` to `'leave'`.
+
+**Editable, not just deletable (#41)**: `StaffView` used to only ever append a
+new `leavePeriods` entry — fixing a typo in a reason, or a wrong date, meant
+deleting the entry and re-entering it from scratch. `openEditLeave(period)`
+opens the same absence modal pre-filled from an existing entry (tracked via
+`editingLeaveId`); `saveLeave()` replaces the matching entry by `id` when one
+is being edited, and only appends when it isn't, so editing can't turn into a
+duplicate. The leave table's row actions gained an Edit (pencil) button
+alongside the existing Delete.
 
 ### The daily hours log
 
@@ -819,6 +887,16 @@ fields exist so a future sync layer has a clean contract.
   (input.trim()) add(); }}` on the text input fixes all three; keep that
   guard (not a bare `onBlur={add}`) so blurring an empty field doesn't fire a
   no-op `onChange` on every unrelated click around the form.
+- **Each widget's Add button also needs `onMouseDown={(e) =>
+  e.preventDefault()}` (#39)**, or clicking it while the text input is
+  focused races the input's own `onBlur`-commit against the button's
+  `onClick` — `blur` fires first (the browser shifts focus off the input
+  before the click lands), so both handlers tried to add the same chip from
+  what was, by the second one, a stale closure. Usually harmless, but
+  occasionally the second write landed after the first and the chip that had
+  just appeared vanished again — the "capability requirement flickers and
+  disappears" bug. `preventDefault` on `mousedown` stops the browser from
+  moving focus at all, so only one commit ever fires.
 - Deleting a process (Templates page) cascades: `saveProcesses` strips it from
   every piece of equipment and every staff member. Templates and jobs keep
   their process string on purpose — it records what the work is, and blanking
@@ -828,6 +906,15 @@ fields exist so a future sync layer has a clean contract.
   before the cascade existed gets repaired. Leave it off where options are
   filtered dynamically (TemplateModal's equipment list narrows by process, and
   an id outside that list is ordinary filtering, not stale data).
+- **Renaming a process (#38) is the opposite case from deleting one, and
+  cascades everywhere on purpose.** Unlike deletion, a rename has a direct 1:1
+  replacement, so there's no reason to leave anything pointing at the old
+  string: `renameProcess(oldName, newName)` swaps it in the process list,
+  every equipment/staff capability array, every template, and every job's
+  `process` field, then recomputes so the schedule reflects it immediately.
+  `TemplatesView` edits a process in place (pencil icon → inline input, Enter
+  or the check button commits, Escape or the X cancels) rather than only ever
+  offering delete-and-re-add.
 - Work on a branch and commit checkpoints before large refactors.
 - After changes, run `npm run dev` and verify the Schedule, Roster, Backlog and
   Reports tabs still render and that data persists across a refresh.

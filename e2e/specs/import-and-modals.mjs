@@ -81,7 +81,7 @@ export default async function run({ page, check, errors, offOrigin, baseUrl }) {
   await page.click('nav >> text=Templates');
   await page.waitForTimeout(300);
   const tigRow = page.locator('div.flex.items-center.justify-between', { hasText: 'Robotic TIG Welding' }).first();
-  await tigRow.locator('button').click();
+  await tigRow.locator('button').last().click();
   await page.waitForTimeout(500);
 
   const toastText = await page.locator('div.fixed.bottom-5').textContent().catch(() => '');
