@@ -16,7 +16,7 @@ import {
   defaultWeeklyRoster, absenceKindLabel, normalizeStaff,
   isoDate, addDays, generateCalendarDays, isWeekendDate, isOnLeave,
   getStaffDayInfo, fmtDay, fmtDate, fmtDateRange,
-  runScheduler, whyUnscheduled, primaryStaffOf,
+  runScheduler, whyUnscheduled, primaryStaffOf, tagOk,
 } from './scheduler.js';
 
 /* ============================================================
@@ -106,11 +106,11 @@ function seedStaff() {
 
 function seedTemplates() {
   return [
-    { id: 'tp_1', name: 'Bracket Weld - Standard', category: 'Brackets & Frames', tags: [], process: 'Robotic MIG Welding', hoursPerUnit: 0.5, equipmentIds: ['eq_1', 'eq_2', 'eq_3', 'eq_4'], totalValuePerUnit: 120, departmentValuePerUnit: 45 },
-    { id: 'tp_2', name: 'Chassis Frame Weld', category: 'Brackets & Frames', tags: ['5T Positioner'], process: 'Robotic TIG Welding', hoursPerUnit: 2, equipmentIds: ['eq_1', 'eq_2', 'eq_4'], totalValuePerUnit: 850, departmentValuePerUnit: 310 },
-    { id: 'tp_3', name: 'Hydraulic Shaft HVOF Coating', category: 'Shafts & Rollers', tags: [], process: 'Thermal Spray - HVOF', hoursPerUnit: 1.5, equipmentIds: ['eq_5', 'eq_6'], totalValuePerUnit: 640, departmentValuePerUnit: 210 },
-    { id: 'tp_4', name: 'Turbine Blade Plasma Coat', category: 'Turbine Components', tags: [], process: 'Thermal Spray - Plasma Spray', hoursPerUnit: 3, equipmentIds: ['eq_5'], totalValuePerUnit: 2100, departmentValuePerUnit: 780 },
-    { id: 'tp_5', name: 'Wear Plate Arc Spray', category: 'Wear Plates', tags: [], process: 'Thermal Spray - Arc Spray', hoursPerUnit: 1, equipmentIds: ['eq_6'], totalValuePerUnit: 300, departmentValuePerUnit: 95 },
+    { id: 'tp_1', name: 'Bracket Weld - Standard', category: 'Brackets & Frames', tags: [], process: 'Robotic MIG Welding', hoursPerUnit: 0.5, totalValuePerUnit: 120, departmentValuePerUnit: 45 },
+    { id: 'tp_2', name: 'Chassis Frame Weld', category: 'Brackets & Frames', tags: ['5T Positioner'], process: 'Robotic TIG Welding', hoursPerUnit: 2, totalValuePerUnit: 850, departmentValuePerUnit: 310 },
+    { id: 'tp_3', name: 'Hydraulic Shaft HVOF Coating', category: 'Shafts & Rollers', tags: [], process: 'Thermal Spray - HVOF', hoursPerUnit: 1.5, totalValuePerUnit: 640, departmentValuePerUnit: 210 },
+    { id: 'tp_4', name: 'Turbine Blade Plasma Coat', category: 'Turbine Components', tags: [], process: 'Thermal Spray - Plasma Spray', hoursPerUnit: 3, totalValuePerUnit: 2100, departmentValuePerUnit: 780 },
+    { id: 'tp_5', name: 'Wear Plate Arc Spray', category: 'Wear Plates', tags: [], process: 'Thermal Spray - Arc Spray', hoursPerUnit: 1, totalValuePerUnit: 300, departmentValuePerUnit: 95 },
   ];
 }
 
@@ -2347,6 +2347,18 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
    TEMPLATES VIEW
    ============================================================ */
 
+// Which equipment a template's jobs will actually schedule on — the same
+// process + capability-tag test the scheduler itself applies (tagOk), not a
+// stored, manually-picked list. (#23) A template's "equipment this can run
+// on" used to be a MultiCheck the user filled in by hand, defaulting to
+// every process-capable machine if left alone — indistinguishable, at a
+// glance, from "the scheduler will only use these", when the scheduler
+// never looked at it. Deriving it live keeps the display honest and means
+// it can never drift from what the engine actually does.
+function equipmentForTemplate(t, equipment) {
+  return equipment.filter((e) => e.processes.includes(t.process) && tagOk(t, e));
+}
+
 // Group templates by category (untitled → "Uncategorised"), sorted by name.
 function groupTemplatesByCategory(templates) {
   const map = {};
@@ -2390,10 +2402,9 @@ function TemplatesView({ templates, equipment, processes, categories = [], readO
                     </div>
                   )}
                   <div className="flex flex-wrap gap-1 mt-2">
-                    {t.equipmentIds.map((id) => {
-                      const eq = equipment.find((e) => e.id === id);
-                      return eq ? <span key={id} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{eq.name}</span> : null;
-                    })}
+                    {equipmentForTemplate(t, equipment).map((eq) => (
+                      <span key={eq.id} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{eq.name}</span>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -4093,11 +4104,14 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
   const [process, setProcess] = useState(template?.process || processes[0] || '');
   const [procedureId, setProcedureId] = useState(template?.procedureId || '');
   const [hoursPerUnit, setHoursPerUnit] = useState(template?.hoursPerUnit ?? 1);
-  const [equipmentIds, setEquipmentIds] = useState(template?.equipmentIds || []);
   const [totalValuePerUnit, setTotalValuePerUnit] = useState(template?.totalValuePerUnit ?? '');
   const [departmentValuePerUnit, setDepartmentValuePerUnit] = useState(template?.departmentValuePerUnit ?? '');
 
   const compatibleEquip = equipment.filter((e) => e.processes.includes(process));
+  // Live preview of what the scheduler will actually use — same test as
+  // equipmentForTemplate/tagOk, run against the in-progress process/tags
+  // rather than the saved template, so it updates as either is edited.
+  const matchingEquip = compatibleEquip.filter((e) => tagOk({ tags }, e));
   const procsForProcess = procedures.filter((p) => p.process === process);
   // Keep a template's existing category selectable even if it has since been
   // removed from the list, so opening an old template doesn't silently
@@ -4121,7 +4135,7 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
       </Field>
       <Field label="Process">
         <select className={inputCls} value={process} onChange={(e) => {
-          const nv = e.target.value; setProcess(nv); setEquipmentIds([]);
+          const nv = e.target.value; setProcess(nv);
           const fm = procedures.filter((p) => p.process === nv);
           setProcedureId(fm.some((p) => p.id === procedureId) ? procedureId : (fm[0] ? fm[0].id : ''));
         }}>
@@ -4149,10 +4163,19 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
       </div>
       <p className="text-xs text-slate-500 -mt-2 mb-3">If set, these pre-fill a new job's total and department value based on quantity — still editable per job.</p>
       <Field label="Equipment this can run on">
+        <p className="text-xs text-slate-500 mb-2">
+          Determined automatically from the process and capability requirements above, not picked by hand — a job only ever schedules on equipment that matches both.
+        </p>
         {compatibleEquip.length === 0 ? (
           <p className="text-xs text-slate-500">No equipment supports this process yet — add it under Equipment &amp; Staff.</p>
+        ) : matchingEquip.length === 0 ? (
+          <p className="text-xs text-amber-400">No equipment currently has every required capability tag — jobs from this template won't be placeable until one does.</p>
         ) : (
-          <MultiCheck options={compatibleEquip} value={equipmentIds} onChange={setEquipmentIds} getId={(e) => e.id} getLabel={(e) => e.name} />
+          <div className="flex flex-wrap gap-1.5">
+            {matchingEquip.map((e) => (
+              <span key={e.id} className="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300">{e.name}</span>
+            ))}
+          </div>
         )}
       </Field>
       <div className="flex justify-end gap-2 pt-2 border-t border-slate-800 mt-3">
@@ -4167,7 +4190,6 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
             process,
             procedureId,
             hoursPerUnit: Number(hoursPerUnit) || 1,
-            equipmentIds: equipmentIds.length ? equipmentIds : compatibleEquip.map((e) => e.id),
             totalValuePerUnit: totalValuePerUnit === '' ? null : Number(totalValuePerUnit),
             departmentValuePerUnit: departmentValuePerUnit === '' ? null : Number(departmentValuePerUnit),
           })}

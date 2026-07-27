@@ -379,6 +379,30 @@ deliberately instead of being silently overwritten. Only tags propagate —
 pushing `hoursPerUnit` or `process` retroactively would rewrite jobs already
 being worked to a plan.
 
+### A template's "equipment this can run on" is derived, not stored (#23)
+
+`TemplateModal` used to have a manual `MultiCheck` for this, saved as
+`template.equipmentIds` — and defaulting to *every* process-capable machine
+if left untouched. It looked like a scoping decision the user made, but the
+scheduler never read it: `runScheduler`/`whyUnscheduled` only ever place a
+job by `job.process` + `tagOk(job, equip)` (capability tags), which come
+from the template's `process`/`tags`, not `equipmentIds`. A template edited
+to require a positioner tag, then left with its old (untouched) equipment
+list, would still show a machine without that positioner as "this can run
+on" — actively wrong, not just unused.
+
+Fixed by deleting the field. `equipmentForTemplate(t, equipment)` (used by
+`TemplatesView`'s card and `TemplateModal`'s read-only "Equipment this can
+run on" display) runs the same `equipment.processes.includes(t.process) &&
+tagOk(t, e)` test the engine does, live against the in-progress `process`
+and `tags` in the modal — so the list updates as you edit either, and can
+never drift from what the scheduler will actually do. If it comes back
+empty because a tag is unsatisfiable, the modal says so instead of silently
+showing nothing. Don't reintroduce a stored, user-picked equipment list here
+— if a *narrower* restriction than process+tags is ever wanted, model it as
+another capability tag, not a second parallel mechanism the scheduler has to
+consult.
+
 ### Roster availability
 
 A roster day is `{ working, production, shift, hours }`. `production: false`
