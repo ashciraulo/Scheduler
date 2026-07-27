@@ -351,6 +351,53 @@ grid no longer cares about calendar month boundaries at all, just an
 arbitrary contiguous window the user controls, from a detailed few days up to
 a couple of months for a broad workload view.
 
+**Scroll/zoom (#26, #27)**: the day header row and the 240px job-description
+column both need to stay on screen while scrolling the grid — a spreadsheet
+frozen row/column. That requires a single element that actually scrolls in
+both axes for `position: sticky` to stick *within*: the previous layout put
+horizontal scroll on one `overflow-x-auto` div with an unbounded-height inner
+content div, which per the CSS overflow spec quietly makes that div a
+scrolling container in the *vertical* axis too (an explicit `overflow-x`
+forces the other axis off `visible`) — except it never actually scrolls
+vertically (nothing constrains its height), so it silently swallows any
+`sticky top` positioning without ever visibly doing anything, and the page
+itself scrolls instead. Fixed by giving the grid one `overflow-auto` wrapper
+with an explicit `maxHeight` (`65vh`/`80vh` in display mode) so both axes
+scroll together inside it, then `sticky top-0` on the day header row, `sticky
+left-0` on the corner cell and on every job-name cell (each needs its own
+*opaque* background — `bg-slate-900` — since day columns keep scrolling
+underneath a sticky cell horizontally, and without a solid background they'd
+show through). The per-equipment name label was already using this
+`sticky left-0` trick (no top-stickiness needed there — that row scrolls away
+vertically on purpose, only its horizontal position is pinned within its own
+row).
+
+Zoom (`colWidth`/`laneH` scaled by a `zoom` state, 60%–160% in 20% steps, via
++/− buttons next to the range-length picker) exists specifically so a
+fully-booked machine's stacked jobs don't push the next piece of equipment
+off-screen — without it, dragging a job between two machines can require
+scrolling one of them out of view first. Not persisted; it's a viewing
+preference for the moment, not schedule data.
+
+### A job's equipment and start date are editable in its own modal (#28)
+
+`JobModal` shows an "Equipment" select and a "Planned start date" input,
+reflecting wherever the job currently sits (auto-placed or pinned) — the same
+information the Schedule view's tiles show, but editable without the job
+needing to be on-screen or draggable there first. Only equipment satisfying
+the job's process + capability tags is offered (`tagOk`, same test the
+scheduler applies), matching what a drag would accept.
+
+Editing either field and saving builds the exact assignment shape
+`handleDrop` builds for a drag-and-drop reassignment (`pinned: true, days:
+[]`, letting the next recompute fill in the day-by-day plan) — this **is** a
+manual placement, not a separate mechanism. Left untouched, the job keeps
+whatever assignment it already had, pinned or not: the fields are compared
+against their original values at save time, so merely opening and saving the
+modal never force-pins an auto-placed job. Clearing the equipment field back
+to "Automatic" unpins a pinned job the same way the existing "Unpin" button
+does.
+
 ### Template categories
 
 Categories are a managed list (`wf_categories`), not free text typed per
@@ -629,6 +676,13 @@ fields exist so a future sync layer has a clean contract.
   value is form data" from "this native input's value is a live filter" at
   the `Modal` level. Worst case is one spurious "Discard changes?" click on a
   search box that had nothing to lose; not worth per-field opt-outs for.
+- **`Modal` locks `document.body`'s scroll for its own lifetime** (#25), on
+  top of its own dialog having `overflow-y-auto overscroll-contain`. Without
+  the lock, wheeling over the backdrop (not inside the dialog, which has
+  nothing scrollable there to catch the event) scrolled the page underneath;
+  without `overscroll-contain`, wheeling inside the dialog past its own
+  top/bottom edge "chained" the rest of the scroll to the page behind it —
+  both are real, independent leaks and both are needed.
 - `Modal` takes a `size` prop (`'md'` default, `'lg'` = the old `wide` boolean,
   `'xl'` for a dense multi-column table like the WIP import) via the
   `MODAL_WIDTH` map. When a table inside a modal still looks cramped after
