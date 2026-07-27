@@ -18,6 +18,9 @@ import jobModalLayout from './specs/job-modal-layout.mjs';
 import scheduleAndJobmodalPolish from './specs/schedule-and-jobmodal-polish.mjs';
 import templateProcessEditing from './specs/template-process-editing.mjs';
 import staffColorAndLeaveEditing from './specs/staff-color-and-leave-editing.mjs';
+import jobmodalStylingAndDeptdue from './specs/jobmodal-styling-and-deptdue.mjs';
+import manualAssignOverride from './specs/manual-assign-override.mjs';
+import batching from './specs/batching.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -35,6 +38,9 @@ const SUITES = [
   ['schedule + job modal polish (#35, #36, #37)', scheduleAndJobmodalPolish],
   ['template process editing (#38, #39)', templateProcessEditing],
   ['staff colour + leave editing (#40, #41)', staffColorAndLeaveEditing],
+  ['job modal styling + department due date (#43, #44)', jobmodalStylingAndDeptdue],
+  ['manual assignment override (#46)', manualAssignOverride],
+  ['batching (#47)', batching],
 ];
 
 const only = process.argv[2]; // optional substring filter

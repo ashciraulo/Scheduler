@@ -16,7 +16,7 @@ import {
   defaultWeeklyRoster, absenceKindLabel, normalizeStaff,
   isoDate, addDays, generateCalendarDays, isWeekendDate, isOnLeave,
   getStaffDayInfo, fmtDay, fmtDate, fmtDateRange,
-  runScheduler, whyUnscheduled, primaryStaffOf, tagOk, findStaffConflictJobs,
+  runScheduler, whyUnscheduled, primaryStaffOf, tagOk, findStaffConflictJobs, effectiveDueDate,
 } from './scheduler.js';
 
 /* ============================================================
@@ -35,6 +35,11 @@ import {
    quantity / hoursTotal        →  Job Planning Line quantity / quantity (hours)
    readyDate                    →  no direct BC equivalent (internal scheduling gate)
    dueDate                      →  Job Task Line "Ending Date" (target completion date)
+   departmentDueDate            →  no BC equivalent — optional, internal-only. When the client/
+                                    end-of-month date in dueDate isn't actually when THIS department
+                                    has to finish (there's scope after us — machining, assembly,
+                                    etc.), this is the earlier date we're really working to. Wins
+                                    over dueDate for scheduling order whenever it's set.
    percentComplete              →  informational status field — NOT the same as BC's calculated
                                     WIP % (BC derives WIP from actual vs. budgeted cost/sales
                                     ledger entries). Push this to a custom/status field, not the
@@ -125,7 +130,7 @@ function seedJobs() {
   ];
 }
 
-function mkJob({ name, process, quantity, hoursPerUnit, dueDate, readyDate = null, templateId = null, notes = '', totalValue = 0, departmentValue = 0, percentComplete = 0, needsFurtherProcessing = false }) {
+function mkJob({ name, process, quantity, hoursPerUnit, dueDate, departmentDueDate = null, readyDate = null, templateId = null, notes = '', totalValue = 0, departmentValue = 0, percentComplete = 0, needsFurtherProcessing = false }) {
   return {
     id: uid('job'),
     name,
@@ -133,6 +138,10 @@ function mkJob({ name, process, quantity, hoursPerUnit, dueDate, readyDate = nul
     quantity,
     hoursTotal: Math.round(quantity * hoursPerUnit * 100) / 100,
     dueDate,
+    // null = the client/target due date in dueDate is also when this
+    // department has to be done. Set only when there's scope after us and
+    // our own deadline is genuinely earlier — see the data-model comment.
+    departmentDueDate,
     readyDate: readyDate || isoDate(new Date()),
     templateId,
     notes,
@@ -146,6 +155,10 @@ function mkJob({ name, process, quantity, hoursPerUnit, dueDate, readyDate = nul
     needsFurtherProcessing: !!needsFurtherProcessing,
     status: 'active',
     completedDate: null,
+    // null = not part of a batch — see createBatch/leaveBatch and
+    // groupBatches in scheduler.js.
+    batchId: null,
+    batchOrder: null,
     tags: [],
     procedureId: '',
     bcJobNo: '',
@@ -363,7 +376,12 @@ function Field({ label, children }) {
 function Section({ title, defaultOpen = true, children }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="border border-slate-800 rounded-lg mb-3 bg-slate-900/40">
+    // bg-slate-800/50, not bg-slate-900/40 — every other boxed panel in this
+    // file uses /50 or /60 opacity on slate-800, which index.css remaps for
+    // the light theme; /40 on slate-900 isn't one of the mapped variants, so
+    // it fell through to raw Tailwind dark-slate and rendered as a washed-out
+    // grey box with low-contrast text once opened (#43).
+    <div className="border border-slate-800 rounded-lg mb-3 bg-slate-800/50">
       <button
         type="button"
         className="w-full flex items-center justify-between px-3 py-2 text-left"
@@ -1041,6 +1059,7 @@ export default function WeldingScheduler() {
   const [pendingComplete, setPendingComplete] = useState(null);   // job awaiting actual-hours entry
   const [confirmDelete, setConfirmDelete] = useState(null); // {type, id, name}
   const [parallelConflict, setParallelConflict] = useState(null); // {job, candidates}
+  const [manualAssignConflict, setManualAssignConflict] = useState(null); // {job, person, blockers}
 
   const [dragJobId, setDragJobId] = useState(null);
   const [dropHint, setDropHint] = useState(null); // {equipId, date}
@@ -1167,7 +1186,7 @@ export default function WeldingScheduler() {
   const busyEditing = !!(
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
-    || timeLogDate || parallelConflict
+    || timeLogDate || parallelConflict || manualAssignConflict
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1241,6 +1260,57 @@ export default function WeldingScheduler() {
     showToast(`Parallel processing allowed on ${target?.name || 'the job'} — it can now share an operator with other work.`);
   }
 
+  // A manual staff assignment (#46) is a hard restriction the scheduler
+  // honours by waiting for that person (see eligibleStaffIds) — but a PINNED
+  // job already using them for the days this one needs isn't "waiting for",
+  // it's a standing claim runScheduler settles before the manual job even
+  // gets a turn (pinned jobs place first). Left alone, the manually-assigned
+  // job just lands in "Needs scheduling" with a reason naming them, and
+  // there's no way forward short of hunting down whatever's got them and
+  // unpinning it by hand. This finds it for you.
+  function findManualAssignBlockers(job, jobsList) {
+    if (!job.staffId || job.assignment) return [];
+    const from = job.readyDate;
+    const blockers = new Map();
+    jobsList.forEach((j) => {
+      if (j.id === job.id || j.status === 'complete') return;
+      const units = Array.isArray(j.parts) ? j.parts : [j];
+      const holdsThem = units.some((u) =>
+        u.assignment?.pinned && (u.assignment.days || []).some((d) => d.staffId === job.staffId && d.date >= from));
+      if (holdsThem) blockers.set(j.id, j);
+    });
+    return [...blockers.values()];
+  }
+  function checkManualAssignConflict(result, jobId) {
+    const justPlaced = result.find((j) => j.id === jobId);
+    if (!justPlaced || !justPlaced.staffId || justPlaced.assignment) return;
+    const person = staff.find((s) => s.id === justPlaced.staffId);
+    if (!person) return;
+    const blockers = findManualAssignBlockers(justPlaced, result);
+    if (blockers.length) setManualAssignConflict({ job: justPlaced, person, blockers });
+  }
+  // Unpinning doesn't hand the person over directly — it just frees the
+  // blocker to be re-placed like any other unpinned job, so the manually-
+  // assigned job gets first call on them (manual assignments place before
+  // automatic ones — see runScheduler) while the freed job finds itself
+  // another slot, another operator, or another day. Re-checks afterwards in
+  // case more than one blocker was in the way.
+  function unpinForManualAssign(targetJobId, blockerIds) {
+    const targets = new Set(blockerIds);
+    const updated = jobs.map((j) => {
+      if (!targets.has(j.id)) return j;
+      const stamp = { updatedAt: new Date().toISOString() };
+      if (Array.isArray(j.parts)) {
+        return { ...j, ...stamp, parts: j.parts.map((p) => ({ ...p, assignment: p.assignment ? { ...p.assignment, pinned: false } : null })) };
+      }
+      return { ...j, ...stamp, assignment: j.assignment ? { ...j.assignment, pinned: false } : null };
+    });
+    const result = recompute(updated, equipment, staff);
+    setManualAssignConflict(null);
+    checkManualAssignConflict(result, targetJobId);
+    showToast(`Unpinned ${blockerIds.length} job${blockerIds.length === 1 ? '' : 's'} so it can be rescheduled.`);
+  }
+
   // ---------- job actions ----------
   function addOrUpdateJob(jobData, isNew) {
     const stamped = { ...jobData, updatedAt: new Date().toISOString() };
@@ -1252,6 +1322,7 @@ export default function WeldingScheduler() {
     }
     const result = recompute(newJobs, equipment, staff);
     checkParallelConflict(result, stamped.id);
+    checkManualAssignConflict(result, stamped.id);
     setEditingJob(null);
   }
   function importJobs(newJobs, consumedParkIds) {
@@ -1376,6 +1447,26 @@ export default function WeldingScheduler() {
     recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
     setEditingJob(null);
     showToast(`${job.name}'s parts merged back into one job.`);
+  }
+  // A batch (#47) is jobs the user has said are the same scope and should run
+  // back to back on one machine rather than wherever the scheduler happens to
+  // find room first — see groupBatches/sliceBatchPlan in scheduler.js for how
+  // that's actually enforced. Creating one just tags the jobs; the engine
+  // does the rest on the next recompute.
+  function createBatch(jobIds) {
+    const batchId = uid('batch');
+    const now = new Date().toISOString();
+    const updated = jobs.map((j) => {
+      const order = jobIds.indexOf(j.id);
+      return order === -1 ? j : { ...j, batchId, batchOrder: order, updatedAt: now };
+    });
+    recompute(updated, equipment, staff);
+    showToast(`Batched ${jobIds.length} jobs — they'll run back to back on the same equipment.`);
+  }
+  function leaveBatch(job) {
+    const updated = jobs.map((j) => (j.id === job.id ? { ...j, batchId: null, batchOrder: null, updatedAt: new Date().toISOString() } : j));
+    recompute(updated, equipment, staff);
+    showToast(`${job.name} removed from its batch.`);
   }
   function handleDrop(equipId, date) {
     if (readOnly || !dragJobId) return;
@@ -1656,6 +1747,7 @@ export default function WeldingScheduler() {
           hoursTotal: p.hoursTotal,
           readyDate: j.readyDate,
           dueDate: j.dueDate,
+          departmentDueDate: j.departmentDueDate,
           assignment: p.assignment,
           unschedReason: p.unschedReason,
           _parentJob: j,
@@ -1786,6 +1878,8 @@ export default function WeldingScheduler() {
             onToggleComplete={toggleComplete}
             onUnpin={unpinJob}
             onDelete={(j) => setConfirmDelete({ type: 'job', id: j.id, name: j.name })}
+            onCreateBatch={createBatch}
+            onLeaveBatch={leaveBatch}
           />
         )}
 
@@ -2011,6 +2105,47 @@ export default function WeldingScheduler() {
           </p>
           <div className="flex justify-end">
             <button className={btnGhost} onClick={() => setParallelConflict(null)}>Leave overbooked</button>
+          </div>
+        </Modal>
+      )}
+
+      {manualAssignConflict && (
+        <Modal title="Person already committed elsewhere" onClose={() => setManualAssignConflict(null)}>
+          <p className="text-sm text-slate-300 mb-3">
+            <span className="font-semibold text-slate-100">{manualAssignConflict.job.name}</span> is manually
+            assigned to <span className="font-semibold text-slate-100">{manualAssignConflict.person.name}</span>,
+            but they're already pinned to{' '}
+            {manualAssignConflict.blockers.length === 1 ? 'this job' : `these ${manualAssignConflict.blockers.length} jobs`}
+            {' '}for the days it needs. Unpinning frees it to be rescheduled — onto other equipment, another day, or
+            another operator — while this job takes the priority you gave it.
+          </p>
+          <div className="space-y-1.5 mb-4">
+            {manualAssignConflict.blockers.map((b) => (
+              <button
+                key={b.id}
+                type="button"
+                className="w-full text-left text-sm bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-2 text-slate-200"
+                onClick={() => unpinForManualAssign(manualAssignConflict.job.id, [b.id])}
+              >
+                Unpin <span className="font-semibold">{b.name}</span> so it can move elsewhere
+              </button>
+            ))}
+            {manualAssignConflict.blockers.length > 1 && (
+              <button
+                type="button"
+                className="w-full text-left text-sm bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-2 text-slate-200"
+                onClick={() => unpinForManualAssign(manualAssignConflict.job.id, manualAssignConflict.blockers.map((b) => b.id))}
+              >
+                Unpin all {manualAssignConflict.blockers.length} so {manualAssignConflict.person.name} is free
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-slate-500 mb-3">
+            {manualAssignConflict.person.name} isn't guaranteed to end up on the unpinned job again — if nobody
+            else is free it may stay with them anyway. Check where things land afterwards.
+          </p>
+          <div className="flex justify-end">
+            <button className={btnGhost} onClick={() => setManualAssignConflict(null)}>Leave unscheduled</button>
           </div>
         </Modal>
       )}
@@ -2407,7 +2542,7 @@ function ScheduleView({
                   <div className="font-medium text-slate-200 truncate">
                     <span className="font-mono text-[10px]" style={{ color: '#E0523C' }}>{(j._parentJob || j).bcJobNo || '—'}</span> {j.name}
                   </div>
-                  <div className="text-slate-500">{j.hoursTotal}h · ready {fmtDate(j.readyDate)} · due {fmtDate(j.dueDate)} · {j.unschedReason || 'no capacity or compatible resource found in horizon'}</div>
+                  <div className="text-slate-500">{j.hoursTotal}h · ready {fmtDate(j.readyDate)} · due {fmtDate(effectiveDueDate(j))} · {j.unschedReason || 'no capacity or compatible resource found in horizon'}</div>
                 </div>
               ))}
             </div>
@@ -2422,14 +2557,25 @@ function ScheduleView({
    BACKLOG VIEW (table of all jobs)
    ============================================================ */
 
-function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, onImport, onOpenParked, parkedCount = 0, onEdit, onToggleComplete, onUnpin, onDelete }) {
+function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, onImport, onOpenParked, parkedCount = 0, onEdit, onToggleComplete, onUnpin, onDelete, onCreateBatch, onLeaveBatch }) {
   const [filter, setFilter] = useState('active');
+  const [selected, setSelected] = useState(new Set());
   const filtered = jobs.filter((j) => (filter === 'all' ? true : filter === 'complete' ? j.status === 'complete' : j.status !== 'complete'));
   // Same ordering the scheduler uses, so the list reads in the order the work
   // will actually be taken up.
   const sorted = [...filtered].sort((a, b) =>
-    (new Date(a.dueDate) - new Date(b.dueDate))
+    (new Date(effectiveDueDate(a)) - new Date(effectiveDueDate(b)))
     || ((b.needsFurtherProcessing ? 1 : 0) - (a.needsFurtherProcessing ? 1 : 0)));
+
+  // Batching (#47): jobs that are really the same scope, meant to run back to
+  // back on one machine instead of scattering across whichever is free
+  // first. A row is only offerable if it could actually join a group —
+  // already-split (independently-placed parts) or already-batched jobs
+  // aren't, and neither is anything already complete.
+  const batchable = (j) => !Array.isArray(j.parts) && !j.batchId && j.status !== 'complete';
+  const toggleSelected = (id) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const selectedJobs = sorted.filter((j) => selected.has(j.id));
+  const sameProcess = selectedJobs.length > 1 && selectedJobs.every((j) => j.process === selectedJobs[0].process);
 
   return (
     <div>
@@ -2443,6 +2589,19 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
         </div>
         {!readOnly && (
           <div className="flex items-center gap-2">
+            {selected.size > 0 && (
+              <>
+                <button
+                  className={`${btnGhost} ${!sameProcess ? 'opacity-40 cursor-not-allowed' : ''}`}
+                  disabled={!sameProcess}
+                  title={sameProcess ? 'Run these back to back on the same equipment' : 'Select 2+ jobs with the same process to batch them'}
+                  onClick={() => { onCreateBatch(selectedJobs.map((j) => j.id)); setSelected(new Set()); }}
+                >
+                  <LayoutGrid size={15} /> Batch {selected.size} jobs
+                </button>
+                <button className={btnGhost} onClick={() => setSelected(new Set())}>Clear selection</button>
+              </>
+            )}
             {parkedCount > 0 && (
               <button
                 className={btnGhost}
@@ -2462,6 +2621,7 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
         <table className="w-full text-sm min-w-[760px]">
           <thead>
             <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+              {!readOnly && <th className="px-3 py-2 font-medium w-8"></th>}
               <th className="px-3 py-2 font-medium">Job #</th>
               <th className="px-3 py-2 font-medium">Job</th>
               <th className="px-3 py-2 font-medium">Process</th>
@@ -2488,11 +2648,40 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
               const scheduledParts = isSplit ? j.parts.filter((p) => p.assignment || p.status === 'complete').length : 0;
               return (
                 <tr key={j.id} className="border-b border-slate-800/60 hover:bg-slate-800/40">
+                  {!readOnly && (
+                    <td className="px-3 py-2">
+                      {batchable(j) && (
+                        <input
+                          type="checkbox"
+                          className="accent-amber-500"
+                          checked={selected.has(j.id)}
+                          onChange={() => toggleSelected(j.id)}
+                          title="Select to batch with other jobs of the same process"
+                        />
+                      )}
+                    </td>
+                  )}
                   <td className="px-3 py-2 font-mono text-xs text-slate-400 whitespace-nowrap cursor-pointer" onClick={() => onEdit(j)}>{j.bcJobNo || '—'}</td>
                   <td className="px-3 py-2 font-medium text-slate-200 cursor-pointer" onClick={() => onEdit(j)}>
                     <span className="flex items-center gap-1.5">
                       {j.name}
                       {isSplit && <span title="Split into two parts" className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400">split</span>}
+                      {j.batchId && (
+                        <span
+                          title={`Batched — runs back to back on the same equipment as the rest of this batch (position ${(j.batchOrder ?? 0) + 1})`}
+                          className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-sky-950/60 text-sky-300 border border-sky-900"
+                        >
+                          batch #{(j.batchOrder ?? 0) + 1}
+                          {!readOnly && (
+                            <button
+                              type="button"
+                              title="Remove from batch"
+                              className="hover:text-red-400"
+                              onClick={(e) => { e.stopPropagation(); onLeaveBatch(j); }}
+                            ><X size={10} /></button>
+                          )}
+                        </span>
+                      )}
                     </span>
                   </td>
                   <td className="px-3 py-2 text-slate-400">{j.process}</td>
@@ -2523,8 +2712,12 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
                   </td>
                   <td className="px-3 py-2 text-slate-400">{fmtDate(j.readyDate)}</td>
                   <td className="px-3 py-2 text-slate-400">
-                    <span className="flex items-center gap-1 whitespace-nowrap">
-                      {fmtDate(j.dueDate)}
+                    <span className="flex items-center gap-1 whitespace-nowrap" title={j.departmentDueDate ? `Client/target date: ${fmtDate(j.dueDate)}` : undefined}>
+                      {/* The date actually driving scheduling order — the
+                          department due date when set (#44), the client/
+                          target date otherwise — shown amber to flag that
+                          it's not the client-facing date on this job. */}
+                      <span className={j.departmentDueDate ? 'text-amber-400 font-medium' : undefined}>{fmtDate(effectiveDueDate(j))}</span>
                       {j.needsFurtherProcessing && (
                         <span title="Needs further processing after this department — takes priority on an equal due date" className="text-[10px] px-1 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-900">+proc</span>
                       )}
@@ -3001,6 +3194,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [needsFurtherProcessing, setNeedsFurtherProcessing] = useState(!!job?.needsFurtherProcessing);
   const [parallelProcessing, setParallelProcessing] = useState(!!job?.parallelProcessing);
   const [dueDate, setDueDate] = useState(job?.dueDate || addDays(isoDate(new Date()), 14));
+  const [departmentDueDate, setDepartmentDueDate] = useState(job?.departmentDueDate || '');
   const [notes, setNotes] = useState(job?.notes || '');
   const [custom, setCustom] = useState(isNew ? false : !job.templateId);
   const [totalValue, setTotalValue] = useState(job?.totalValue ?? (templates[0]?.totalValuePerUnit ? templates[0].totalValuePerUnit * (job?.quantity ?? 1) : 0));
@@ -3108,6 +3302,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       quantity: Number(quantity) || 1,
       readyDate,
       dueDate,
+      departmentDueDate: departmentDueDate || null,
       needsFurtherProcessing,
       parallelProcessing,
       templateId: custom ? null : templateId,
@@ -3234,6 +3429,22 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               </Field>
             </div>
             <p className="text-xs text-slate-500 -mt-2 mb-3">The job will never be auto-scheduled — or allowed to be dragged — before the ready date, since materials/prior-stage work won't be in your department yet.</p>
+
+            {/* Optional and separate from the due date above on purpose (#44):
+                that date is when the client (or an end-of-month target) needs
+                the finished job — not necessarily when THIS department needs
+                to be done with it, if there's further scope after us. Setting
+                this is what actually makes that earlier, so the scheduler
+                treats it as binding instead of just the same-due-date
+                needsFurtherProcessing tie-break below. */}
+            <Field label="Department due date (optional)">
+              <input type="date" className={inputCls} value={departmentDueDate} onChange={(e) => setDepartmentDueDate(e.target.value)} />
+            </Field>
+            <p className="text-xs text-slate-500 -mt-2 mb-3">
+              {departmentDueDate
+                ? `This department is scheduling to ${fmtDate(departmentDueDate)}, not the ${fmtDate(dueDate)} client/target date above — there's scope after us and that's when we actually need to be finished.`
+                : "Leave blank if the due date above is also when this department needs to be finished. Set this only when there's further scope after us and our own deadline is earlier."}
+            </p>
 
             <label className="flex items-start gap-2 mb-3 cursor-pointer">
               <input

@@ -239,7 +239,9 @@ exports sensibly.
 ### Scheduling invariants (don't break these)
 
 - A job never schedules before its `readyDate`.
-- Unpinned jobs are placed earliest-due first. On an **equal** due date, a job
+- Unpinned jobs are placed earliest-due first, using `effectiveDueDate(job)`
+  (`job.departmentDueDate || job.dueDate`), not `job.dueDate` directly — see
+  "Department due date" below. On an **equal** effective due date, a job
   flagged `needsFurtherProcessing` goes first — it still faces machining or
   manual work after this department, so the same due date leaves it strictly
   less slack than one that ships straight from here. `BacklogView` sorts the
@@ -277,21 +279,35 @@ exports sensibly.
   the equipment's shift capacity is topped up from the next-best person rather
   than left idle.
 - **A shift's equipment capacity scales to whoever's actually rostered onto
-  it, never truncates them at `SHIFT_DEFS[shift].defaultHours` (8h).** That
-  constant used to be a hard ceiling on `equipShiftUsed`, so someone rostered
-  a 12h day shift got cut off at 8h on the job they were doing and the
-  scheduler handed the rest of their day to an unrelated job on different
-  equipment — nonsensical, since they were still working the same 12-hour
-  day either way. `tryFit` now takes `shiftCapacity` as
-  `Math.max(defaultHours, ...actual rostered hours of eligible staff on that
-  shift that day)` (from `caps.staffDayHours`, a constant snapshot — unlike
-  `staffDayRemain`, which `consume()` decrements as the run places jobs, this
-  one never changes, so "how long could the shift run" and "how much of it's
-  left" stay distinct questions). `defaultHours` still matters as a floor for
-  a shift nobody eligible is rostered onto yet. A person's own `staffDayRemain`
-  is what actually stops them being double-counted across jobs — this only
-  fixes the *equipment*-side ceiling that was independently, and wrongly,
-  capping them shorter than their own roster already did.
+  it, never truncates them at `SHIFT_DEFS[shift].defaultHours` (8h) — but only
+  for a SINGLE person covering the block alone (#45).** The constant used to
+  be a hard ceiling on `equipShiftUsed`, so someone rostered a 12h day shift
+  got cut off at 8h on the job they were doing and the scheduler handed the
+  rest of their day to an unrelated job on different equipment — nonsensical,
+  since they were still working the same 12-hour day either way. The first
+  fix let `shiftCapacity` grow to `Math.max(defaultHours, ...rostered hours of
+  everyone eligible on that shift that day)` — but that was a **pool-wide**
+  max, so a completely different, ordinarily-rostered 8h person elsewhere in
+  the pool (e.g. busy on another job) was enough to inflate the whole block to
+  12h, and the fill loop would then happily stitch that 12h together from
+  *two different* 8h people (8h + 4h) as if one had handed off to the other
+  mid-shift. They hadn't — two people each rostered a normal shift are present
+  at the same clock hours as each other, not in relay, so that never
+  represented anything physically real.
+  `tryFit` now computes a `personalCap(sid)` per candidate — what *that
+  person alone* could offer, `Math.max(defaultHours, their own rostered hours
+  that shift)` — and the block's actual capacity (`shiftLeft`) only extends
+  past the default once we know who's *actually* covering it: the first
+  person to be placed in the fill loop can stretch it to their own personal
+  cap, but anyone who joins afterwards is bounded by whatever's left of that,
+  not handed a fresh extension of their own. Ranking (which candidate goes
+  first) still uses each candidate's `personalCap` so a genuinely available
+  long-rostered person is still preferred over a same-tied ordinary one — see
+  `test/scheduler.test.js` ("two ordinarily-rostered people... (#45)") for the
+  regression this fixes and "someone rostered longer... works all of it" for
+  the original, still-preserved #32 case. A person's own `staffDayRemain` is
+  what actually stops them being double-counted across jobs — none of this
+  touches that; it only bounds the *equipment*-side ceiling correctly.
 - **Staff assignment is sticky across recomputes.** Every recompute re-derives
   assignments from scratch, so without this the people on a job were free to
   change for no visible reason — most obviously when dragging a job to another
@@ -314,6 +330,23 @@ exports sensibly.
   assigned jobs place *before* automatic ones in the unpinned phase, since they
   have only one person to draw on. Split jobs carry the lock at job level; it
   applies to every part.
+  **Overriding a busy person (#46)**: this only wins against another
+  *unpinned* job automatically (placement order already favours it) — a
+  **pinned** job holding that person is a standing claim `runScheduler`
+  settles before the manual job gets a turn at all (pinned jobs place first,
+  full stop), so it just lands unscheduled instead. `findManualAssignBlockers`
+  (`WeldingScheduler.jsx`) is called right after a save that leaves a
+  staff-locked job with no assignment: it looks for pinned jobs (or pinned
+  parts) using that same person on or after the job's `readyDate` and, if it
+  finds any, opens a dialog naming them with an "Unpin so it can move
+  elsewhere" action per blocker. Unpinning doesn't hand the person over
+  directly — manual assignments already place first among unpinned jobs, so
+  the freed job is simply back in the pool to find another slot, operator, or
+  day on the next recompute, which the dialog re-checks (in case more than
+  one blocker was in the way). This is the staff-level equivalent of "a pin
+  onto an occupied day is not a conflict — the incumbent slides" above, except
+  surfaced as a choice rather than automatic, since unpinning is a bigger deal
+  than reordering same-day claims and the user should see what's being moved.
 - Pinned jobs are placed **earliest-start-first**, not in array order, so a
   pinned job starting sooner gets first call on the roster.
 - **Equipment is exclusively "set up" for one job at a time, for that job's
@@ -337,6 +370,28 @@ exports sensibly.
   It's what lets a 5-hour job and a 3-hour job share one day cleanly.
 - Every job mutation stamps `updatedAt` (used later for delta sync to Business
   Central).
+
+### Department due date vs. client due date (#44)
+
+`job.dueDate` is when the job is due to the client, or an end-of-month
+target — it isn't necessarily when *this* department has to be finished with
+it. A job with further scope after us (machining, assembly, a second process)
+already had `needsFurtherProcessing` as a same-due-date tie-break, but that's
+a boolean, not a date: it only helped when two jobs happened to share a due
+date. `job.departmentDueDate` (optional, nullable) is the actual, different
+date this department is really working to — the client date minus however
+long the downstream work needs. `effectiveDueDate(job)` in `scheduler.js`
+(`job.departmentDueDate || job.dueDate`) is what every date comparison the
+engine makes actually uses — the unpinned placement sort, and `BacklogView`'s
+matching sort — so setting it genuinely reprioritises the job rather than
+just annotating it. `needsFurtherProcessing` still exists and still matters
+independently: it's the coarse "sometime, all else equal" signal for jobs
+that haven't been given a specific internal date. `JobModal` shows the field
+under "Due date" in the Scheduling section, and `BacklogView`'s Due column
+shows the effective date in amber (with the client date in a tooltip) when
+the two differ, so it's visible at a glance which jobs are running to an
+earlier, internal deadline. Split-job parts inherit it from the parent (same
+as `dueDate`) since it describes the job, not a specific part.
 
 ### Schedule view rendering
 
@@ -689,7 +744,13 @@ Note `.bg-slate-950/30` (used for past day cells) needed an explicit entry in
 `index.css` — that file remaps only the specific dark-slate utilities the app
 uses, so any *new* opacity variant falls through to raw Tailwind dark slate and
 renders as a heavy grey block in the light theme. Add a mapping when you reach
-for one.
+for one. This bit `Section` too (#43): it used `bg-slate-900/40`, the one
+opacity variant in the whole file that wasn't one of the mapped ones — every
+other boxed panel already used the correctly-mapped `bg-slate-800/50` or
+`/60` — so an open `Section` (the "Scheduling" block in JobModal, most
+visibly) rendered as a washed-out mid-grey box with its own text unreadable
+against it. Fixed by switching `Section` to `bg-slate-800/50` to match every
+other panel, rather than adding yet another one-off hex mapping.
 
 ## Assigning staff by hand
 
@@ -762,6 +823,64 @@ assignment }, ...]` and its own top-level `hoursTotal`/`percentComplete`/
 - If you change the job shape, keep `mkJob`, the `runScheduler` flatten/
   collapse step, `JobModal`'s save path, and `jobsByEquip` in `ScheduleView`
   in sync — they all assume the same `parts` shape.
+
+### Batches (#47)
+
+The mirror image of splitting: several separately-listed jobs that are really
+the same scope (identical components, same process) and should run back to
+back on **one** piece of equipment instead of being scattered across whichever
+machine the scheduler finds room on first. `job.batchId` groups them,
+`job.batchOrder` fixes the run sequence — set from the Job Backlog by ticking
+2+ active, non-split, not-yet-batched rows with the **same process** and
+clicking "Batch N jobs" (`createBatch` in the main component; disabled unless
+the process matches). "Remove from batch" (the `X` on a row's `batch #N` chip)
+clears just that one job's `batchId`/`batchOrder`, leaving the rest of the
+group intact.
+
+Splitting flattens one job into many schedulable units; batching does the
+reverse — **combine, then slice** — in `runScheduler` (`scheduler.js`):
+
+- `groupBatches(jobsIn)` only combines a group when it's safe to treat as one:
+  2+ members, all unpinned, none split (`.parts`), all the same `process`.
+  Anything that doesn't qualify — a member pinned on its own, a split job, a
+  mismatched process — falls back to being scheduled independently rather
+  than guessing; there's no single slot left to negotiate for a group like
+  that. This runs *before* the split-job flatten, and batch members are
+  excluded from the ordinary per-job pass.
+- Each qualifying group becomes **one pseudo-unit** (`id: "batch:<batchId>"`,
+  `_batchId`) with combined `hoursTotal` (sum), `tags` (union — the one
+  equipment has to satisfy every member's requirement for the whole run),
+  `readyDate` (the *latest* of the members' — the run can't start until
+  everyone's ready, and starting earlier would just imply a gap), effective
+  due date (the *earliest* of the members' — the group is only as un-urgent
+  as its most urgent member), `staffId` (only if every member happens to name
+  the same person, otherwise automatic), and `parallelProcessing`/
+  `needsFurtherProcessing` combined conservatively (needs **every** member's
+  agreement to share an operator, but **any** member's downstream scope is
+  enough to prioritise). This pseudo-unit goes through the exact same
+  unpinned-placement logic — equipment choice, `tryFit`, staff continuity — as
+  any ordinary job; no changes were needed there, which is the point of
+  combining first.
+- Once placed (or not), `sliceBatchPlan(plan, members)` distributes the one
+  combined day-by-day plan across members in `batchOrder`, splitting a single
+  plan entry across a member boundary when the hours don't land on a day/shift
+  edge — the same operator finishing one member and immediately starting the
+  next, same day, same equipment. Each member gets back an ordinary-shaped
+  `assignment` (own `startDate`/`endDate`/`days`, same `equipmentId` as every
+  other member, `pinned: false`). An unplaceable batch leaves **every**
+  member unscheduled together, sharing the one `unschedReason` — never a
+  partial placement.
+- Continuity across recomputes has nothing of its own to seed from (the
+  pseudo-unit is rebuilt fresh every run), so it borrows whichever member most
+  recently had a primary operator (`members.map(primaryStaffOf).find(Boolean)`)
+  as `seedStaffId`.
+
+Known simplification, accepted rather than engineered around: using the
+*latest* ready date as the combined floor can start the whole group a little
+later than strictly necessary if members have staggered ready dates, in
+exchange for guaranteeing the run stays genuinely contiguous rather than
+implying a gap partway through. Not worth a more elaborate per-member
+readiness model for what's meant to be a same-scope batch in the first place.
 
 ## Persistence — IMPORTANT
 

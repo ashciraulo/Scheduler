@@ -211,6 +211,17 @@ export function eligibleStaffIds(job, staff) {
   return qualified.map((s) => s.id);
 }
 
+// `dueDate` is when the job is due to the client (or an end-of-month target)
+// — it's not necessarily when THIS department has to be finished with it.
+// `departmentDueDate` (optional) is the earlier internal deadline for jobs
+// that still have scope after this department: the client due date less
+// however long that downstream work needs. Scheduling order cares about
+// whichever is actually binding on us, so every date comparison the engine
+// makes uses this instead of reading `job.dueDate` directly.
+export function effectiveDueDate(job) {
+  return job.departmentDueDate || job.dueDate;
+}
+
 // `allowParallel` is set for a job carrying the "parallel processing" tag
 // (#30) — the operator can nominally mind a second job while this one's
 // automation does the work, so it doesn't compete for the shared
@@ -242,19 +253,7 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
     for (const shift of SHIFT_ORDER) {
       if (remaining <= 0.001) break;
       const already = equipShiftUsed[equipId]?.[date]?.[shift] ?? 0;
-      // The equipment's shift-block capacity has to cover whoever's actually
-      // rostered onto it that day — a fixed default ceiling silently
-      // truncated anyone rostered longer than that (e.g. a 12h day shift) at
-      // the default's length, bouncing the rest of their day onto an
-      // unrelated job instead of letting them keep working the one they were
-      // already on. defaultHours only matters as a floor now, for a shift
-      // nobody eligible happens to be rostered onto yet.
-      const rosteredThisShift = compatibleStaffIds
-        .filter((sid) => staffDayShift[sid]?.[date] === shift)
-        .map((sid) => staffDayHours[sid]?.[date] ?? 0);
-      const shiftCapacity = Math.max(SHIFT_DEFS[shift].defaultHours, ...rosteredThisShift);
-      let shiftLeft = shiftCapacity - already;
-      if (shiftLeft <= 0.001) continue;
+      const defaultCap = SHIFT_DEFS[shift].defaultHours;
 
       // Everyone qualified, rostered onto this shift today — with hours to
       // give, unless this job doesn't need them exclusively (allowParallel).
@@ -262,9 +261,26 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
         (sid) => staffDayShift[sid]?.[date] === shift && (allowParallel || (staffDayRemain[sid]?.[date] ?? 0) > 0.001)
       );
       if (!pool.length) continue;
+
+      // A shift block is one concurrent window — everyone rostered onto it is
+      // present for the same clock hours, so it can only run longer than the
+      // default when a SINGLE person is individually rostered that long and
+      // covers it alone, start to finish (#32) — someone else joining in is on
+      // the same shift bucket as them, i.e. rostered *concurrently*, not in
+      // relay after them, and can't inherit an extension the first person
+      // alone earned (#45: this used to let two ordinarily-rostered 8h people
+      // get stacked into a 12h day just because a third, uninvolved person
+      // happened to have a longer roster that shift). `personalCap(sid)` is
+      // what a candidate could offer if THEY end up covering the block solo;
+      // `shiftLeft`, the block's real capacity, only actually grows to match
+      // it once we know they're the one who got it, in the fill loop below.
+      const personalCap = (sid) => Math.max(defaultCap, staffDayHours[sid]?.[date] ?? 0) - already;
+      let shiftLeft = defaultCap - already;
+      if (shiftLeft <= 0.001) continue;
+
       const contribution = (sid) => allowParallel
-        ? Math.min(shiftLeft, remaining)
-        : Math.min(staffDayRemain[sid][date], shiftLeft, remaining);
+        ? Math.min(personalCap(sid), remaining)
+        : Math.min(staffDayRemain[sid][date], personalCap(sid), remaining);
       const bestContribution = Math.max(...pool.map(contribution));
       pool.sort((a, b) => {
         // Continuity first — but only while the person already on the job can
@@ -285,11 +301,14 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
       });
       // Fill the shift from the top of that order. Normally one person takes
       // the whole stint; a second only joins once the first has run out of
-      // hours and the equipment still has shift capacity going spare.
+      // hours and the block still has capacity going spare — bounded at the
+      // ordinary default from here on, since only the first person's own
+      // roster can stretch it further.
       let firstOnShift = null;
       let preferredStayed = false;
       for (const sid of pool) {
         if (remaining <= 0.001 || shiftLeft <= 0.001) break;
+        if (!firstOnShift) shiftLeft = Math.max(shiftLeft, personalCap(sid));
         const use = allowParallel
           ? Math.min(shiftLeft, remaining)
           : Math.min(shiftLeft, staffDayRemain[sid][date], remaining);
@@ -335,6 +354,55 @@ export function consume(plan, equipId, jobId, days, caps, allowParallel = false)
     staffDayRemain[staffId][date] -= hours;
     staffLoad[staffId] = (staffLoad[staffId] ?? 0) + hours;
   });
+}
+
+// A batch (#47) is a set of otherwise-independent jobs the user wants run
+// back-to-back on the SAME equipment — the department's answer to jobs that
+// are really the same component/scope and shouldn't get scattered across
+// whichever machine happens to be free first. `batchId` groups them;
+// `batchOrder` fixes the sequence. Only unpinned, non-split, same-process
+// jobs combine: anything pinned individually, split into parts, or a
+// mismatched process falls back to being scheduled on its own — there's no
+// single equipment/time slot left to negotiate for a group like that, so
+// guessing would be worse than just not combining it.
+function groupBatches(jobsIn) {
+  const byBatch = new Map();
+  jobsIn.forEach((j) => {
+    if (!j.batchId || j.status === 'complete' || Array.isArray(j.parts) || (j.assignment && j.assignment.pinned)) return;
+    if (!byBatch.has(j.batchId)) byBatch.set(j.batchId, []);
+    byBatch.get(j.batchId).push(j);
+  });
+  const groups = new Map(); // batchId -> ordered member jobs, only for groups that actually combine
+  byBatch.forEach((members, batchId) => {
+    if (members.length < 2) return; // nothing to combine
+    if (!members.every((m) => m.process === members[0].process)) return; // mismatched scope — don't guess
+    members.sort((a, b) => (a.batchOrder ?? 0) - (b.batchOrder ?? 0));
+    groups.set(batchId, members);
+  });
+  return groups;
+}
+
+// Distributes one combined day-by-day plan across a batch's members, in
+// order, splitting a single plan entry across a member boundary when the
+// hours don't land on a day/shift edge — the same operator finishing one
+// member and immediately starting the next, same day. That's what actually
+// makes the group run back-to-back rather than merely share equipment.
+function sliceBatchPlan(plan, members) {
+  const perMember = members.map(() => []);
+  let mi = 0;
+  let left = members[0]?.hoursTotal ?? 0;
+  for (const entry of plan) {
+    let entryLeft = entry.hours;
+    while (entryLeft > 0.001) {
+      if (mi >= members.length) break; // the plan should sum to exactly the combined total
+      const take = Math.min(entryLeft, left);
+      if (take > 0.001) perMember[mi].push({ ...entry, hours: take });
+      entryLeft -= take;
+      left -= take;
+      if (left <= 0.001) { mi++; left = members[mi]?.hoursTotal ?? 0; }
+    }
+  }
+  return perMember;
 }
 
 // A job schedules on a piece of equipment only if the equipment carries every
@@ -415,6 +483,15 @@ export function whyUnscheduled(job, equipment, staff, days) {
 export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   const order = jobsIn.map((j) => j.id);
 
+  // Batches (#47) combine first: a qualifying group of jobs is replaced by
+  // ONE pseudo-unit (combined hours, one equipment/placement decision) that
+  // goes through the exact same unpinned-placement logic as any other job —
+  // see the expansion back into per-member assignments at the bottom. Member
+  // jobs are excluded from the ordinary per-job pass below.
+  const batchGroups = groupBatches(jobsIn);
+  const batchedIds = new Set();
+  batchGroups.forEach((members) => members.forEach((m) => batchedIds.add(m.id)));
+
   // A split job (job.parts set) doesn't get scheduled as one unit — each part
   // is independently placeable (they may end up on different equipment, at
   // different times), so it's flattened into its parts here and reassembled
@@ -422,6 +499,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   const splitParents = new Map(); // parentId -> original job, for reassembly
   const jobs = [];
   jobsIn.forEach((j) => {
+    if (batchedIds.has(j.id)) return; // handled below, as one combined pseudo-unit per batch
     if (Array.isArray(j.parts) && j.parts.length > 0) {
       splitParents.set(j.id, j);
       j.parts.forEach((part, i) => {
@@ -452,6 +530,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
           hoursTotal: part.hoursTotal,
           readyDate: j.readyDate,
           dueDate: j.dueDate,
+          departmentDueDate: j.departmentDueDate || null,
           needsFurtherProcessing: !!j.needsFurtherProcessing,
           percentComplete: part.percentComplete,
           status: part.status,
@@ -461,6 +540,40 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
     } else {
       jobs.push({ ...j, assignment: j.assignment ? { ...j.assignment } : null });
     }
+  });
+  batchGroups.forEach((members, batchId) => {
+    // Continuity across recomputes (see stickyStaff below) has nothing of its
+    // own to seed from — this pseudo-unit is rebuilt fresh every run — so it
+    // borrows whichever member most recently had a primary operator.
+    const seedStaffId = members.map((m) => primaryStaffOf(m.assignment)).find(Boolean) || null;
+    const staffIds = new Set(members.map((m) => m.staffId).filter(Boolean));
+    jobs.push({
+      id: `batch:${batchId}`,
+      _batchId: batchId,
+      name: `Batch: ${members.map((m) => m.name).join(', ')}`,
+      process: members[0].process,
+      tags: [...new Set(members.flatMap((m) => m.tags || []))],
+      // Only carries a manual assignment forward if every member agreed on
+      // the same person — a mixed group has no single "the user named them"
+      // to honour, so it's automatic like an ordinary multi-person job.
+      staffId: staffIds.size === 1 ? [...staffIds][0] : null,
+      // Conservative both ways: the combined run can only share an operator
+      // if EVERY member individually tolerates it, and needs to clear early
+      // if ANY member does — being wrong the safe direction on either one is
+      // cheaper than silently double-booking someone or slipping a due date.
+      parallelProcessing: members.every((m) => !!m.parallelProcessing),
+      needsFurtherProcessing: members.some((m) => !!m.needsFurtherProcessing),
+      hoursTotal: members.reduce((s, m) => s + (m.hoursTotal || 0), 0),
+      // The combined run can't start until every member is genuinely ready —
+      // using the latest of them keeps it one contiguous block rather than
+      // implying a gap partway through for a member that isn't ready yet.
+      readyDate: members.reduce((r, m) => (m.readyDate > r ? m.readyDate : r), members[0].readyDate),
+      // Earliest (effective) due date among members drives placement
+      // priority — the group is only as un-urgent as its most urgent member.
+      dueDate: new Date(Math.min(...members.map((m) => new Date(effectiveDueDate(m)).getTime()))).toISOString().slice(0, 10),
+      status: 'active',
+      assignment: seedStaffId ? { seedStaffId } : null,
+    });
   });
 
   const caps = buildCapacityMaps(equipment, staff, days);
@@ -556,8 +669,8 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
     const aManual = a.staffId ? 0 : 1;
     const bManual = b.staffId ? 0 : 1;
     if (aManual !== bManual) return aManual - bManual;
-    // Then earliest due date.
-    const byDue = new Date(a.dueDate) - new Date(b.dueDate);
+    // Then earliest (effective) due date.
+    const byDue = new Date(effectiveDueDate(a)) - new Date(effectiveDueDate(b));
     if (byDue) return byDue;
     // On an equal due date, a job flagged `needsFurtherProcessing` goes first:
     // it still has machining or manual work to go through after us, so the
@@ -659,6 +772,32 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   const collapsedByParent = new Map();
   const all = [];
   flatResult.forEach((unit) => {
+    // Expand a batch pseudo-unit back into its members — the reverse of the
+    // combine step above: one placement decision, sliced into each member's
+    // own day-by-day assignment in batch order (see sliceBatchPlan). An
+    // unplaced batch's members all come back unscheduled together, sharing
+    // the one reason the combined unit couldn't be placed.
+    if (unit._batchId) {
+      const members = batchGroups.get(unit._batchId);
+      const sliced = unit.assignment ? sliceBatchPlan(unit.assignment.days, members) : members.map(() => []);
+      members.forEach((m, i) => {
+        const memberDays = sliced[i];
+        all.push({
+          ...m,
+          assignment: memberDays.length ? {
+            equipmentId: unit.assignment.equipmentId,
+            startDate: memberDays[0].date,
+            endDate: memberDays[memberDays.length - 1].date,
+            pinned: false,
+            conflict: false,
+            days: memberDays,
+            claimOrder: unit.assignment.claimOrder,
+          } : null,
+          unschedReason: memberDays.length ? undefined : unit.unschedReason,
+        });
+      });
+      return;
+    }
     if (!unit._parentId) { all.push(unit); return; }
     const parent = splitParents.get(unit._parentId);
     let collapsed = collapsedByParent.get(unit._parentId);
