@@ -3,7 +3,7 @@ import {
   Plus, X, Settings2, Calendar, Users, Wrench, Check, AlertTriangle,
   Monitor, ChevronLeft, ChevronRight, Trash2, Pencil, Pin, PinOff,
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
-  Upload, FileWarning, UserCheck
+  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut
 } from 'lucide-react';
 import {
   parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
@@ -396,6 +396,19 @@ function Modal({ title, onClose, children, wide, size }) {
   // unambiguous choice to discard, not an accidental dismissal.
   const requestClose = () => { if (dirtyRef.current) setConfirming(true); else onClose(); };
 
+  // A modal's own content can scroll (max-h-[85vh] overflow-y-auto below),
+  // but the page behind it must not — otherwise scrolling to the bottom of a
+  // long form, or scrolling over the backdrop itself, keeps going and moves
+  // the schedule underneath (#25). Locking body scroll for the modal's
+  // lifetime handles the backdrop and keyboard/touch cases; the dialog's own
+  // `overscroll-contain` (below) stops wheel scroll from "chaining" to the
+  // body once the dialog hits its own top/bottom edge.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
+
   return (
     <div
       className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
@@ -407,7 +420,7 @@ function Modal({ title, onClose, children, wide, size }) {
       }}
     >
       <div
-        className={`relative bg-slate-900 border border-slate-700 rounded-lg shadow-2xl w-full ${MODAL_WIDTH[size || (wide ? 'lg' : 'md')]} max-h-[85vh] overflow-y-auto`}
+        className={`relative bg-slate-900 border border-slate-700 rounded-lg shadow-2xl w-full ${MODAL_WIDTH[size || (wide ? 'lg' : 'md')]} max-h-[85vh] overflow-y-auto overscroll-contain`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 sticky top-0 bg-slate-900">
@@ -1893,8 +1906,16 @@ function ScheduleView({
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
   onEditJob, unscheduledJobs, conflictJobs, onAddJob,
 }) {
-  const colWidth = displayMode ? 92 : 76;
-  const rowHeight = displayMode ? 76 : 60;
+  // Zoom scales both axes of the grid so more of it — including the next
+  // piece of equipment — fits on screen at once. Without it, a fully-booked
+  // machine with many stacked jobs can push the next one below the fold,
+  // making it impossible to see both a drag's source and target at the same
+  // time (#27). Not persisted — it's a viewing preference for the moment,
+  // not schedule data.
+  const [zoom, setZoom] = useState(1);
+  const ZOOM_MIN = 0.6, ZOOM_MAX = 1.6, ZOOM_STEP = 0.2;
+  const colWidth = Math.round((displayMode ? 92 : 76) * zoom);
+  const laneH = Math.round((displayMode ? 56 : 46) * zoom);
   const todayIso = useMemo(() => isoDate(new Date()), []);
 
   const staffColor = useMemo(() => {
@@ -1973,6 +1994,21 @@ function ScheduleView({
             {inPast && <span className="text-[11px] text-slate-500">Completed work — history only</span>}
           </div>
           <div className="flex items-center gap-2">
+            <div className="flex items-center gap-0.5 bg-slate-900 border border-slate-800 rounded-md px-1" title="Zoom the schedule grid">
+              <button
+                type="button"
+                className="p-1.5 text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:hover:text-slate-400"
+                disabled={zoom <= ZOOM_MIN}
+                onClick={() => setZoom((z) => Math.max(ZOOM_MIN, Math.round((z - ZOOM_STEP) * 100) / 100))}
+              ><ZoomOut size={14} /></button>
+              <span className="text-[11px] text-slate-400 w-9 text-center tabular-nums">{Math.round(zoom * 100)}%</span>
+              <button
+                type="button"
+                className="p-1.5 text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:hover:text-slate-400"
+                disabled={zoom >= ZOOM_MAX}
+                onClick={() => setZoom((z) => Math.min(ZOOM_MAX, Math.round((z + ZOOM_STEP) * 100) / 100))}
+              ><ZoomIn size={14} /></button>
+            </div>
             {!displayMode && (
               <select
                 className="bg-slate-900 border border-slate-800 rounded-md text-xs px-2.5 py-2 text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-500/60"
@@ -1990,11 +2026,17 @@ function ScheduleView({
         </div>
 
         <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900">
-          <div className="overflow-x-auto">
+          {/* Both axes scroll together in this one container, bounded to a
+              viewport-relative height, so the day header (sticky top) and the
+              job column (sticky left) have an actual scrolling ancestor to
+              stick within (#26) — an outer overflow-x-auto with an unbounded
+              inner height, the previous approach, never gives position:sticky
+              anything to stick relative to but the page itself. */}
+          <div className="overflow-auto" style={{ maxHeight: displayMode ? '80vh' : '65vh' }}>
             <div style={{ minWidth: 240 + visibleDays.length * colWidth }}>
               {/* Day header row */}
-              <div className="flex border-b border-slate-800 bg-slate-900 sticky top-0 z-10">
-                <div className="shrink-0 px-3 py-2 text-[11px] font-semibold text-slate-500 uppercase tracking-wide border-r border-slate-800" style={{ width: 240 }}>
+              <div className="flex border-b border-slate-800 bg-slate-900 sticky top-0 z-20">
+                <div className="shrink-0 px-3 py-2 text-[11px] font-semibold text-slate-500 uppercase tracking-wide border-r border-slate-800 sticky left-0 bg-slate-900" style={{ width: 240 }}>
                   Equipment / Jobs
                 </div>
                 {visibleDays.map((day) => {
@@ -2029,7 +2071,6 @@ function ScheduleView({
                   a.assignment.startDate < b.assignment.startDate ? -1
                     : a.assignment.startDate > b.assignment.startDate ? 1
                     : (a.assignment.claimOrder ?? 0) - (b.assignment.claimOrder ?? 0));
-                const laneH = displayMode ? 56 : 46;
                 const cells = () => (
                   <div className="absolute inset-0 flex">
                     {visibleDays.map((day) => {
@@ -2060,7 +2101,7 @@ function ScheduleView({
                     </div>
                     {lanes.length === 0 && (
                       <div className="flex">
-                        <div className="shrink-0 px-3 border-r border-slate-800 flex items-center" style={{ width: 240 }}>
+                        <div className="shrink-0 px-3 border-r border-slate-800 flex items-center sticky left-0 bg-slate-900" style={{ width: 240 }}>
                           <span className="text-[10px] text-slate-600">No jobs scheduled</span>
                         </div>
                         <div className="relative" style={{ height: 30, width: visibleDays.length * colWidth }}>{cells()}</div>
@@ -2078,7 +2119,7 @@ function ScheduleView({
                       return (
                         <div key={job.id} className="flex border-b border-slate-800/40">
                           <div
-                            className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer"
+                            className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 bg-slate-900"
                             style={{ width: 240 }}
                             onClick={() => onEditJob(job._parentJob || job)}
                             title={tip}
@@ -2722,6 +2763,16 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [staffId, setStaffId] = useState(job?.staffId || '');
   const [tags, setTags] = useState(job?.tags || (job ? [] : (templates.find((t) => t.id === templateId) || {}).tags) || []);
   const [procedureId, setProcedureId] = useState(job?.procedureId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).procedureId) || '');
+  // Equipment/start date shown here reflect wherever the job currently sits
+  // (auto-placed or pinned) — editing either is equivalent to dragging the
+  // job on the Schedule view (#28), so it only actually re-pins the job if
+  // one of them is genuinely changed from what's already there; otherwise an
+  // auto-placed job is left free to keep moving on future recomputes just by
+  // having had this modal opened and saved.
+  const origEquipId = job?.assignment?.equipmentId || '';
+  const origStartDate = job?.assignment?.startDate || '';
+  const [manualEquipId, setManualEquipId] = useState(origEquipId);
+  const [manualStartDate, setManualStartDate] = useState(origStartDate);
 
   const templateCategories = () => { const s = new Set(); templates.forEach((t) => s.add(t.category || 'Uncategorised')); return [...s].sort(); };
   const matchTemplates = (q) => {
@@ -2762,12 +2813,41 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   // Who could be put on this job, and who the scheduler has on it right now
   // (across every part, for a split job).
   const qualifiedStaff = staff.filter((s) => s.processes.includes(process));
+  // Same process+tag test the scheduler itself applies (tagOk) — the only
+  // equipment this job could actually land on, same as what a drag onto the
+  // Schedule view would accept.
+  const qualifiedEquip = equipment.filter((e) => e.processes.includes(process) && tagOk({ tags }, e));
   const currentlyOn = useMemo(() => {
     const assignments = job?.parts ? job.parts.map((p) => p.assignment) : [job?.assignment];
     const ids = new Set();
     assignments.forEach((a) => (a?.days || []).forEach((d) => d.staffId && ids.add(d.staffId)));
     return [...ids].map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean);
   }, [job, staff]);
+
+  // Turns the Equipment/Planned start date fields below into an assignment,
+  // the same shape handleDrop builds for a drag-and-drop reassignment —
+  // editing these fields IS a manual placement, not a separate mechanism
+  // (#28). Left untouched, the job keeps exactly whatever assignment it
+  // already had (pinned or auto); cleared back to "Automatic" it unpins a
+  // pinned job but otherwise leaves an auto-placed one to recompute as
+  // normal. Split jobs place each part independently, so this only applies
+  // to the job's own (non-split) assignment.
+  function computeAssignment() {
+    if (parts) return job?.assignment || null;
+    if (!manualEquipId) {
+      return job?.assignment?.pinned ? { ...job.assignment, pinned: false } : (job?.assignment || null);
+    }
+    if (manualEquipId === origEquipId && manualStartDate === origStartDate) return job?.assignment || null;
+    return {
+      equipmentId: manualEquipId,
+      startDate: manualStartDate || readyDate,
+      endDate: manualStartDate || readyDate,
+      pinned: true,
+      conflict: false,
+      days: [],
+      seedStaffId: primaryStaffOf(job?.assignment || null),
+    };
+  }
 
   function handleSave() {
     const hoursTotal = Math.round(quantity * hoursPerUnit * 100) / 100;
@@ -2790,7 +2870,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       bcJobNo: bcJobNo.trim(),
       bcJobTaskNo: bcJobTaskNo.trim(),
       completedDate: job?.completedDate || null,
-      assignment: job?.assignment || null,
+      assignment: computeAssignment(),
       // hoursTotal/percentComplete/status are derived from parts by the
       // scheduler on the very next recompute when the job is split, but set
       // sensible values here too in case anything reads them first.
@@ -2907,6 +2987,44 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
           <span className="block text-xs text-slate-500">Machining, manual work, etc. Scheduled ahead of a job with the same due date that ships straight from here.</span>
         </span>
       </label>
+
+      {/* Equipment + planned start date — the same information a drag onto
+          the Schedule view sets, editable straight from here (#28) instead of
+          requiring the job to be visible on-screen to move it. Only equipment
+          matching the process + capability requirements above is offered,
+          same as what a drag would accept. Not shown for a split job — each
+          part is placed independently, in its own section below. */}
+      {!parts && (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Equipment">
+            <select className={inputCls} value={manualEquipId} onChange={(e) => {
+              const v = e.target.value; setManualEquipId(v);
+              if (v && !manualStartDate) setManualStartDate(readyDate);
+            }}>
+              <option value="">Automatic — best available</option>
+              {qualifiedEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+              {manualEquipId && !qualifiedEquip.some((e) => e.id === manualEquipId) && (
+                <option value={manualEquipId}>
+                  {equipment.find((e) => e.id === manualEquipId)?.name || 'Former equipment'} — no longer compatible
+                </option>
+              )}
+            </select>
+          </Field>
+          <Field label="Planned start date">
+            <input
+              type="date" className={inputCls} min={readyDate} disabled={!manualEquipId}
+              value={manualStartDate} onChange={(e) => setManualStartDate(e.target.value)}
+            />
+          </Field>
+        </div>
+      )}
+      {!parts && (
+        <p className="text-xs text-slate-500 -mt-2 mb-3">
+          {manualEquipId
+            ? `Pinned to ${equipment.find((e) => e.id === manualEquipId)?.name || 'this equipment'} starting ${fmtDate(manualStartDate || readyDate)} on Save — same as dragging it there on the Schedule view. Won't move until this is changed or unpinned.`
+            : 'The scheduler will pick whichever compatible, free equipment fits it in soonest.'}
+        </p>
+      )}
 
       {/* Manual staff assignment. Normally the scheduler picks whoever is free
           and signed off on the process; naming someone here overrides that for
