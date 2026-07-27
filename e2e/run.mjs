@@ -13,6 +13,8 @@ import splitJobParts from './specs/split-job-parts.mjs';
 import staffCostingMerge from './specs/staff-costing-merge.mjs';
 import scheduleAndModalUx from './specs/schedule-and-modal-ux.mjs';
 import parallelProcessing from './specs/parallel-processing.mjs';
+import shiftCapacity from './specs/shift-capacity.mjs';
+import jobModalLayout from './specs/job-modal-layout.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -25,6 +27,8 @@ const SUITES = [
   ['staff + costing merge (#20)', staffCostingMerge],
   ['schedule view + job modal UX (#25, #26, #27, #28)', scheduleAndModalUx],
   ['parallel processing (#30)', parallelProcessing],
+  ['shift capacity scales with roster (#32)', shiftCapacity],
+  ['job modal layout (#33)', jobModalLayout],
 ];
 
 const only = process.argv[2]; // optional substring filter

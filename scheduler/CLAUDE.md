@@ -104,8 +104,8 @@ Top-to-bottom, the single component file contains:
    `staffDayRemain`, `staffDayShift`, `staffLoad`) rather than five positional
    arguments.
 5. **Storage helpers** — `loadKey` / `saveKey` wrap `window.storage`.
-6. **UI primitives** — small styled building blocks (Field, Modal, MultiCheck,
-   buttons).
+6. **UI primitives** — small styled building blocks (Field, Modal, `Section`,
+   MultiCheck, buttons).
 7. **Main component** `WeldingScheduler` — top-level state, load/recompute/save,
    all the CRUD handlers, the header, and tab routing.
 8. **Views** — ScheduleView (the gantt/drag-drop grid), BacklogView, StaffView
@@ -276,6 +276,22 @@ exports sensibly.
   whole free shift sat idle. If one person can't fill the shift, the rest of
   the equipment's shift capacity is topped up from the next-best person rather
   than left idle.
+- **A shift's equipment capacity scales to whoever's actually rostered onto
+  it, never truncates them at `SHIFT_DEFS[shift].defaultHours` (8h).** That
+  constant used to be a hard ceiling on `equipShiftUsed`, so someone rostered
+  a 12h day shift got cut off at 8h on the job they were doing and the
+  scheduler handed the rest of their day to an unrelated job on different
+  equipment — nonsensical, since they were still working the same 12-hour
+  day either way. `tryFit` now takes `shiftCapacity` as
+  `Math.max(defaultHours, ...actual rostered hours of eligible staff on that
+  shift that day)` (from `caps.staffDayHours`, a constant snapshot — unlike
+  `staffDayRemain`, which `consume()` decrements as the run places jobs, this
+  one never changes, so "how long could the shift run" and "how much of it's
+  left" stay distinct questions). `defaultHours` still matters as a floor for
+  a shift nobody eligible is rostered onto yet. A person's own `staffDayRemain`
+  is what actually stops them being double-counted across jobs — this only
+  fixes the *equipment*-side ceiling that was independently, and wrongly,
+  capping them shorter than their own roster already did.
 - **Staff assignment is sticky across recomputes.** Every recompute re-derives
   assignments from scratch, so without this the people on a job were free to
   change for no visible reason — most obviously when dragging a job to another
@@ -460,6 +476,45 @@ triggered the tag. It survives a move to different equipment/day/pairing
 untouched — it was never scoped to "these two specific jobs," which is the
 whole point: an operator sharing a job with A today can just as well share
 the same job with C next week without re-granting anything.
+
+### JobModal layout: `Section` and the two-column grid (#33)
+
+`JobModal` grew a field at a time over several rounds of work (#28, #30,
+capability tags, value/costing…) until it was a long single-column form at
+the default `Modal` width — mostly scrolling past sections you weren't
+touching. Two changes, independent of each other:
+
+- `Modal size="lg"` (1024px, same tier `ImportJobsModal` uses) instead of
+  the default `md`, with the main fields laid out `grid md:grid-cols-2` —
+  identity/description on the left (name, capability tags, process,
+  quantity/hours, notes), scheduling and money on the right (`Scheduling`
+  and `Value & costing`, see below).
+- `Section` (`title`, `defaultOpen`, `children`) — a named, collapsible
+  block: a header button with a chevron that toggles local `open` state,
+  wrapping any group of fields. Replaces the ad-hoc "▸ text button + `{show
+  && <div>}`" pattern `showSplit`/`showBcLink` used to hand-roll (both
+  states are gone — `Section` owns its own now). Reused for `Template`,
+  `Scheduling`, `Value & costing`, `Split job into two parts`, and
+  `Business Central linking`.
+
+**`defaultOpen` matters and isn't uniform** — it should reflect whether a
+section already holds something worth seeing at a glance, not just alternate
+for variety:
+- `Scheduling` and `Value & costing`: always open. These are what a job-edit
+  session is usually *for*.
+- `Template`: open only for a **new** job (`defaultOpen={isNew}`) — picking
+  a template is the first thing you do starting from nothing, but re-browsing
+  templates mid-edit of an existing job is rare.
+- `Split job into two parts`: always closed (`defaultOpen={false}`) — an
+  occasional action, not a thing to look at on every open.
+- `Business Central linking`: open only if the job already has a `bcJobNo`
+  or `bcJobTaskNo` (`defaultOpen={!!(job?.bcJobNo || job?.bcJobTaskNo)}`) —
+  same logic the old `showBcLink` initial state used, just moved onto the
+  `Section` that replaced it.
+
+Parts (when the job is already split) stay a plain, always-visible block —
+not a `Section` — since they're the primary content of the modal at that
+point, not something to tuck away.
 
 ### Template categories
 
