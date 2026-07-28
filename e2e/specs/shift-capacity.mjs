@@ -42,8 +42,18 @@ export default async function run({ page, check, errors, baseUrl }) {
   const equipSelect = modal().locator('label:has-text("Equipment") select');
   const firstEquipVal = await equipSelect.locator('option').nth(1).getAttribute('value');
   await equipSelect.selectOption(firstEquipVal);
-  const readyVal = await modal().locator('label:has-text("Ready for processing") input[type=date]').inputValue();
-  await modal().locator('label:has-text("Planned start date") input[type=date]').fill(readyVal);
+  // Pin it to the next date that's actually a Monday (today itself, if today
+  // happens to be one) — the roster edit above only made *Monday* a 12h day,
+  // so the job has to land there regardless of what day of the week this
+  // suite happens to run on.
+  const nextMonday = await page.evaluate(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + ((1 - d.getDay() + 7) % 7));
+    const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  });
+  await modal().locator('label:has-text("Ready for processing") input[type=date]').fill(nextMonday);
+  await modal().locator('label:has-text("Planned start date") input[type=date]').fill(nextMonday);
   await modal().getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForTimeout(700);
 

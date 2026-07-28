@@ -699,3 +699,63 @@ describe('parallel processing (#30)', () => {
     assert.equal(parent.parts[1].assignment.conflict, false);
   });
 });
+
+describe('completed jobs (#49)', () => {
+  test("a completed job's slot stays reserved by default — nothing slides into it", () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('done', {
+          hoursTotal: 8, status: 'complete', completedDate: MONDAY,
+          assignment: {
+            equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, conflict: false,
+            days: [{ date: MONDAY, shift: 'day', staffId: 's1', hours: 8 }],
+          },
+        }),
+        job('next', { hoursTotal: 8, dueDate: '2026-03-10' }),
+      ],
+      [equip('e1')], [person('s1')], d,
+    );
+    const a = byId(out, 'next').assignment;
+    assert.ok(a.startDate > MONDAY, "the still-active job must not slide into the completed job's slot");
+  });
+
+  test('finishing early frees only the time actually saved, not the whole slot', () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('done', {
+          hoursTotal: 8, actualHours: 5, status: 'complete', completedDate: MONDAY,
+          assignment: {
+            equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, conflict: false,
+            days: [{ date: MONDAY, shift: 'day', staffId: 's1', hours: 8 }],
+          },
+        }),
+        job('next', { hoursTotal: 3, dueDate: '2026-03-10' }),
+      ],
+      [equip('e1')], [person('s1')], d,
+    );
+    const a = byId(out, 'next').assignment;
+    assert.equal(a.startDate, MONDAY, 'the 3h saved should be free for the next job to use the same day');
+    assert.equal(hoursOn(a, MONDAY), 3);
+  });
+
+  test('actualHours greater than or equal to the estimate reserves the full original slot, same as no actualHours at all', () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('done', {
+          hoursTotal: 8, actualHours: 10, status: 'complete', completedDate: MONDAY,
+          assignment: {
+            equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, conflict: false,
+            days: [{ date: MONDAY, shift: 'day', staffId: 's1', hours: 8 }],
+          },
+        }),
+        job('next', { hoursTotal: 8, dueDate: '2026-03-10' }),
+      ],
+      [equip('e1')], [person('s1')], d,
+    );
+    const a = byId(out, 'next').assignment;
+    assert.ok(a.startDate > MONDAY, 'taking longer than estimated is not a reason to free up any of the slot');
+  });
+});

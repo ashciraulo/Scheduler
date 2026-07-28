@@ -21,6 +21,7 @@ import staffColorAndLeaveEditing from './specs/staff-color-and-leave-editing.mjs
 import jobmodalStylingAndDeptdue from './specs/jobmodal-styling-and-deptdue.mjs';
 import manualAssignOverride from './specs/manual-assign-override.mjs';
 import batching from './specs/batching.mjs';
+import scheduleZoomDragAndCompletion from './specs/schedule-zoom-drag-and-completion.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -41,6 +42,7 @@ const SUITES = [
   ['job modal styling + department due date (#43, #44)', jobmodalStylingAndDeptdue],
   ['manual assignment override (#46)', manualAssignOverride],
   ['batching (#47)', batching],
+  ['schedule zoom persistence, name-drag, completion safety (#49, #50, #51)', scheduleZoomDragAndCompletion],
 ];
 
 const only = process.argv[2]; // optional substring filter
