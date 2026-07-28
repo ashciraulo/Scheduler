@@ -497,6 +497,45 @@ only falls back to the palette-by-index when it's unset — `normalizeStaff`
 already spread unknown fields through, so no migration was needed for
 existing records.
 
+### Blocking a piece of equipment out for a day (#53)
+
+`equipment.unavailableDates` already existed and was already fully respected
+by the engine — `buildCapacityMaps` sets `equipDayLock[e.id][day] = 'closed'`
+for a date in the list, and `tryFit` refuses to place *anything* (pinned or
+unpinned) on a closed day — but there was no UI to actually reach it, only a
+read-only count in `EquipmentModal` ("N day(s) marked unavailable"). Without
+it, dragging a job off a day left nothing stopping the very next recompute
+from handing that day straight back to whichever unpinned job was next in
+line — there was no way to say "leave this genuinely empty."
+
+Each equipment's header row on the Schedule view now carries one small toggle
+button per visible day (a `CalendarOff` icon, day-columned and aligned with
+the day cells below it, sitting in the same sticky-left/day-column flex
+layout as a job lane), right there alongside the equipment name and total
+hours — clicking one adds or removes that date from `unavailableDates` via
+`toggleEquipDay`, which just calls the existing `saveEquipment` and lets the
+normal recompute handle the rest:
+- An unpinned job that was sitting on the day gets auto-placed somewhere else
+  entirely, same as any other capacity change.
+- A pinned job whose day becomes blocked doesn't move or disappear — it's
+  flagged `conflict: true` and stays visible where the user left it, the same
+  treatment every other unplaceable pin gets (see "a pin onto an occupied day
+  is not a conflict" above; this is the opposite case, a pin that's now
+  genuinely lost its slot).
+- `handleDrop` rejects a drop onto a blocked day outright, with a toast, the
+  same way it already rejects a process mismatch or a missing capability
+  tag — don't let a blocked day silently become a `conflict: true` pin when
+  it can be caught before the pin is even made.
+
+Blocked days render with a `bg-red-950/40` tint (already mapped in
+`index.css` — don't reach for a fresh, unmapped opacity variant here, see the
+`Section`/`bg-slate-900/40` note above) across the header cell, the lane
+day-cells, and the "No jobs scheduled" empty-lane row, so a blocked day reads
+the same regardless of which row you're looking at. The toggle buttons
+themselves are hidden for past days and in read-only mode — there's nothing
+to block once a day has already happened, and a viewer shouldn't be able to
+change what the schedule will do.
+
 ### A job's equipment and start date are editable in its own modal (#28)
 
 `JobModal` shows an "Equipment" select and a "Planned start date" input,

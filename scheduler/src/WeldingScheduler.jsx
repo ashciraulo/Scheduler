@@ -1494,6 +1494,10 @@ export default function WeldingScheduler() {
       showToast(`${job.name} isn't received/ready until ${fmtDate(job.readyDate)} — can't schedule it earlier.`);
       return;
     }
+    if ((eq.unavailableDates || []).includes(date)) {
+      showToast(`${eq.name} is blocked on ${fmtDate(date)} — drop rejected.`);
+      return;
+    }
     // Dropping a job somewhere new discards its worked-out day plan, and with
     // it the record of who was on the job — which is why moving a job to
     // another machine used to hand it to a different person (and cascade a
@@ -1522,6 +1526,22 @@ export default function WeldingScheduler() {
     saveKey('wf_equipment', list);
     recompute(jobs, list, staff);
     setEditingEquipment(null);
+  }
+  // A day is "blocked" for a piece of equipment, not deleted from it — one
+  // more entry in the same `unavailableDates` list `equipDayLock` already
+  // reads in scheduler.js (closed days there return null from tryFit, so an
+  // unpinned job just lands somewhere else instead of quietly refilling a
+  // day the user emptied on purpose (#53) — dragging a job off previously
+  // had nothing to stop the very next recompute handing the day to whichever
+  // other job was next in line). A day already blocked toggles back open.
+  function toggleEquipDay(equipId, date) {
+    const eq = equipment.find((e) => e.id === equipId);
+    if (!eq) return;
+    const blocked = (eq.unavailableDates || []).includes(date);
+    const unavailableDates = blocked
+      ? eq.unavailableDates.filter((d) => d !== date)
+      : [...(eq.unavailableDates || []), date];
+    saveEquipment({ ...eq, unavailableDates }, false);
   }
   function deleteEquipment(id) {
     const list = equipment.filter((e) => e.id !== id);
@@ -1867,6 +1887,7 @@ export default function WeldingScheduler() {
             onAddJob={() => setEditingJob('new')}
             zoom={zoom}
             setZoom={setZoom}
+            onToggleEquipDay={toggleEquipDay}
           />
         )}
 
@@ -2224,7 +2245,7 @@ function buildJobSegments(job, visibleDays, colWidth, staffColor) {
 function ScheduleView({
   equipment, staff, jobs, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
-  onEditJob, unscheduledJobs, conflictJobs, onAddJob, zoom, setZoom,
+  onEditJob, unscheduledJobs, conflictJobs, onAddJob, zoom, setZoom, onToggleEquipDay,
 }) {
   // Zoom scales both axes of the grid so more of it — including the next
   // piece of equipment — fits on screen at once. Without it, a fully-booked
@@ -2406,11 +2427,13 @@ function ScheduleView({
                       const isHint = dropHint && dropHint.equipId === eq.id && dropHint.date === day;
                       const weekend = isWeekendDate(day);
                       const past = day < todayIso;
+                      const blocked = (eq.unavailableDates || []).includes(day);
                       return (
                         <div
                           key={day}
                           style={{ width: colWidth }}
-                          className={`h-full border-r border-slate-800/40 ${isHint ? 'bg-amber-500/20' : past ? 'bg-slate-950/30' : weekend ? 'bg-slate-950/40' : ''}`}
+                          title={blocked ? `${eq.name} is blocked on ${fmtDate(day)}` : undefined}
+                          className={`h-full border-r border-slate-800/40 ${isHint ? 'bg-amber-500/20' : blocked ? 'bg-red-950/40' : past ? 'bg-slate-950/30' : weekend ? 'bg-slate-950/40' : ''}`}
                           onDragOver={(e) => { if (!readOnly) { e.preventDefault(); setDropHint({ equipId: eq.id, date: day }); } }}
                           onDragLeave={() => setDropHint(null)}
                           onDrop={(e) => { e.preventDefault(); onDrop(eq.id, day); }}
@@ -2421,11 +2444,49 @@ function ScheduleView({
                 );
                 return (
                   <div key={eq.id} className={`border-b border-slate-800/70 border-l-[3px] ${color.border}`}>
-                    <div className="border-b border-slate-800/60 bg-slate-950/70 px-3 py-1.5">
-                      <div style={{ position: 'sticky', left: 0, display: 'inline-flex', alignItems: 'center', gap: 10, maxWidth: '100%' }}>
-                        <span className="text-sm font-semibold text-slate-200">{eq.name}</span>
-                        <span className={`text-[10px] ${color.text}`}>{eq.type}</span>
-                        <span className="text-[11px] text-slate-400 font-mono">· {totalHrs}h assigned this period</span>
+                    <div className="border-b border-slate-800/60 bg-slate-950/70 flex">
+                      <div
+                        className="shrink-0 px-3 py-1 flex flex-col justify-center min-w-0 sticky left-0 z-10 bg-slate-950/70"
+                        style={{ width: JOB_COL_WIDTH }}
+                      >
+                        <span className="text-sm font-semibold text-slate-200 truncate">{eq.name}</span>
+                        <span className="text-[10px] text-slate-400 truncate">
+                          <span className={color.text}>{eq.type}</span> · {totalHrs}h assigned this period
+                        </span>
+                      </div>
+                      {/* One button per visible day (#53) — click to block this
+                          equipment out for that day entirely, so an unpinned job
+                          dragged off it doesn't just get replaced by the next
+                          job in line on the very next recompute. Reuses
+                          `equipment.unavailableDates`, which the scheduler
+                          already treats as fully closed (`equipDayLock`) —
+                          this was previously only settable by hand-editing
+                          data, with no UI anywhere to reach it. */}
+                      <div className="flex" style={{ width: visibleDays.length * colWidth }}>
+                        {visibleDays.map((day) => {
+                          const past = day < todayIso;
+                          const blocked = (eq.unavailableDates || []).includes(day);
+                          return (
+                            <div
+                              key={day}
+                              style={{ width: colWidth }}
+                              className="shrink-0 flex items-center justify-center border-r border-slate-800/40"
+                            >
+                              {!readOnly && !past && (
+                                <button
+                                  type="button"
+                                  onClick={() => onToggleEquipDay(eq.id, day)}
+                                  title={blocked
+                                    ? `${eq.name} is blocked on ${fmtDate(day)} — click to make it available again`
+                                    : `Block ${eq.name} on ${fmtDate(day)} — nothing will be scheduled here`}
+                                  className={blocked ? 'text-red-400 hover:text-red-300' : 'text-slate-700 hover:text-slate-400'}
+                                >
+                                  <CalendarOff size={12} />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                     {lanes.length === 0 && (
