@@ -22,6 +22,7 @@ import jobmodalStylingAndDeptdue from './specs/jobmodal-styling-and-deptdue.mjs'
 import manualAssignOverride from './specs/manual-assign-override.mjs';
 import batching from './specs/batching.mjs';
 import scheduleZoomDragAndCompletion from './specs/schedule-zoom-drag-and-completion.mjs';
+import equipmentDayBlock from './specs/equipment-day-block.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -43,6 +44,7 @@ const SUITES = [
   ['manual assignment override (#46)', manualAssignOverride],
   ['batching (#47)', batching],
   ['schedule zoom persistence, name-drag, completion safety (#49, #50, #51)', scheduleZoomDragAndCompletion],
+  ['block equipment out for a day (#53)', equipmentDayBlock],
 ];
 
 const only = process.argv[2]; // optional substring filter

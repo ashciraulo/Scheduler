@@ -759,3 +759,41 @@ describe('completed jobs (#49)', () => {
     assert.ok(a.startDate > MONDAY, 'taking longer than estimated is not a reason to free up any of the slot');
   });
 });
+
+describe('equipment blocked out for a day (#53)', () => {
+  test('an unpinned job is never auto-placed onto a day marked unavailable for that equipment', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { hoursTotal: 8, dueDate: '2026-03-10' })],
+      [equip('e1', { unavailableDates: [MONDAY] })], [person('s1')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.ok(a, 'the job should still be scheduled — just not on the blocked day');
+    assert.notEqual(a.startDate, MONDAY, "must not land on the equipment's blocked day");
+  });
+
+  test('a second machine is used when the first is blocked out on the day that would otherwise be earliest', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { hoursTotal: 8, dueDate: '2026-03-10' })],
+      [equip('e1', { unavailableDates: [MONDAY] }), equip('e2')], [person('s1')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(a.equipmentId, 'e2', 'e1 is blocked on the earliest day, so the free machine should be used instead');
+    assert.equal(a.startDate, MONDAY);
+  });
+
+  test('a pinned job whose day becomes blocked is flagged conflicted, not silently moved', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', {
+        hoursTotal: 8,
+        assignment: { equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+      })],
+      [equip('e1', { unavailableDates: [MONDAY] })], [person('s1')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(a.conflict, true, "a pin onto a now-blocked day must be flagged, not just disappear or quietly relocate");
+    assert.equal(a.startDate, MONDAY, 'it stays visible where the user left it, same as any other overbooked pin');
+  });
+});
