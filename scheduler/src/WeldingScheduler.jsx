@@ -1083,6 +1083,11 @@ export default function WeldingScheduler() {
   const todayIdx = useMemo(() => Math.max(0, workingDays.indexOf(todayIso)), [workingDays, todayIso]);
   const [rangeStart, setRangeStart] = useState(HISTORY_DAYS); // index into workingDays; opens on today
   const [rangeLength, setRangeLength] = useState(30); // days shown at once — see RANGE_PRESETS
+  // Lives here, not in ScheduleView itself, for the same reason rangeStart/
+  // rangeLength do (#50): ScheduleView unmounts when you switch tabs, so
+  // state local to it resets every time you come back. Still not saved to
+  // storage — a viewing preference for the session, not schedule data.
+  const [zoom, setZoom] = useState(1);
   const visibleDays = useMemo(
     () => workingDays.slice(rangeStart, rangeStart + rangeLength),
     [workingDays, rangeStart, rangeLength]
@@ -1860,6 +1865,8 @@ export default function WeldingScheduler() {
             unscheduledJobs={unscheduledJobs}
             conflictJobs={conflictJobs}
             onAddJob={() => setEditingJob('new')}
+            zoom={zoom}
+            setZoom={setZoom}
           />
         )}
 
@@ -2217,15 +2224,16 @@ function buildJobSegments(job, visibleDays, colWidth, staffColor) {
 function ScheduleView({
   equipment, staff, jobs, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
-  onEditJob, unscheduledJobs, conflictJobs, onAddJob,
+  onEditJob, unscheduledJobs, conflictJobs, onAddJob, zoom, setZoom,
 }) {
   // Zoom scales both axes of the grid so more of it — including the next
   // piece of equipment — fits on screen at once. Without it, a fully-booked
   // machine with many stacked jobs can push the next one below the fold,
   // making it impossible to see both a drag's source and target at the same
-  // time (#27). Not persisted — it's a viewing preference for the moment,
-  // not schedule data.
-  const [zoom, setZoom] = useState(1);
+  // time (#27). Lifted up to the main component (#50) so it survives
+  // switching tabs and back, same as rangeStart/rangeLength — still not
+  // saved to storage, a viewing preference for the session, not schedule
+  // data.
   const ZOOM_MIN = 0.6, ZOOM_MAX = 1.6, ZOOM_STEP = 0.2;
   const colWidth = Math.round((displayMode ? 92 : 76) * zoom);
   const laneH = Math.round((displayMode ? 56 : 46) * zoom);
@@ -2442,6 +2450,15 @@ function ScheduleView({
                           <div
                             className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 bg-slate-900"
                             style={{ width: JOB_COL_WIDTH }}
+                            // Same drag handle as the timeline bar itself
+                            // (#51) — reassigning equipment/day by dragging
+                            // was previously only grabbable from the coloured
+                            // segment, which can be a sliver too thin to grab
+                            // for a short job. The name column is a much
+                            // bigger, easier target for exactly the same drag.
+                            draggable={!readOnly}
+                            onDragStart={() => setDragJobId(job.id)}
+                            onDragEnd={() => { setDragJobId(null); setDropHint(null); }}
                             onClick={() => onEditJob(job._parentJob || job)}
                             title={tip}
                           >

@@ -368,6 +368,23 @@ exports sensibly.
   is tracked separately via `equipShiftUsed` (hours actually spent) vs.
   `equipDayLock` (full-day exclusivity for days a job hasn't finished on).
   It's what lets a 5-hour job and a 3-hour job share one day cleanly.
+- **Completing a job doesn't change the schedule, unless it finished in less
+  time than estimated (#49).** A completed job is history — `runScheduler`
+  used to simply drop it from the capacity maps altogether (`complete` jobs
+  never went through `tryFit`/`consume`), which silently freed its
+  equipment/staff claim for anything still-active to slide into, including
+  rewriting a day that had already happened. It's now replayed into the
+  capacity maps up front, before any active job is placed, using its own
+  already-fixed `assignment.days` — nothing about a completed job's slot is
+  actually up for grabs, so there's no placement search to redo, just the
+  bookkeeping to reapply. The one thing allowed to give any of it back:
+  finishing with `actualHours` (captured at completion time, via
+  `ActualHoursModal`) less than the original `hoursTotal` estimate — only
+  then is the replayed plan trimmed to that many hours, cumulative from the
+  start, so the trailing time actually saved becomes free for other work, the
+  same "final day" release an ordinary in-progress job already gets once its
+  own hours are satisfied. Taking *longer* than estimated is not a reason to
+  free anything — the job still occupied the slot for as long as it did.
 - Every job mutation stamps `updatedAt` (used later for delta sync to Business
   Central).
 
@@ -447,8 +464,13 @@ Zoom (`colWidth`/`laneH` scaled by a `zoom` state, 60%–160% in 20% steps, via
 +/− buttons next to the range-length picker) exists specifically so a
 fully-booked machine's stacked jobs don't push the next piece of equipment
 off-screen — without it, dragging a job between two machines can require
-scrolling one of them out of view first. Not persisted; it's a viewing
-preference for the moment, not schedule data.
+scrolling one of them out of view first. `zoom` lives in the main
+`WeldingScheduler` component and is passed down as a prop, same as
+`rangeStart`/`rangeLength` (#50) — it used to be local state inside
+`ScheduleView` itself, which unmounts on every tab switch, so it silently
+reset back to 100% each time you came back to the Schedule tab. Still not
+saved to storage across a reload; a viewing preference for the session, not
+schedule data.
 
 **Job-name column width (#35)**: `JOB_COL_WIDTH` (320px, up from the original
 240) is a single constant reused everywhere the column's width has to agree
@@ -456,7 +478,14 @@ with itself — the grid's `minWidth`, the day-header corner cell, the empty-lan
 cell, and the job-name cell itself. 240px cut most job names off mid-word: job
 number, staff-colour dots and hours all share this column with the name, so it
 needed real room, not just enough space for a couple of characters before the
-ellipsis.
+ellipsis. It's also a second drag handle for reassigning the job, alongside
+the coloured timeline bar (#51) — `draggable`/`onDragStart`/`onDragEnd` are
+wired identically to the bar's, so dropping onto an equipment/day cell works
+the same way regardless of which one you grabbed. This exists because the
+bar can be a sliver too thin to grab reliably for a short job (a 1-2h stint
+at normal zoom), while the name cell is always the full row height and
+`JOB_COL_WIDTH` wide — a much easier target for the exact same drag, not a
+different interaction.
 
 **Per-staff timeline colour (#40)**: `STAFF_PALETTE` (10 hex colours) used to
 be the *only* source of a staff member's colour, picked by their index in the

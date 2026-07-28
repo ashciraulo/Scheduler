@@ -594,6 +594,35 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   const pinned = active.filter((j) => j.assignment && j.assignment.pinned);
   const unpinned = active.filter((j) => !(j.assignment && j.assignment.pinned));
 
+  // A completed job is history — it already happened, so its equipment/staff
+  // claim has to stay reserved exactly as it was, or completing it would
+  // silently free that capacity for something still-active to slide into,
+  // rewriting a day that's already in the past (#49). Replayed into the
+  // capacity maps up front, before anything active is placed, using the
+  // job's own already-fixed day-by-day plan — there's no placement search to
+  // redo, since none of a completed job's slot is genuinely up for grabs.
+  // The one case it's allowed to give any of it back: it actually took less
+  // time than estimated (`actualHours` < `hoursTotal`, captured when the job
+  // was marked complete — see ActualHoursModal). Only then is the plan
+  // trimmed to that many hours, cumulative from the start, so the trailing
+  // time that was saved becomes free — the same "final day" release an
+  // ordinary in-progress job already gets once its own hours are satisfied,
+  // just decided at completion time instead of by the day-by-day fit.
+  complete.forEach((job) => {
+    const plan = job.assignment?.days;
+    if (!plan || !plan.length) return;
+    const cap = (job.actualHours != null && job.actualHours < job.hoursTotal) ? job.actualHours : Infinity;
+    let used = 0;
+    const trimmed = [];
+    for (const entry of plan) {
+      if (used >= cap - 0.001) break;
+      const hours = Math.min(entry.hours, cap - used);
+      trimmed.push({ ...entry, hours });
+      used += hours;
+    }
+    consume(trimmed, job.assignment.equipmentId, job.id, days, caps, false);
+  });
+
   // 1. Place pinned (manually placed) jobs first - reserve their capacity.
   //    Which staff/shift cover each day is worked out automatically from
   //    the roster; a job can span a day-shift stint and an afternoon-shift
