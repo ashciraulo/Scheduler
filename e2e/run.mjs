@@ -23,6 +23,7 @@ import manualAssignOverride from './specs/manual-assign-override.mjs';
 import batching from './specs/batching.mjs';
 import scheduleZoomDragAndCompletion from './specs/schedule-zoom-drag-and-completion.mjs';
 import equipmentDayBlock from './specs/equipment-day-block.mjs';
+import scheduleNameListReorder from './specs/schedule-name-list-reorder.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -45,6 +46,7 @@ const SUITES = [
   ['batching (#47)', batching],
   ['schedule zoom persistence, name-drag, completion safety (#49, #50, #51)', scheduleZoomDragAndCompletion],
   ['block equipment out for a day (#53)', equipmentDayBlock],
+  ['schedule name-list reorder (#55)', scheduleNameListReorder],
 ];
 
 const only = process.argv[2]; // optional substring filter
