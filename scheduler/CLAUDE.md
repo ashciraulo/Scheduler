@@ -487,6 +487,33 @@ at normal zoom), while the name cell is always the full row height and
 `JOB_COL_WIDTH` wide — a much easier target for the exact same drag, not a
 different interaction.
 
+**The name cell is also a drop *target*, not just a source (#55).** The
+stack of job names under one piece of equipment behaves like a reorderable
+list: dropping a dragged job's name onto another job's name row calls the
+exact same `onDrop(equipId, date)` a timeline-cell drop already calls,
+just with the target derived from the row you dropped onto (its own
+`assignment.equipmentId`/`assignment.startDate`) instead of a specific day
+cell. That's the whole feature — no new placement logic. It inherits "the
+most recent drop wins, the incumbent slides" for free (see the pin-onto-an-
+occupied-day invariant above): the dragged job takes the target row's exact
+slot, and the target (plus whatever was pinned after it) cascades forward
+through the normal recompute, which is what actually produces the reorder.
+Dropping onto a row in a *different* piece of equipment's list works too —
+same validation (process/tags/ready date) `handleDrop` already does for any
+other drop — so this single interaction covers both "reorder within this
+equipment's queue" and "move to a different one," without needing to special-
+case which. A drop hint (`bg-amber-500/20`, the same colour the day cells
+already use for their own hint) tints the target row while dragging over
+it, driven by the same `dropHint` state a timeline-cell hover sets — so
+hovering a name row also highlights the exact day cell it'll land on.
+
+Don't add a border-based hint here instead — `border-r border-slate-800` on
+this cell sets the `border-color` shorthand (all four sides) with
+`!important` in index.css's light-theme remap, which silently wins over any
+`border-t-*` colour utility added alongside it regardless of source order or
+specificity; a background tint doesn't share that property and is what the
+day cells already use anyway.
+
 **Per-staff timeline colour (#40)**: `STAFF_PALETTE` (10 hex colours) used to
 be the *only* source of a staff member's colour, picked by their index in the
 staff list — stable in practice, but not something anyone could choose or

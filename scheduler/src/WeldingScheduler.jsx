@@ -2506,10 +2506,26 @@ function ScheduleView({
                       const manualStaff = parent.staffId ? staff.find((s) => s.id === parent.staffId) : null;
                       const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}`;
                       const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
+                      // A job is being dragged over THIS row's name cell,
+                      // about to take its slot on drop (#55) — distinct from
+                      // dropHint's day-cell highlight, which this also sets,
+                      // so the row and the exact day it'll land on are both
+                      // visible at once.
+                      const isReorderTarget = !!(dragJobId && dragJobId !== job.id
+                        && dropHint && dropHint.equipId === job.assignment.equipmentId
+                        && dropHint.date === job.assignment.startDate);
                       return (
                         <div key={job.id} className="flex border-b border-slate-800/40">
                           <div
-                            className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 bg-slate-900"
+                            // A background tint, not a border, for the hint —
+                            // `border-r border-slate-800` on this element sets
+                            // `border-color` (all four sides) with `!important`
+                            // in index.css's light-theme remap, which would
+                            // silently steamroll any `border-t-*` colour class
+                            // added alongside it regardless of source order.
+                            // `bg-amber-500/20` is the same already-mapped hint
+                            // colour the day cells below already use.
+                            className={`shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 ${isReorderTarget ? 'bg-amber-500/20' : 'bg-slate-900'}`}
                             style={{ width: JOB_COL_WIDTH }}
                             // Same drag handle as the timeline bar itself
                             // (#51) — reassigning equipment/day by dragging
@@ -2520,6 +2536,32 @@ function ScheduleView({
                             draggable={!readOnly}
                             onDragStart={() => setDragJobId(job.id)}
                             onDragEnd={() => { setDragJobId(null); setDropHint(null); }}
+                            // Treats the stack of job names for one piece of
+                            // equipment as a reorderable list (#55): dropping
+                            // one job's name onto another's takes that row's
+                            // exact (equipment, start date) slot — the same
+                            // `onDrop` a timeline-cell drop already calls, so
+                            // it inherits the existing "most recent drop wins,
+                            // the incumbent slides" behaviour for free. That's
+                            // what actually reorders the list — the dragged
+                            // job lands where the target was, and everything
+                            // from there on shuffles down exactly as it
+                            // already does for any other pin. Works across
+                            // equipment too: dropping onto a row in a
+                            // different piece of equipment's list reassigns
+                            // it there, same validation (process/tags/ready
+                            // date) as any other drop.
+                            onDragOver={(e) => {
+                              if (readOnly || !dragJobId || dragJobId === job.id) return;
+                              e.preventDefault();
+                              setDropHint({ equipId: job.assignment.equipmentId, date: job.assignment.startDate });
+                            }}
+                            onDragLeave={() => setDropHint(null)}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              if (!dragJobId || dragJobId === job.id) return;
+                              onDrop(job.assignment.equipmentId, job.assignment.startDate);
+                            }}
                             onClick={() => onEditJob(job._parentJob || job)}
                             title={tip}
                           >
