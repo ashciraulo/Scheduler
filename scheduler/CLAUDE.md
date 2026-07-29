@@ -311,18 +311,37 @@ exports sensibly.
   one: `sharedLeft`, up to `defaultHours`, that **any** candidate on that
   shift can draw on (the model doesn't track literal per-person clock
   start/end times finely enough to say which of several same-length people is
-  in the chair at a given hour, so the combined total across all of them is
-  capped at one ordinary shift's length) — and `extensionLeft`, hours past
-  `defaultHours`, computed only once, for the specific first candidate placed
-  on the block, and spent only by them. A second, different person can draw
-  on `sharedLeft` but never on `extensionLeft` — nobody but that one person is
-  verified to still be there that late. Ranking (which candidate goes first)
-  still uses each candidate's `personalCap` — `Math.max(defaultHours, their
-  own rostered hours that shift)` — so a genuinely available long-rostered
-  person is still preferred over a same-tied ordinary one; the fix is purely
-  in what a *second* person can inherit once the first is placed. See
-  `test/scheduler.test.js`, describe block "shift handovers stay physically
-  plausible (#57)", for the regression this fixes, "two ordinarily-rostered
+  in the chair at a given hour, so the combined total across all ordinarily-
+  rostered people is capped at one ordinary shift's length) — and
+  `extensionLeft`, hours past `defaultHours` that exist because *some*
+  candidate here is individually rostered that long. A first pass at this fix
+  tied access to `extensionLeft` to the specific candidate the fill loop
+  happened to place first — but that's wrong in the opposite direction: if an
+  ordinarily-rostered 8h person's `contribution()` that day happened to
+  outrank a genuinely longer-rostered 12h person's (e.g. the 12h person was
+  partway through covering a different job that morning), the 8h person got
+  placed first and the 12h person, landing second, lost access to their own
+  legitimately-available overtime hours entirely — even though nothing
+  stops them physically covering the back end of the day themselves,
+  regardless of who filled the front end. Extension eligibility is a
+  property of the *person's own roster*, not of fill order: `extensionLeft`
+  is now sized once, from whoever across the **whole pool** is individually
+  rostered longest — `Math.max(0, ...pool.map(myExtension))` — and each
+  candidate, however far down the fill order they land, can draw on it up to
+  *their own* `myExtension(sid)` ceiling (`personalCap(sid) - defaultHours`).
+  An ordinarily-rostered person's ceiling there is always 0, so they still
+  can never draw on it no matter who else's longer roster opened the pool up
+  — that half of the invariant is unchanged. Ranking (which candidate goes
+  first) still uses each candidate's `personalCap` — `Math.max(defaultHours,
+  their own rostered hours that shift)` — so a genuinely available
+  long-rostered person is still preferred over a same-tied ordinary one; that
+  ranking now only decides who fills the shared portion first, not who's
+  allowed to touch overtime at all. See `test/scheduler.test.js`, describe
+  block "shift handovers stay physically plausible (#57)" — "a long-rostered
+  person's own extra hours can't be topped up..." for the original
+  physical-implausibility regression, "a longer-rostered person still gets
+  their own overtime hours even when...fills the shared shift first" for the
+  fill-order regression this second pass fixes, "two ordinarily-rostered
   people... (#45)" for the case it further tightens, and "someone rostered
   longer... works all of it" for the original, still-preserved #32 case. A
   person's own `staffDayRemain` is what actually stops them being

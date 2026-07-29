@@ -830,6 +830,35 @@ describe('shift handovers stay physically plausible (#57)', () => {
     assert.ok(!mondayStaff.includes('s2'), 's2 should not appear on Monday at all — there was no shared capacity left for them');
   });
 
+  test("a longer-rostered person still gets their own overtime hours even when an ordinarily-rostered person fills the shared shift first", () => {
+    const d = days();
+    const longRoster = rosterOn(['mon', 'tue', 'wed', 'thu', 'fri'], 'day', 12);
+    const out = runScheduler(
+      [
+        // Trims s1 (the 12h-rostered one) to only 6h left on Monday, so their
+        // contribution() that day (6) comes in under s2's full ordinary 8 —
+        // s2 sorts first and fills the whole shared 8h. s1 must still be able
+        // to pick up their own 4h of individually-justified overtime after
+        // that, purely on their own roster's merits, not on having gone first.
+        job('other', { process: 'Weld', hoursTotal: 6, staffId: 's1', dueDate: '2026-03-05' }),
+        job('j', { process: 'Coat', hoursTotal: 30, dueDate: '2026-03-20' }),
+      ],
+      [equip('e1', { processes: ['Weld'] }), equip('e2', { processes: ['Coat'] })],
+      [
+        person('s1', { roster: longRoster, processes: ['Weld', 'Coat'] }),
+        person('s2', { processes: ['Weld', 'Coat'] }),
+      ],
+      d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, MONDAY), 12,
+      "s2's ordinary 8h plus s1's own 4h of overtime should both land on Monday (12h total) — s1 individually " +
+      'rostered 12h that day, so nothing stops them covering the back end of the shift themselves even though s2, ' +
+      'not them, happened to fill the shared portion first');
+    const mondayStaff = a.days.filter((dd) => dd.date === MONDAY).map((dd) => dd.staffId);
+    assert.deepEqual(mondayStaff, ['s2', 's1'], 's2 fills the shared 8h first (higher contribution that day), then s1 picks up their own remaining overtime');
+  });
+
   test("a sub-4h handover is skipped when neither the person nor the job actually needs it that short", () => {
     const d = days();
     const out = runScheduler(

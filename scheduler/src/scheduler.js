@@ -269,30 +269,40 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
 
       // A shift block is one concurrent window — everyone rostered onto it
       // starts at the same clock time, so it can only run longer than the
-      // default when a SINGLE person is individually rostered that long and
-      // covers it alone, start to finish (#32). `personalCap(sid)` is what a
-      // candidate could offer if THEY end up covering the block solo.
+      // default when someone eligible is individually rostered that long
+      // (#32). `personalCap(sid)` is what a candidate could offer if THEY
+      // end up covering the block solo.
       //
       // The block's real capacity is two separate pools, not one (#57):
       // `sharedLeft`, up to `defaultCap`, that ANY candidate on this shift
-      // could be drawing on (we don't model literal per-person start times
-      // finely enough to say which of several same-length people is in the
-      // chair at a given hour, so the combined total across ALL of them is
-      // capped at one ordinary shift's length) — and `extensionLeft`, hours
-      // past `defaultCap` that exist ONLY because the specific first person
-      // on the block is individually rostered that long. A second, different
-      // person joining can draw on `sharedLeft` but never on `extensionLeft`
-      // — nobody but that one person is verified to still be there that
-      // late. Getting this wrong previously let a normal 8h person and a
-      // separately-rostered 12h person combine for up to 12h between them on
-      // one job in one day (e.g. 4h from the first, 8h from the second) —
-      // not physically possible, since an 8-hour shift covers the *first*
-      // 8 hours of the day, not whichever 8 are left over after someone
-      // else's morning.
+      // can draw on (we don't model literal per-person start times finely
+      // enough to say which of several same-length people is in the chair at
+      // a given hour, so the combined total across ALL ordinarily-rostered
+      // people is capped at one ordinary shift's length) — and
+      // `extensionLeft`, hours past `defaultCap` that exist because SOME
+      // candidate here is individually rostered that long. Extension hours
+      // are real clock time — 2pm-6pm on a 6am-6pm production day — that
+      // only someone actually rostered that late can plausibly be covering,
+      // so a candidate can draw on it only up to *their own* personal
+      // overtime ceiling — but that's a property of the PERSON, not of
+      // placement order: an ordinarily-rostered 8h person filling the first
+      // half of the shift doesn't stop a separately-rostered 12h person from
+      // covering the back half themselves, same as it wouldn't if the
+      // long-rostered person had gone first instead (an earlier version of
+      // this tied extension access to whichever candidate the fill loop
+      // happened to place first, so a longer-rostered person landing second
+      // in fill order — e.g. an ordinary 8h person had a slightly higher
+      // `contribution()` that day — lost access to their own overtime hours
+      // entirely). What extension hours can NEVER do is get drawn on by a
+      // second ordinarily-rostered (8h) person just because someone else's
+      // longer roster happened to open the window up — an 8-hour shift
+      // covers the *first* 8 hours of the day, not whichever hours are left
+      // over once someone else's day has run.
       let sharedLeft = defaultCap - already;
       if (sharedLeft <= 0.001) continue;
 
       const personalCap = (sid) => Math.max(defaultCap, staffDayHours[sid]?.[date] ?? 0) - already;
+      const myExtension = (sid) => Math.max(0, personalCap(sid) - defaultCap);
       const contribution = (sid) => allowParallel
         ? Math.min(personalCap(sid), remaining)
         : Math.min(staffDayRemain[sid][date], personalCap(sid), remaining);
@@ -316,15 +326,18 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
       });
       // Fill the shift from the top of that order. Normally one person takes
       // the whole stint; a second only joins once the first has run out of
-      // hours and the block's shared pool still has room.
+      // hours and the block's shared pool still has room. `extensionLeft` is
+      // set once, from whoever in the WHOLE pool is individually rostered
+      // longest — not from whichever candidate ends up going first — and each
+      // candidate can only draw down to their own `myExtension` ceiling from
+      // it, however far down the fill order they land.
       let firstOnShift = null;
       let preferredStayed = false;
-      let extensionLeft = 0;
+      let extensionLeft = Math.max(0, ...pool.map(myExtension));
       for (const sid of pool) {
         if (remaining <= 0.001) break;
         const isFirst = !firstOnShift;
-        if (isFirst) extensionLeft = Math.max(0, personalCap(sid) - defaultCap);
-        const cap = sharedLeft + (isFirst ? extensionLeft : 0);
+        const cap = sharedLeft + Math.min(extensionLeft, myExtension(sid));
         if (cap <= 0.001) continue;
         const use = allowParallel
           ? Math.min(cap, remaining)
@@ -348,7 +361,7 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
         remaining -= use;
         const fromShared = Math.min(use, sharedLeft);
         sharedLeft -= fromShared;
-        if (isFirst) extensionLeft -= (use - fromShared);
+        extensionLeft -= (use - fromShared);
         if (!firstOnShift) firstOnShift = sid;
         if (sid === preferredStaffId) preferredStayed = true;
       }
