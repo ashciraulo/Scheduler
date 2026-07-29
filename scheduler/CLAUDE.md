@@ -280,34 +280,95 @@ exports sensibly.
   than left idle.
 - **A shift's equipment capacity scales to whoever's actually rostered onto
   it, never truncates them at `SHIFT_DEFS[shift].defaultHours` (8h) — but only
-  for a SINGLE person covering the block alone (#45).** The constant used to
-  be a hard ceiling on `equipShiftUsed`, so someone rostered a 12h day shift
-  got cut off at 8h on the job they were doing and the scheduler handed the
-  rest of their day to an unrelated job on different equipment — nonsensical,
-  since they were still working the same 12-hour day either way. The first
-  fix let `shiftCapacity` grow to `Math.max(defaultHours, ...rostered hours of
-  everyone eligible on that shift that day)` — but that was a **pool-wide**
-  max, so a completely different, ordinarily-rostered 8h person elsewhere in
-  the pool (e.g. busy on another job) was enough to inflate the whole block to
-  12h, and the fill loop would then happily stitch that 12h together from
-  *two different* 8h people (8h + 4h) as if one had handed off to the other
-  mid-shift. They hadn't — two people each rostered a normal shift are present
-  at the same clock hours as each other, not in relay, so that never
-  represented anything physically real.
-  `tryFit` now computes a `personalCap(sid)` per candidate — what *that
-  person alone* could offer, `Math.max(defaultHours, their own rostered hours
-  that shift)` — and the block's actual capacity (`shiftLeft`) only extends
-  past the default once we know who's *actually* covering it: the first
-  person to be placed in the fill loop can stretch it to their own personal
-  cap, but anyone who joins afterwards is bounded by whatever's left of that,
-  not handed a fresh extension of their own. Ranking (which candidate goes
-  first) still uses each candidate's `personalCap` so a genuinely available
-  long-rostered person is still preferred over a same-tied ordinary one — see
-  `test/scheduler.test.js` ("two ordinarily-rostered people... (#45)") for the
-  regression this fixes and "someone rostered longer... works all of it" for
-  the original, still-preserved #32 case. A person's own `staffDayRemain` is
-  what actually stops them being double-counted across jobs — none of this
-  touches that; it only bounds the *equipment*-side ceiling correctly.
+  for a SINGLE person covering the block alone (#32, #45, #57).** The constant
+  used to be a hard ceiling on `equipShiftUsed`, so someone rostered a 12h day
+  shift got cut off at 8h on the job they were doing and the scheduler handed
+  the rest of their day to an unrelated job on different equipment —
+  nonsensical, since they were still working the same 12-hour day either way
+  (#32). The next fix let `shiftCapacity` grow to `Math.max(defaultHours,
+  ...rostered hours of everyone eligible on that shift that day)` — but that
+  was a **pool-wide** max, so a completely different, ordinarily-rostered 8h
+  person elsewhere in the pool (e.g. busy on another job) was enough to
+  inflate the whole block to 12h, and the fill loop would then happily stitch
+  that 12h together from *two different* 8h people (8h + 4h) as if one had
+  handed off to the other mid-shift. They hadn't — two people each rostered a
+  normal shift are present at the same clock hours as each other, not in
+  relay, so that never represented anything physically real (#45).
+  That #45 fix computed a `personalCap(sid)` per candidate — what *that
+  person alone* could offer — and let the block's capacity (`shiftLeft`)
+  stretch to whichever candidate got placed first, with anyone joining
+  afterwards bounded by whatever was left of *that already-expanded* number.
+  Still not right: if the first person placed was individually rostered 12h
+  but only had, say, 10 of those left free that day (busy elsewhere for the
+  other 2), the block's capacity had already been stretched to 12 for
+  everyone, so a second, ordinarily-rostered person could still pick up the
+  2h gap — 10h + 2h = 12h logged by two different people on one job in one
+  day, still not physically possible: an 8-hour shift covers the *first* 8
+  hours of the day, not whichever 8 (or 2) are left over once someone else's
+  longer day has run (#57, reported from the shop floor as "a person works 4h
+  then a second works 8h on the same job/day").
+  The real fix is that a shift block's capacity is two separate pools, not
+  one: `sharedLeft`, up to `defaultHours`, that **any** candidate on that
+  shift can draw on (the model doesn't track literal per-person clock
+  start/end times finely enough to say which of several same-length people is
+  in the chair at a given hour, so the combined total across all ordinarily-
+  rostered people is capped at one ordinary shift's length) — and
+  `extensionLeft`, hours past `defaultHours` that exist because *some*
+  candidate here is individually rostered that long. A first pass at this fix
+  tied access to `extensionLeft` to the specific candidate the fill loop
+  happened to place first — but that's wrong in the opposite direction: if an
+  ordinarily-rostered 8h person's `contribution()` that day happened to
+  outrank a genuinely longer-rostered 12h person's (e.g. the 12h person was
+  partway through covering a different job that morning), the 8h person got
+  placed first and the 12h person, landing second, lost access to their own
+  legitimately-available overtime hours entirely — even though nothing
+  stops them physically covering the back end of the day themselves,
+  regardless of who filled the front end. Extension eligibility is a
+  property of the *person's own roster*, not of fill order: `extensionLeft`
+  is now sized once, from whoever across the **whole pool** is individually
+  rostered longest — `Math.max(0, ...pool.map(myExtension))` — and each
+  candidate, however far down the fill order they land, can draw on it up to
+  *their own* `myExtension(sid)` ceiling (`personalCap(sid) - defaultHours`).
+  An ordinarily-rostered person's ceiling there is always 0, so they still
+  can never draw on it no matter who else's longer roster opened the pool up
+  — that half of the invariant is unchanged. Ranking (which candidate goes
+  first) still uses each candidate's `personalCap` — `Math.max(defaultHours,
+  their own rostered hours that shift)` — so a genuinely available
+  long-rostered person is still preferred over a same-tied ordinary one; that
+  ranking now only decides who fills the shared portion first, not who's
+  allowed to touch overtime at all. See `test/scheduler.test.js`, describe
+  block "shift handovers stay physically plausible (#57)" — "a long-rostered
+  person's own extra hours can't be topped up..." for the original
+  physical-implausibility regression, "a longer-rostered person still gets
+  their own overtime hours even when...fills the shared shift first" for the
+  fill-order regression this second pass fixes, "two ordinarily-rostered
+  people... (#45)" for the case it further tightens, and "someone rostered
+  longer... works all of it" for the original, still-preserved #32 case. A
+  person's own `staffDayRemain` is what actually stops them being
+  double-counted across jobs — none of this touches that; it only bounds the
+  *equipment*-side ceiling correctly.
+- **A person doesn't get handed a sub-4-hour sliver of a shift just to keep
+  it fully booked (`MIN_HANDOVER_HOURS`, #57).** Once the first person on a
+  shift block runs out of hours (their own roster, not the block's), whatever
+  capacity is left in `sharedLeft` used to go to the next-best candidate
+  regardless of size — including a leftover 1 or 2 hours. On the shop floor
+  that showed up as staff being switched onto a job for the literal last two
+  hours of someone else's 12-hour day, purely to use up nominal capacity that
+  would have been just as well left idle. It's fine for a job to end a day
+  with less than the nominal shift's worth of hours logged against it. A
+  second-or-later candidate is now skipped — leaving that leftover shared
+  capacity genuinely unused for the day — whenever their contribution would
+  come in under `MIN_HANDOVER_HOURS` (4h) **and** neither of two conditions
+  makes the short stint the honest answer rather than a workaround:
+  the person's own `staffDayRemain` is itself under 4h (their day is
+  naturally almost over — finishing a job with 2h left in a shift and
+  spending those 2h starting the next one isn't a sliver being manufactured,
+  it's literally all the time they have), or the job's own remaining need is
+  itself under 4h (there's nothing bigger to offer them regardless of how
+  much shared capacity is sitting there). Both exceptions came directly from
+  how the department already handles this in practice. See
+  `test/scheduler.test.js`, same "(#57)" describe block, for the base rule
+  and both exceptions.
 - **Staff assignment is sticky across recomputes.** Every recompute re-derives
   assignments from scratch, so without this the people on a job were free to
   change for no visible reason — most obviously when dragging a job to another
