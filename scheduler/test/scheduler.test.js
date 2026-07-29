@@ -797,3 +797,113 @@ describe('equipment blocked out for a day (#53)', () => {
     assert.equal(a.startDate, MONDAY, 'it stays visible where the user left it, same as any other overbooked pin');
   });
 });
+
+describe('shift handovers stay physically plausible (#57)', () => {
+  test("a long-rostered person's own extra hours can't be topped up by a second, ordinarily-rostered person past the shared 8h", () => {
+    const d = days();
+    const longRoster = rosterOn(['mon', 'tue', 'wed', 'thu', 'fri'], 'day', 12);
+    const out = runScheduler(
+      [
+        // Eats 2h of s1's Monday on a different job/process first, so s1
+        // shows up for job j with 10h left on their 12h roster instead of
+        // the full 12 — still enough to outrank s2's ordinary 8h on
+        // contribution (so s1 fills the shift first, same as before), but
+        // not enough to cover the whole extended day alone.
+        job('other', { process: 'Weld', hoursTotal: 2, staffId: 's1', dueDate: '2026-03-05' }),
+        job('j', { process: 'Coat', hoursTotal: 20, dueDate: '2026-03-20' }),
+      ],
+      [equip('e1', { processes: ['Weld'] }), equip('e2', { processes: ['Coat'] })],
+      [
+        person('s1', { roster: longRoster, processes: ['Weld', 'Coat'] }),
+        person('s2', { processes: ['Weld', 'Coat'] }),
+      ],
+      d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, MONDAY), 10,
+      "s1 should get their own 10h remaining on their 12h roster, but s2 shouldn't be able to add anything on top " +
+      'of it once the ordinary 8h shared shift is spoken for — s1 used 8 of it plus 2 of their own personal ' +
+      "extension, so there's nothing shared left for a second, different person to draw on. Letting it through " +
+      "would mean two people logging 12h between them on one job in one day, which isn't physically possible: an " +
+      "8h shift covers the FIRST 8 hours of the day, not whichever hours happen to be left over.");
+    const mondayStaff = a.days.filter((dd) => dd.date === MONDAY).map((dd) => dd.staffId);
+    assert.ok(!mondayStaff.includes('s2'), 's2 should not appear on Monday at all — there was no shared capacity left for them');
+  });
+
+  test("a sub-4h handover is skipped when neither the person nor the job actually needs it that short", () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        // Trims s1 to 7h and s2 to 6h left on their ordinary 8h Mondays, so
+        // the shift fills 7 (s1) + a mere 1h leftover — not worth handing to
+        // s2 when s2 still has plenty of their own day left and the job has
+        // plenty more work to give them.
+        job('trim1', { process: 'Weld', hoursTotal: 1, staffId: 's1', dueDate: '2026-03-05' }),
+        job('trim2', { process: 'Weld', hoursTotal: 2, staffId: 's2', dueDate: '2026-03-05' }),
+        job('j', { process: 'Coat', hoursTotal: 30, dueDate: '2026-03-20' }),
+      ],
+      [equip('e1', { processes: ['Weld'] }), equip('e2', { processes: ['Coat'] })],
+      [
+        person('s1', { processes: ['Weld', 'Coat'] }),
+        person('s2', { processes: ['Weld', 'Coat'] }),
+      ],
+      d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, MONDAY), 7, 'only s1\'s 7h should land on Monday — the 1h left in the shift should sit idle rather than force a handover');
+    const mondayStaff = a.days.filter((dd) => dd.date === MONDAY).map((dd) => dd.staffId);
+    assert.deepEqual(mondayStaff, ['s1'], 's2 should not be pulled in for a 1h sliver when their own day and the job both have plenty more to give');
+    assert.ok(a.endDate > MONDAY, "the unused hour isn't recovered elsewhere that day — the rest of the job's need spills to the next working day");
+  });
+
+  test('exception: a short handover still happens when the second person is themselves near the end of their day', () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('trim1', { process: 'Weld', hoursTotal: 2, staffId: 's1', dueDate: '2026-03-05' }),
+        job('trim2', { process: 'Weld', hoursTotal: 6, staffId: 's2', dueDate: '2026-03-05' }),
+        job('j', { process: 'Coat', hoursTotal: 30, dueDate: '2026-03-20' }),
+      ],
+      [equip('e1', { processes: ['Weld'] }), equip('e2', { processes: ['Coat'] })],
+      [
+        person('s1', { processes: ['Weld', 'Coat'] }),
+        person('s2', { processes: ['Weld', 'Coat'] }),
+      ],
+      d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, MONDAY), 8,
+      "s1's 6h plus s2's last 2h of their own day should both land on job j — s2 only had 2h of their own shift " +
+      "left regardless, so a short stint is genuinely all they had to give, not a workaround being routed around");
+    const mondayStaff = a.days.filter((dd) => dd.date === MONDAY).map((dd) => dd.staffId);
+    assert.deepEqual(mondayStaff, ['s1', 's2']);
+  });
+
+  test("exception: a short handover still happens when the job's own remaining need is genuinely under 4h", () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        // Trims both s1 and s2 to the same 6h remaining and the same load,
+        // so s1 (alphabetically first) fills the shift first, same as any
+        // other genuine tie — leaving s2 a well-earned but small 2h leftover
+        // once the 8h job itself, not either person's day, runs out.
+        job('trim1', { process: 'Weld', hoursTotal: 2, staffId: 's1', dueDate: '2026-03-05' }),
+        job('trim2', { process: 'Weld', hoursTotal: 2, staffId: 's2', dueDate: '2026-03-05' }),
+        job('j', { process: 'Coat', hoursTotal: 8, dueDate: '2026-03-20' }),
+      ],
+      [equip('e1', { processes: ['Weld'] }), equip('e2', { processes: ['Coat'] })],
+      [
+        person('s1', { processes: ['Weld', 'Coat'] }),
+        person('s2', { processes: ['Weld', 'Coat'] }),
+      ],
+      d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, MONDAY), 8,
+      "s1's 6h plus s2's last 2h should both land on Monday and finish the job outright — the job only had 2h " +
+      'left to give after s1, so there was never a bigger stint to offer s2 instead');
+    const mondayStaff = a.days.filter((dd) => dd.date === MONDAY).map((dd) => dd.staffId);
+    assert.deepEqual(mondayStaff, ['s1', 's2']);
+    assert.equal(a.endDate, MONDAY, 'the job finishes the same day, not spilling for no reason');
+  });
+});

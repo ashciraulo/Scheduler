@@ -22,6 +22,11 @@ export const SHIFT_DEFS = {
   afternoon: { id: 'afternoon', label: 'Afternoon Shift', defaultHours: 8 },
 };
 export const SHIFT_ORDER = ['day', 'afternoon'];
+// A second (or later) person joining a shift block already in progress isn't
+// worth bringing in for a sliver — see tryFit's fill loop (#57). Below this,
+// it's not a real handover, just staff-shuffling to use up capacity that
+// could just as well sit idle for the rest of the day.
+export const MIN_HANDOVER_HOURS = 4;
 export const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']; // indexed by Date.getDay()
 export const DAY_COLS = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
 
@@ -262,22 +267,32 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
       );
       if (!pool.length) continue;
 
-      // A shift block is one concurrent window — everyone rostered onto it is
-      // present for the same clock hours, so it can only run longer than the
+      // A shift block is one concurrent window — everyone rostered onto it
+      // starts at the same clock time, so it can only run longer than the
       // default when a SINGLE person is individually rostered that long and
-      // covers it alone, start to finish (#32) — someone else joining in is on
-      // the same shift bucket as them, i.e. rostered *concurrently*, not in
-      // relay after them, and can't inherit an extension the first person
-      // alone earned (#45: this used to let two ordinarily-rostered 8h people
-      // get stacked into a 12h day just because a third, uninvolved person
-      // happened to have a longer roster that shift). `personalCap(sid)` is
-      // what a candidate could offer if THEY end up covering the block solo;
-      // `shiftLeft`, the block's real capacity, only actually grows to match
-      // it once we know they're the one who got it, in the fill loop below.
-      const personalCap = (sid) => Math.max(defaultCap, staffDayHours[sid]?.[date] ?? 0) - already;
-      let shiftLeft = defaultCap - already;
-      if (shiftLeft <= 0.001) continue;
+      // covers it alone, start to finish (#32). `personalCap(sid)` is what a
+      // candidate could offer if THEY end up covering the block solo.
+      //
+      // The block's real capacity is two separate pools, not one (#57):
+      // `sharedLeft`, up to `defaultCap`, that ANY candidate on this shift
+      // could be drawing on (we don't model literal per-person start times
+      // finely enough to say which of several same-length people is in the
+      // chair at a given hour, so the combined total across ALL of them is
+      // capped at one ordinary shift's length) — and `extensionLeft`, hours
+      // past `defaultCap` that exist ONLY because the specific first person
+      // on the block is individually rostered that long. A second, different
+      // person joining can draw on `sharedLeft` but never on `extensionLeft`
+      // — nobody but that one person is verified to still be there that
+      // late. Getting this wrong previously let a normal 8h person and a
+      // separately-rostered 12h person combine for up to 12h between them on
+      // one job in one day (e.g. 4h from the first, 8h from the second) —
+      // not physically possible, since an 8-hour shift covers the *first*
+      // 8 hours of the day, not whichever 8 are left over after someone
+      // else's morning.
+      let sharedLeft = defaultCap - already;
+      if (sharedLeft <= 0.001) continue;
 
+      const personalCap = (sid) => Math.max(defaultCap, staffDayHours[sid]?.[date] ?? 0) - already;
       const contribution = (sid) => allowParallel
         ? Math.min(personalCap(sid), remaining)
         : Math.min(staffDayRemain[sid][date], personalCap(sid), remaining);
@@ -301,21 +316,39 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
       });
       // Fill the shift from the top of that order. Normally one person takes
       // the whole stint; a second only joins once the first has run out of
-      // hours and the block still has capacity going spare — bounded at the
-      // ordinary default from here on, since only the first person's own
-      // roster can stretch it further.
+      // hours and the block's shared pool still has room.
       let firstOnShift = null;
       let preferredStayed = false;
+      let extensionLeft = 0;
       for (const sid of pool) {
-        if (remaining <= 0.001 || shiftLeft <= 0.001) break;
-        if (!firstOnShift) shiftLeft = Math.max(shiftLeft, personalCap(sid));
+        if (remaining <= 0.001) break;
+        const isFirst = !firstOnShift;
+        if (isFirst) extensionLeft = Math.max(0, personalCap(sid) - defaultCap);
+        const cap = sharedLeft + (isFirst ? extensionLeft : 0);
+        if (cap <= 0.001) continue;
         const use = allowParallel
-          ? Math.min(shiftLeft, remaining)
-          : Math.min(shiftLeft, staffDayRemain[sid][date], remaining);
+          ? Math.min(cap, remaining)
+          : Math.min(cap, staffDayRemain[sid][date], remaining);
         if (use <= 0.001) continue;
+        // A second-or-later person isn't brought in for a sliver just to use
+        // up whatever's left of the shift (#57) — that's what was producing
+        // pointless same-day handovers ("staff switching for the last 2
+        // hours" to keep a block fully booked). Only skip them when the
+        // shortfall is genuinely artificial, though: if the *person* doesn't
+        // have `MIN_HANDOVER_HOURS` to give regardless (their own day is
+        // naturally almost over), or the *job* doesn't need that much more
+        // regardless (there's nothing bigger to offer them), a short stint
+        // is the correct answer, not a workaround to route around.
+        if (!isFirst && use < MIN_HANDOVER_HOURS
+            && staffDayRemain[sid][date] >= MIN_HANDOVER_HOURS - 0.001
+            && remaining >= MIN_HANDOVER_HOURS - 0.001) {
+          continue;
+        }
         plan.push({ date, shift, staffId: sid, hours: use });
         remaining -= use;
-        shiftLeft -= use;
+        const fromShared = Math.min(use, sharedLeft);
+        sharedLeft -= fromShared;
+        if (isFirst) extensionLeft -= (use - fromShared);
         if (!firstOnShift) firstOnShift = sid;
         if (sid === preferredStaffId) preferredStayed = true;
       }
