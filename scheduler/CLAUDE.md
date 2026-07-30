@@ -238,7 +238,30 @@ exports sensibly.
 
 ### Scheduling invariants (don't break these)
 
-- A job never schedules before its `readyDate`.
+- A job never schedules before its `readyDate` — and a job with **no**
+  `readyDate` at all doesn't schedule, full stop (#59). It used to default to
+  today (in the Job modal, in the WIP-import review table, and anywhere else
+  a job got created), which meant a job nobody had actually confirmed was
+  ready got auto-scheduled anyway, and "ready" quietly stopped meaning
+  anything. `readyDate` is now blank until a real date is entered — the Job
+  modal starts blank, WIP import review defaults every row's `Ready` column
+  to blank and won't let it through without a nudge (an amber warning banner,
+  same pattern as the existing missing-hours one), and `whyUnscheduled`
+  reports "no ready-for-processing date set yet" as its own reason rather
+  than falling through to a generic capacity message. This applies to
+  auto-placement, dragging a job onto the Schedule view, and the Job modal's
+  manual Equipment+Planned-start-date pin — all three routes require a real
+  date before they'll place anything. Editing an existing job never
+  auto-fills this from today either — leave it blank and the job is exactly
+  as unscheduled as it always was, which is the whole point. `fmtDate` shows
+  `—` for a blank date rather than `Invalid Date`, so the Backlog table and
+  anywhere else that renders it reads cleanly with nothing set. A batch
+  (`batchId` — see "Batches" below) is only as ready as its least-ready
+  member: if even one member has no ready date set, the *whole group's*
+  computed `readyDate` is blank too, not silently the other members' real
+  dates — the reduce that finds the *latest* member date has to treat "no
+  date" as "unknown", not as the earliest possible value, or it'd get
+  silently outvoted.
 - Unpinned jobs are placed earliest-due first, using `effectiveDueDate(job)`
   (`job.departmentDueDate || job.dueDate`), not `job.dueDate` directly — see
   "Department due date" below. On an **equal** effective due date, a job
@@ -814,6 +837,29 @@ deliberately instead of being silently overwritten. Only tags propagate —
 pushing `hoursPerUnit` or `process` retroactively would rewrite jobs already
 being worked to a plan.
 
+### A new job starts with no template pre-selected (#59)
+
+`JobModal` used to seed a brand-new job's `templateId`, `name`, `process`,
+`hoursPerUnit`, `totalValue` and `departmentValue` from `templates[0]` — the
+first template in the list — the instant the modal opened, before the user
+had touched anything. The "Set up a custom (one-off) job instead" toggle
+looked like the way out, but it only cleared `templateId` on save; the
+fields it had already copied in from template #1 stayed exactly as they
+were, so there was no way to actually land on a blank job — "custom" just
+meant "whatever template #1 happened to be, with the label torn off."
+
+Fixed by not defaulting any of those fields from `templates[0]` for a new
+job — `templateId`/`name` start `''`, `process` falls back to `processes[0]`
+(a plain default, not a template's), `hoursPerUnit` to `1`, and
+`totalValue`/`departmentValue` to `0`. The Category and Template drop-downs
+both gained a `— Select … —` placeholder option so a blank `templateId`
+renders as genuinely unselected rather than the browser silently defaulting
+to whichever `<option>` happens to be first. Editing an **existing** job is
+untouched — it still opens on whatever template (or none) it already has;
+this only changes what a *new* job starts with. Picking a template (or
+category, or a search result) still fills everything in via `applyTemplate`
+exactly as before — the fix is purely about not doing that automatically.
+
 ### A template's "equipment this can run on" is derived, not stored (#23)
 
 `TemplateModal` used to have a manual `MultiCheck` for this, saved as
@@ -839,6 +885,18 @@ another capability tag, not a second parallel mechanism the scheduler has to
 consult.
 
 ### Roster availability
+
+**Saturday defaults to a shortened 6h day, not the ordinary 8h shift
+(#59).** The weekly roster table (Staff view) pre-fills a day's `hours` from
+`SHIFT_DEFS[shift].defaultHours` (8) the moment it's switched from "Off" to
+"Day"/"Afternoon" — reasonable for a weekday, but Saturday on the shop floor
+genuinely runs a shorter day, so leaving it at the flat 8h default (unless
+someone remembered to change it by hand) meant Saturday work quietly got
+scheduled as if it were a full day. `updateDay`'s `onChange` now special-cases
+`key === 'sat'` to default to `6` instead of `SHIFT_DEFS[v].defaultHours` —
+still just a default, not a hard cap: the hours field is the same free-typed
+number input as every other day, so an individual can still be set to a
+different Saturday length by hand if that's genuinely their roster.
 
 A roster day is `{ working, production, shift, hours }`. `production: false`
 means **rostered on but not available for scheduled production work** —
@@ -1007,7 +1065,10 @@ reverse — **combine, then slice** — in `runScheduler` (`scheduler.js`):
   `_batchId`) with combined `hoursTotal` (sum), `tags` (union — the one
   equipment has to satisfy every member's requirement for the whole run),
   `readyDate` (the *latest* of the members' — the run can't start until
-  everyone's ready, and starting earlier would just imply a gap), effective
+  everyone's ready, and starting earlier would just imply a gap; **or blank
+  if even one member has no ready date set at all** (#59) — a missing date
+  isn't "earliest", it's "unknown", so it has to block the whole group rather
+  than being silently outvoted by the other members' real dates), effective
   due date (the *earliest* of the members' — the group is only as un-urgent
   as its most urgent member), `staffId` (only if every member happens to name
   the same person, otherwise automatic), and `parallelProcessing`/
@@ -1037,6 +1098,22 @@ later than strictly necessary if members have staggered ready dates, in
 exchange for guaranteeing the run stays genuinely contiguous rather than
 implying a gap partway through. Not worth a more elaborate per-member
 readiness model for what's meant to be a same-scope batch in the first place.
+
+**A batched job's `batchId`/`batchOrder` must be carried through by hand
+anywhere a job gets saved (#59).** `JobModal.handleSave()` builds a fresh
+`data` object from its own local state rather than merging into the existing
+job, and `addOrUpdateJob` replaces the stored job with that object wholesale
+(`jobs.map((j) => (j.id === stamped.id ? stamped : j))`) — so any field the
+modal doesn't explicitly know about is gone the moment the job is saved, not
+just left at its old value. `batchId`/`batchOrder` aren't editable from this
+modal (that only happens from the Backlog row's batch controls), so they're
+exactly the kind of field this silently drops: saving *any* unrelated edit —
+notes, hours, due date, anything — used to knock a job out of its batch as a
+side effect. Fixed by explicitly carrying `job?.batchId ?? null` /
+`job?.batchOrder ?? null` through in the saved `data`, the same way
+`actualHours` and `completedDate` already were. If a new field is ever added
+to the job shape that isn't surfaced in this modal, it needs the same
+treatment — the fresh-object pattern is a trap by default, not a merge.
 
 ## Persistence — IMPORTANT
 

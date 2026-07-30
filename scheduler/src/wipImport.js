@@ -605,6 +605,11 @@ export function analyse(rows, mapping, settings) {
      the value report.
    - `status: 'active'`, `completedDate: null` — always. BC's completion date is
      recorded in notes as unverified, never mapped to completion.
+   - `readyDate: ''` — always. BC's WIP export doesn't say whether a job has
+     actually arrived in this department; defaulting it to today would let a
+     job that isn't really ready yet get auto-scheduled the moment it's
+     imported. Left for the reviewer to set per row (#59) — same as
+     process/hours/template — before it can be scheduled at all.
    ============================================================================ */
 
 function todayISO() { return new Date().toISOString().slice(0, 10); }
@@ -620,7 +625,7 @@ export function buildSchedulerJobs(records, selectedIds) {
     process: '',
     quantity: (r.qty != null && r.qty > 0) ? r.qty : 1,
     hoursTotal: 0,
-    readyDate: todayISO(),
+    readyDate: '',
     dueDate: r.target || addDaysISO(todayISO(), 14),
     templateId: null,
     notes: [

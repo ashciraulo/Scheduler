@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 
 import {
   runScheduler, whyUnscheduled, getStaffDayInfo, tagOk, primaryStaffOf, eligibleStaffIds,
-  findStaffConflictJobs,
+  findStaffConflictJobs, fmtDate,
 } from '../src/scheduler.js';
 import {
   MONDAY, days, equip, person, job, rosterOn, datesOf, staffOn, hoursOn, byId,
@@ -28,6 +28,47 @@ describe('readiness and the schedule floor', () => {
       [equip('e1')], [person('s1')], d,
     );
     assert.ok(byId(out, 'j').assignment.startDate >= '2026-03-05');
+  });
+
+  test("a job with no readyDate at all isn't scheduled — a blank field isn't the same as ready now (#59)", () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { readyDate: null, hoursTotal: 8 })],
+      [equip('e1')], [person('s1')], d,
+    );
+    const j = byId(out, 'j');
+    assert.equal(j.assignment, null, "a job with no ready date shouldn't get auto-placed just because today counts as a valid start");
+    assert.match(j.unschedReason, /ready.*date/i);
+  });
+
+  test('an empty-string readyDate is treated the same as null — not scheduled', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { readyDate: '', hoursTotal: 8 })],
+      [equip('e1')], [person('s1')], d,
+    );
+    assert.equal(byId(out, 'j').assignment, null);
+  });
+
+  test('setting a readyDate on a previously-unset job lets it schedule normally on the next recompute', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { readyDate: '2026-03-05', hoursTotal: 8 })],
+      [equip('e1')], [person('s1')], d,
+    );
+    assert.ok(byId(out, 'j').assignment, 'once a real date is set, the job schedules like any other');
+  });
+
+  test('whyUnscheduled names the missing ready date specifically, not a generic capacity message', () => {
+    const d = days();
+    const reason = whyUnscheduled(job('j', { readyDate: null, hoursTotal: 8 }), [equip('e1')], [person('s1')], d);
+    assert.match(reason, /ready.*date/i);
+  });
+
+  test('fmtDate shows a placeholder rather than "Invalid Date" for a blank date', () => {
+    assert.equal(fmtDate(null), '—');
+    assert.equal(fmtDate(''), '—');
+    assert.equal(fmtDate(undefined), '—');
   });
 
   test('earliestIdx keeps auto-placement out of the past, but pinned jobs keep their slot', () => {
@@ -384,6 +425,21 @@ describe('batches (#47)', () => {
     assert.equal(byId(out, 'b1').assignment, null);
     assert.equal(byId(out, 'b2').assignment, null);
     assert.ok(byId(out, 'b1').unschedReason, 'should say why, same as any other unplaced job');
+  });
+
+  test("one member with no readyDate blocks the whole batch, not just that member (#59)", () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('b1', { hoursTotal: 8, batchId: 'batch6', batchOrder: 0, readyDate: MONDAY }),
+        job('b2', { hoursTotal: 8, batchId: 'batch6', batchOrder: 1, readyDate: null }),
+      ],
+      [equip('e1')], [person('s1')], d,
+    );
+    assert.equal(byId(out, 'b1').assignment, null,
+      "b1 has a real ready date but is still batched with b2, which doesn't — a blank date must not be silently " +
+      'treated as "earliest" and outvoted by the other member\'s real one');
+    assert.equal(byId(out, 'b2').assignment, null);
   });
 });
 
