@@ -259,7 +259,6 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
     for (const shift of SHIFT_ORDER) {
       if (remaining <= 0.001) break;
       const already = equipShiftUsed[equipId]?.[date]?.[shift] ?? 0;
-      const defaultCap = SHIFT_DEFS[shift].defaultHours;
 
       // Everyone qualified, rostered onto this shift today — with hours to
       // give, unless this job doesn't need them exclusively (allowParallel).
@@ -267,6 +266,33 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
         (sid) => staffDayShift[sid]?.[date] === shift && (allowParallel || (staffDayRemain[sid]?.[date] ?? 0) > 0.001)
       );
       if (!pool.length) continue;
+
+      // "Ordinary" for this shift/day isn't always the flat SHIFT_DEFS
+      // default (8h) — a shortened day (Saturday, 6h at this department) is
+      // exactly as "ordinary" for everyone rostered onto it as an 8h weekday
+      // is for everyone rostered onto THAT (#59). Using a flat 8h here let
+      // two people who were each genuinely only rostered 6 hours combine for
+      // up to 8 between them on a Saturday — the same physically-impossible
+      // over-combination #57 fixed for weekdays, just via a different cause:
+      // there it was a second person drawing on a first person's personal
+      // extension; here it's the SHARED ceiling itself being wrong for the
+      // day. `defaultCap` is now whichever length most of today's pool is
+      // actually rostered for (a plain mode, smaller value winning a tie) —
+      // on an ordinary weekday where everyone's rostered the flat 8h this
+      // reproduces exactly that, and on a shortened day it correctly reads
+      // as 6 instead. Anyone individually rostered longer than that still
+      // gets their own genuine extension (`myExtension` below), same as ever.
+      let defaultCap = SHIFT_DEFS[shift].defaultHours;
+      {
+        const counts = new Map();
+        let bestCount = 0;
+        pool.forEach((sid) => {
+          const h = staffDayHours[sid]?.[date] ?? 0;
+          const c = (counts.get(h) ?? 0) + 1;
+          counts.set(h, c);
+          if (c > bestCount || (c === bestCount && h < defaultCap)) { bestCount = c; defaultCap = h; }
+        });
+      }
 
       // A shift block is one concurrent window — everyone rostered onto it
       // starts at the same clock time, so it can only run longer than the

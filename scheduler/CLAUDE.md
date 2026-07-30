@@ -370,6 +370,27 @@ exports sensibly.
   person's own `staffDayRemain` is what actually stops them being
   double-counted across jobs — none of this touches that; it only bounds the
   *equipment*-side ceiling correctly.
+- **The shared portion of a shift isn't always 8h — it's whatever's
+  actually ordinary for that day (#59).** `defaultCap` (what bounds
+  `sharedLeft`, above) used to be a flat `SHIFT_DEFS[shift].defaultHours`
+  regardless of the day of week. That's fine on an ordinary weekday, but this
+  department runs a shortened 6h Saturday — and a flat 8h ceiling meant two
+  people each genuinely rostered only 6 hours that Saturday could still
+  combine for up to 8 between them, the same physically-impossible
+  over-combination the #57 work above fixed for weekdays, just caused by the
+  shared *ceiling* itself being wrong for the day rather than by a leftover
+  personal extension being reachable by the wrong person. `defaultCap` is now
+  computed per shift-block from the pool of candidates actually rostered onto
+  it that day — a plain mode (the most common `staffDayHours` value among
+  them, smaller value winning a tie) — rather than assumed. On an ordinary
+  weekday, where everyone eligible is rostered the flat 8h anyway, this
+  reproduces the old constant exactly; on a shortened day it correctly comes
+  out lower. Anyone individually rostered *longer* than that day's mode still
+  gets their own genuine `myExtension`, same as ever — this only changes what
+  counts as the shared baseline everyone else is compared against, not the
+  extension mechanism itself. See `test/scheduler.test.js`, "two people
+  ordinarily rostered a SHORTENED day... can't combine for more than that
+  day's real window (#59)".
 - **A person doesn't get handed a sub-4-hour sliver of a shift just to keep
   it fully booked (`MIN_HANDOVER_HOURS`, #57).** Once the first person on a
   shift block runs out of hours (their own roster, not the block's), whatever

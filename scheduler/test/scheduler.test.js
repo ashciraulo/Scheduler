@@ -855,6 +855,34 @@ describe('equipment blocked out for a day (#53)', () => {
 });
 
 describe('shift handovers stay physically plausible (#57)', () => {
+  test("two people ordinarily rostered a SHORTENED day (e.g. a 6h Saturday) can't combine for more than that day's real window (#59)", () => {
+    // A wide horizon and modest total: what's under test is whether the
+    // FIRST Saturday caps at 6h despite two people being available, not
+    // whether the whole job fits — the remaining 4h is expected to spill to
+    // the following Saturday (there's only one working day a week here).
+    const d = days(60);
+    const saturday = '2026-03-07'; // the Saturday following MONDAY
+    const shortSat = rosterOn(['sat'], 'day', 6);
+    const out = runScheduler(
+      [job('j', { process: 'Coat', hoursTotal: 10, readyDate: MONDAY, dueDate: '2026-06-01' })],
+      [equip('e1', { processes: ['Coat'] })],
+      [
+        person('s1', { roster: shortSat, processes: ['Coat'] }),
+        person('s2', { roster: shortSat, processes: ['Coat'] }),
+      ],
+      d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, saturday), 6,
+      "s1 and s2 are each individually rostered a real 6h Saturday — combined they still can't exceed 6h that day, " +
+      'the same bug #57 fixed for weekdays (a flat 8h shared ceiling let two different people combine for more ' +
+      "hours than the day's own window actually allows), just triggered here by the shared ceiling itself being " +
+      "wrong for a shortened day instead of by a leftover personal extension");
+    const satStaff = a.days.filter((dd) => dd.date === saturday).map((dd) => dd.staffId);
+    assert.equal(new Set(satStaff).size, 1, 'only one of them should be needed to cover the real 6h Saturday window');
+  });
+
+
   test("a long-rostered person's own extra hours can't be topped up by a second, ordinarily-rostered person past the shared 8h", () => {
     const d = days();
     const longRoster = rosterOn(['mon', 'tue', 'wed', 'thu', 'fri'], 'day', 12);

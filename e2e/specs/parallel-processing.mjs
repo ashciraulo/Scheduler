@@ -20,9 +20,17 @@ export default async function run({ page, check, errors, baseUrl }) {
   // left to spill forward into is what turns "same operator, same day" into
   // a genuine, unavoidable conflict rather than the second job quietly
   // landing on the next day the operator's free (which is what a pin
-  // normally does when its exact day doesn't work out).
+  // normally does when its exact day doesn't work out). Alex's default
+  // roster is Mon-Fri only, so day 149 has to actually be a day Alex works —
+  // otherwise the pin fails outright before either job's own conflict logic
+  // is ever exercised (this used to hardcode +149 with no such check, so it
+  // flaked roughly two days out of every seven, whenever day 149 happened to
+  // land on a weekend). Stepping back onto the nearest weekday keeps this at
+  // (or one/two days short of) the true edge of the horizon either way,
+  // since the weekend day(s) skipped over were never usable by Alex anyway.
   const lastDay = new Date();
   lastDay.setDate(lastDay.getDate() + 149);
+  while (lastDay.getDay() === 0 || lastDay.getDay() === 6) lastDay.setDate(lastDay.getDate() - 1);
   const lastDayIso = lastDay.toISOString().slice(0, 10);
 
   async function makeJob(name, equipLabel, dateIso = lastDayIso) {
@@ -105,9 +113,14 @@ export default async function run({ page, check, errors, baseUrl }) {
   // against a job it's never met — it's a property of the job, not the
   // pairing it happened to be granted from. Moved off lastDayIso entirely
   // (leaving B there alone, uncontended) so this is a clean two-job check,
-  // not entangled with B's own claim on lastDayIso.
-  const secondLastDay = new Date();
-  secondLastDay.setDate(secondLastDay.getDate() + 148);
+  // not entangled with B's own claim on lastDayIso. Derived from `lastDay`
+  // itself (one weekday earlier), not a second independent +148 offset from
+  // today — hardcoding both separately meant that once `lastDay` above got
+  // adjusted to skip a weekend, the two could land on the very same day,
+  // collapsing the "clean two-job" separation this comment relies on.
+  const secondLastDay = new Date(lastDay);
+  secondLastDay.setDate(secondLastDay.getDate() - 1);
+  while (secondLastDay.getDay() === 0 || secondLastDay.getDay() === 6) secondLastDay.setDate(secondLastDay.getDate() - 1);
   const secondLastDayIso = secondLastDay.toISOString().slice(0, 10);
 
   await page.locator('tr:has-text("Parallel Test A")').first().locator('button[title="Edit"]').click();
