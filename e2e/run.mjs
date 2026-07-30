@@ -26,6 +26,7 @@ import equipmentDayBlock from './specs/equipment-day-block.mjs';
 import scheduleNameListReorder from './specs/schedule-name-list-reorder.mjs';
 import batchEditNewjobReadydate from './specs/batch-edit-newjob-readydate.mjs';
 import costingModalLabelsAndWidth from './specs/costing-modal-labels-and-width.mjs';
+import scheduleTimelineWindowFilter from './specs/schedule-timeline-window-filter.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -51,6 +52,7 @@ const SUITES = [
   ['schedule name-list reorder (#55)', scheduleNameListReorder],
   ['batched job edits, blank new job, blank ready date (#59)', batchEditNewjobReadydate],
   ['costing modal labels + width (#61)', costingModalLabelsAndWidth],
+  ['schedule timeline windowed to the visible date range (#63)', scheduleTimelineWindowFilter],
 ];
 
 const only = process.argv[2]; // optional substring filter

@@ -2297,8 +2297,10 @@ function ScheduleView({
   const jobsByEquip = useMemo(() => {
     const map = {};
     equipment.forEach((e) => { map[e.id] = []; });
-    // Completed jobs stay on the timeline (rendered fully grey); only jobs
-    // with no assignment at all are dropped.
+    // Grouped by equipment only here — NOT yet filtered to the visible date
+    // window (see the per-equipment overlap filter below, where visibleDays
+    // is actually in scope). Only a unit with no assignment at all is
+    // dropped at this stage.
     const pushUnit = (unit) => {
       if (!unit.assignment) return;
       if (map[unit.assignment.equipmentId]) map[unit.assignment.equipmentId].push(unit);
@@ -2434,9 +2436,23 @@ function ScheduleView({
                   bars are plain, coloured per staff, greyed as work completes. */}
               {equipment.map((eq) => {
                 const color = EQUIP_COLOR[eq.type] || EQUIP_COLOR['Welding Robot'];
-                const equipJobs = jobsByEquip[eq.id] || [];
                 const d0 = visibleDays[0];
                 const d1 = visibleDays[visibleDays.length - 1];
+                // A job's lane only earns a place on THIS page of the
+                // timeline if it was actually scheduled sometime within the
+                // window currently being viewed (#63) — otherwise a
+                // completed job never leaves the grid again: every one ever
+                // finished kept its own permanent row on every equipment,
+                // on every page, forever, regardless of how long ago it
+                // wrapped up. Paging back still finds it — its row reappears
+                // the moment the visible window overlaps its own scheduled
+                // span again — but it's not cluttering today's view once
+                // history has moved on. Same overlap test the totalHrs sum
+                // below already uses per-day; this just applies it to
+                // whether the job shows up at all.
+                const equipJobs = (jobsByEquip[eq.id] || []).filter(
+                  (j) => j.assignment.startDate <= d1 && j.assignment.endDate >= d0
+                );
                 const totalHrs = Math.round(equipJobs.reduce((t, j) => t + (j.assignment.days || []).reduce((b, e) => (e.date >= d0 && e.date <= d1 ? b + e.hours : b), 0), 0) * 10) / 10;
                 const lanes = [...equipJobs].sort((a, b) =>
                   a.assignment.startDate < b.assignment.startDate ? -1
