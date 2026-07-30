@@ -987,6 +987,37 @@ visibly) rendered as a washed-out mid-grey box with its own text unreadable
 against it. Fixed by switching `Section` to `bg-slate-800/50` to match every
 other panel, rather than adding yet another one-off hex mapping.
 
+### Costing: cost centres and procedures (#61)
+
+`CostCentreEditor` (a machine's depreciation+interest rate) and
+`ProcedureEditor` (a weld/coat procedure's full hourly operating cost —
+powder, gas, electricity, spares, maintenance, consumables, labour, QA) are
+both dense, grid-of-inputs forms. Two things worth knowing if either grows:
+
+- **Every column needs its own persistent header — a placeholder isn't
+  enough.** `ProcedureEditor`'s row sections used to label a field with only
+  its input `placeholder`, on the theory that "$/kg", "g/min" etc. would
+  read fine sitting in the empty box. That breaks in two ways: a placeholder
+  vanishes the instant the field has *any* value, including the department's
+  own typed-in figure, and every numeric column here defaults to a real `0`
+  (not an empty string), so those placeholders never rendered even once —
+  the user saw a bare `0` with nothing saying what it was. `sec()` — the
+  shared row-renderer behind gases/spares/maintenance/consumables/labour/qa
+  — now renders a small uppercase header row (`c.label`, one per column)
+  above the grid, always, matching the pattern `CostCentreEditor`'s capital
+  assets table already used. The hand-rolled Powder and Electricity blocks
+  (not built through `sec()`, since they're single fixed-shape rows rather
+  than an add/remove list) got the same header row added directly. Any new
+  section needs both a `placeholder` (a light hint of the expected format,
+  e.g. `"m³"`) **and** a `label` (what the column actually is) — they're
+  allowed to read the same, but don't rely on one to stand in for the other.
+- **`CostCentreEditor` opens `wide` (1024px), not the plain default
+  (448px).** Its capital-assets table is 4 real columns plus a delete
+  button; the old default squeezed all of that (and the interest
+  rate/annual hours row above it) into a modal barely wider than one long
+  asset name. Matches `ProcedureEditor`, which already opened `wide` for
+  the same reason.
+
 ## Assigning staff by hand
 
 A job's people are normally derived by the scheduler and shown, not chosen. The

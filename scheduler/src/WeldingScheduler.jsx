@@ -583,7 +583,7 @@ function CostCentreEditor({ centre, onClose, onSave, onDelete }) {
   const delAsset = (i) => setD((x) => ({ ...x, assets: x.assets.filter((_, j) => j !== i) }));
   const grid = 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 20px';
   return (
-    <Modal title={isNew ? 'New cost centre' : 'Edit cost centre'} onClose={onClose}>
+    <Modal title={isNew ? 'New cost centre' : 'Edit cost centre'} onClose={onClose} wide>
       <Field label="Name"><input className={inputCls} value={d.name} onChange={(e) => set({ name: e.target.value })} /></Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Interest rate (%)"><input type="number" step="any" className={inputCls} value={d.interestRate} onChange={(e) => set({ interestRate: Number(e.target.value) || 0 })} /></Field>
@@ -639,6 +639,14 @@ function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, o
         <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">{legend}</span>
         <span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts[subKey])} /hr</span>
       </div>
+      {/* A placeholder alone used to be the only label a column had — fine
+          while a field is empty, but every numeric column here defaults to a
+          real 0, which hides its placeholder from the moment the row exists.
+          A proper header row above the grid stays visible regardless (#61). */}
+      <div className="grid gap-1.5 mb-1" style={{ gridTemplateColumns: grid }}>
+        {cols.map((c) => <span key={c.k} className="text-[10px] text-slate-500 uppercase truncate">{c.label}</span>)}
+        <span />
+      </div>
       {d[k].map((r, i) => (
         <div key={i} className="grid gap-1.5 mb-1 items-center" style={{ gridTemplateColumns: grid }}>
           {cols.map((c) => (c.sel
@@ -665,25 +673,34 @@ function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, o
       </div>
       <div className="mb-3">
         <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Powder</span><span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts.powder)} /hr</span></div>
+        <div className="grid gap-1.5 mb-1" style={{ gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)' }}>
+          <span className="text-[10px] text-slate-500 uppercase">Material</span>
+          <span className="text-[10px] text-slate-500 uppercase">$/kg</span>
+          <span className="text-[10px] text-slate-500 uppercase">g/min</span>
+        </div>
         <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)' }}>
           <input className={smallInput} placeholder="Material" value={d.powder.material} onChange={(e) => setPw('material', e.target.value, true)} />
           <input className={smallInput} type="number" step="any" placeholder="$/kg" value={d.powder.pricePerKg} onChange={(e) => setPw('pricePerKg', e.target.value)} />
           <input className={smallInput} type="number" step="any" placeholder="g/min" value={d.powder.gPerMin} onChange={(e) => setPw('gPerMin', e.target.value)} />
         </div>
       </div>
-      {sec('gases', 'Process gas', 'minmax(0,1.4fr) 104px minmax(0,.9fr) minmax(0,.9fr) 60px 16px', [{ k: 'name', text: true, ph: 'Gas' }, { k: 'role', sel: true, opts: ['primary', 'secondary', 'carrier'] }, { k: 'pricePerUnit', ph: '$/unit' }, { k: 'lPerMin', ph: 'L/min' }, { k: 'unit', text: true, ph: 'm³' }], { name: '', role: 'primary', unit: 'm³', pricePerUnit: 0, lPerMin: 0 }, 'gas')}
+      {sec('gases', 'Process gas', 'minmax(0,1.4fr) 104px minmax(0,.9fr) minmax(0,.9fr) 60px 16px', [{ k: 'name', text: true, ph: 'Gas', label: 'Gas' }, { k: 'role', sel: true, opts: ['primary', 'secondary', 'carrier'], label: 'Role' }, { k: 'pricePerUnit', ph: '$/unit', label: '$/unit' }, { k: 'lPerMin', ph: 'L/min', label: 'L/min' }, { k: 'unit', text: true, ph: 'm³', label: 'Unit' }], { name: '', role: 'primary', unit: 'm³', pricePerUnit: 0, lPerMin: 0 }, 'gas')}
       <div className="mb-3">
         <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Electricity</span><span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts.electricity)} /hr</span></div>
+        <div className="grid gap-1.5 mb-1" style={{ gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)' }}>
+          <span className="text-[10px] text-slate-500 uppercase">kW</span>
+          <span className="text-[10px] text-slate-500 uppercase">$/kWh</span>
+        </div>
         <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)' }}>
           <input className={smallInput} type="number" step="any" placeholder="kW" value={d.electricity.kw} onChange={(e) => setEl('kw', e.target.value)} />
           <input className={smallInput} type="number" step="any" placeholder="$/kWh" value={d.electricity.tariff} onChange={(e) => setEl('tariff', e.target.value)} />
         </div>
       </div>
-      {sec('spares', 'Spares', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Part' }, { k: 'cost', ph: 'Cost $' }, { k: 'life', ph: 'Life hr' }], { name: '', cost: 0, life: 0 }, 'spares')}
-      {sec('maintenance', 'Maintenance', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Item' }, { k: 'cost', ph: 'Cost $' }, { k: 'interval', ph: 'Interval hr' }], { name: '', cost: 0, interval: 0 }, 'maintenance')}
-      {sec('consumables', 'Consumables', 'minmax(0,2fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Item' }, { k: 'costPerHour', ph: '$/hr' }], { name: '', costPerHour: 0 }, 'consumables')}
-      {sec('labour', 'Labour', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Role' }, { k: 'rate', ph: '$/hr' }, { k: 'count', ph: 'FTE' }], { name: '', rate: 0, count: 1 }, 'labour')}
-      {sec('qa', 'QA', 'minmax(0,2fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Activity' }, { k: 'costPerHour', ph: '$/hr' }], { name: '', costPerHour: 0 }, 'qa')}
+      {sec('spares', 'Spares', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Part', label: 'Part' }, { k: 'cost', ph: 'Cost $', label: 'Cost $' }, { k: 'life', ph: 'Life hr', label: 'Life hr' }], { name: '', cost: 0, life: 0 }, 'spares')}
+      {sec('maintenance', 'Maintenance', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Item', label: 'Item' }, { k: 'cost', ph: 'Cost $', label: 'Cost $' }, { k: 'interval', ph: 'Interval hr', label: 'Interval hr' }], { name: '', cost: 0, interval: 0 }, 'maintenance')}
+      {sec('consumables', 'Consumables', 'minmax(0,2fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Item', label: 'Item' }, { k: 'costPerHour', ph: '$/hr', label: '$/hr' }], { name: '', costPerHour: 0 }, 'consumables')}
+      {sec('labour', 'Labour', 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Role', label: 'Role' }, { k: 'rate', ph: '$/hr', label: '$/hr' }, { k: 'count', ph: 'FTE', label: 'FTE' }], { name: '', rate: 0, count: 1 }, 'labour')}
+      {sec('qa', 'QA', 'minmax(0,2fr) minmax(0,1fr) 16px', [{ k: 'name', text: true, ph: 'Activity', label: 'Activity' }, { k: 'costPerHour', ph: '$/hr', label: '$/hr' }], { name: '', costPerHour: 0 }, 'qa')}
       <Field label="Notes (optional)"><input className={inputCls} value={d.notes} onChange={(e) => set({ notes: e.target.value })} /></Field>
       <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800 mt-2">
         {isNew ? <span /> : <button className={btnDanger} onClick={() => onDelete(d.id)}>Delete</button>}

@@ -25,6 +25,7 @@ import scheduleZoomDragAndCompletion from './specs/schedule-zoom-drag-and-comple
 import equipmentDayBlock from './specs/equipment-day-block.mjs';
 import scheduleNameListReorder from './specs/schedule-name-list-reorder.mjs';
 import batchEditNewjobReadydate from './specs/batch-edit-newjob-readydate.mjs';
+import costingModalLabelsAndWidth from './specs/costing-modal-labels-and-width.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -49,6 +50,7 @@ const SUITES = [
   ['block equipment out for a day (#53)', equipmentDayBlock],
   ['schedule name-list reorder (#55)', scheduleNameListReorder],
   ['batched job edits, blank new job, blank ready date (#59)', batchEditNewjobReadydate],
+  ['costing modal labels + width (#61)', costingModalLabelsAndWidth],
 ];
 
 const only = process.argv[2]; // optional substring filter
