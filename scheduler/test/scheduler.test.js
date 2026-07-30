@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 
 import {
   runScheduler, whyUnscheduled, getStaffDayInfo, tagOk, primaryStaffOf, eligibleStaffIds,
-  findStaffConflictJobs,
+  findStaffConflictJobs, fmtDate,
 } from '../src/scheduler.js';
 import {
   MONDAY, days, equip, person, job, rosterOn, datesOf, staffOn, hoursOn, byId,
@@ -28,6 +28,47 @@ describe('readiness and the schedule floor', () => {
       [equip('e1')], [person('s1')], d,
     );
     assert.ok(byId(out, 'j').assignment.startDate >= '2026-03-05');
+  });
+
+  test("a job with no readyDate at all isn't scheduled — a blank field isn't the same as ready now (#59)", () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { readyDate: null, hoursTotal: 8 })],
+      [equip('e1')], [person('s1')], d,
+    );
+    const j = byId(out, 'j');
+    assert.equal(j.assignment, null, "a job with no ready date shouldn't get auto-placed just because today counts as a valid start");
+    assert.match(j.unschedReason, /ready.*date/i);
+  });
+
+  test('an empty-string readyDate is treated the same as null — not scheduled', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { readyDate: '', hoursTotal: 8 })],
+      [equip('e1')], [person('s1')], d,
+    );
+    assert.equal(byId(out, 'j').assignment, null);
+  });
+
+  test('setting a readyDate on a previously-unset job lets it schedule normally on the next recompute', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { readyDate: '2026-03-05', hoursTotal: 8 })],
+      [equip('e1')], [person('s1')], d,
+    );
+    assert.ok(byId(out, 'j').assignment, 'once a real date is set, the job schedules like any other');
+  });
+
+  test('whyUnscheduled names the missing ready date specifically, not a generic capacity message', () => {
+    const d = days();
+    const reason = whyUnscheduled(job('j', { readyDate: null, hoursTotal: 8 }), [equip('e1')], [person('s1')], d);
+    assert.match(reason, /ready.*date/i);
+  });
+
+  test('fmtDate shows a placeholder rather than "Invalid Date" for a blank date', () => {
+    assert.equal(fmtDate(null), '—');
+    assert.equal(fmtDate(''), '—');
+    assert.equal(fmtDate(undefined), '—');
   });
 
   test('earliestIdx keeps auto-placement out of the past, but pinned jobs keep their slot', () => {
@@ -384,6 +425,21 @@ describe('batches (#47)', () => {
     assert.equal(byId(out, 'b1').assignment, null);
     assert.equal(byId(out, 'b2').assignment, null);
     assert.ok(byId(out, 'b1').unschedReason, 'should say why, same as any other unplaced job');
+  });
+
+  test("one member with no readyDate blocks the whole batch, not just that member (#59)", () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('b1', { hoursTotal: 8, batchId: 'batch6', batchOrder: 0, readyDate: MONDAY }),
+        job('b2', { hoursTotal: 8, batchId: 'batch6', batchOrder: 1, readyDate: null }),
+      ],
+      [equip('e1')], [person('s1')], d,
+    );
+    assert.equal(byId(out, 'b1').assignment, null,
+      "b1 has a real ready date but is still batched with b2, which doesn't — a blank date must not be silently " +
+      'treated as "earliest" and outvoted by the other member\'s real one');
+    assert.equal(byId(out, 'b2').assignment, null);
   });
 });
 
@@ -799,6 +855,34 @@ describe('equipment blocked out for a day (#53)', () => {
 });
 
 describe('shift handovers stay physically plausible (#57)', () => {
+  test("two people ordinarily rostered a SHORTENED day (e.g. a 6h Saturday) can't combine for more than that day's real window (#59)", () => {
+    // A wide horizon and modest total: what's under test is whether the
+    // FIRST Saturday caps at 6h despite two people being available, not
+    // whether the whole job fits — the remaining 4h is expected to spill to
+    // the following Saturday (there's only one working day a week here).
+    const d = days(60);
+    const saturday = '2026-03-07'; // the Saturday following MONDAY
+    const shortSat = rosterOn(['sat'], 'day', 6);
+    const out = runScheduler(
+      [job('j', { process: 'Coat', hoursTotal: 10, readyDate: MONDAY, dueDate: '2026-06-01' })],
+      [equip('e1', { processes: ['Coat'] })],
+      [
+        person('s1', { roster: shortSat, processes: ['Coat'] }),
+        person('s2', { roster: shortSat, processes: ['Coat'] }),
+      ],
+      d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(hoursOn(a, saturday), 6,
+      "s1 and s2 are each individually rostered a real 6h Saturday — combined they still can't exceed 6h that day, " +
+      'the same bug #57 fixed for weekdays (a flat 8h shared ceiling let two different people combine for more ' +
+      "hours than the day's own window actually allows), just triggered here by the shared ceiling itself being " +
+      "wrong for a shortened day instead of by a leftover personal extension");
+    const satStaff = a.days.filter((dd) => dd.date === saturday).map((dd) => dd.staffId);
+    assert.equal(new Set(satStaff).size, 1, 'only one of them should be needed to cover the real 6h Saturday window');
+  });
+
+
   test("a long-rostered person's own extra hours can't be topped up by a second, ordinarily-rostered person past the shared 8h", () => {
     const d = days();
     const longRoster = rosterOn(['mon', 'tue', 'wed', 'thu', 'fri'], 'day', 12);

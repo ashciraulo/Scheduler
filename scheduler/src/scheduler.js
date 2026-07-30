@@ -119,6 +119,7 @@ export function fmtDay(dateStr) {
   };
 }
 export function fmtDate(dateStr) {
+  if (!dateStr) return '—'; // e.g. a job with no ready date set yet (#59)
   const d = new Date(dateStr + 'T00:00:00');
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
@@ -258,7 +259,6 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
     for (const shift of SHIFT_ORDER) {
       if (remaining <= 0.001) break;
       const already = equipShiftUsed[equipId]?.[date]?.[shift] ?? 0;
-      const defaultCap = SHIFT_DEFS[shift].defaultHours;
 
       // Everyone qualified, rostered onto this shift today — with hours to
       // give, unless this job doesn't need them exclusively (allowParallel).
@@ -266,6 +266,33 @@ export function tryFit(days, startIdx, hoursNeeded, equipId, compatibleStaffIds,
         (sid) => staffDayShift[sid]?.[date] === shift && (allowParallel || (staffDayRemain[sid]?.[date] ?? 0) > 0.001)
       );
       if (!pool.length) continue;
+
+      // "Ordinary" for this shift/day isn't always the flat SHIFT_DEFS
+      // default (8h) — a shortened day (Saturday, 6h at this department) is
+      // exactly as "ordinary" for everyone rostered onto it as an 8h weekday
+      // is for everyone rostered onto THAT (#59). Using a flat 8h here let
+      // two people who were each genuinely only rostered 6 hours combine for
+      // up to 8 between them on a Saturday — the same physically-impossible
+      // over-combination #57 fixed for weekdays, just via a different cause:
+      // there it was a second person drawing on a first person's personal
+      // extension; here it's the SHARED ceiling itself being wrong for the
+      // day. `defaultCap` is now whichever length most of today's pool is
+      // actually rostered for (a plain mode, smaller value winning a tie) —
+      // on an ordinary weekday where everyone's rostered the flat 8h this
+      // reproduces exactly that, and on a shortened day it correctly reads
+      // as 6 instead. Anyone individually rostered longer than that still
+      // gets their own genuine extension (`myExtension` below), same as ever.
+      let defaultCap = SHIFT_DEFS[shift].defaultHours;
+      {
+        const counts = new Map();
+        let bestCount = 0;
+        pool.forEach((sid) => {
+          const h = staffDayHours[sid]?.[date] ?? 0;
+          const c = (counts.get(h) ?? 0) + 1;
+          counts.set(h, c);
+          if (c > bestCount || (c === bestCount && h < defaultCap)) { bestCount = c; defaultCap = h; }
+        });
+      }
 
       // A shift block is one concurrent window — everyone rostered onto it
       // starts at the same clock time, so it can only run longer than the
@@ -494,6 +521,10 @@ export function findStaffConflictJobs(conflictedJob, jobs, staff) {
 // "Needs scheduling" card. Checked in order of severity.
 export function whyUnscheduled(job, equipment, staff, days) {
   if (!(job.hoursTotal > 0.001)) return 'no hours set on this job yet — add hours (or a template) so it can be scheduled';
+  // Blank, not "ready now" (#59) — nothing here confirms the job has actually
+  // arrived/materials are in, so it's excluded from placement entirely until
+  // someone sets a real date, rather than silently defaulting to today.
+  if (!job.readyDate) return 'no ready-for-processing date set yet — set one on the job so the scheduler knows it can start';
   const runsProcess = equipment.filter((e) => e.processes.includes(job.process));
   if (!runsProcess.length) return `no equipment runs ${job.process}`;
   const need = job.tags || [];
@@ -612,8 +643,12 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
       hoursTotal: members.reduce((s, m) => s + (m.hoursTotal || 0), 0),
       // The combined run can't start until every member is genuinely ready —
       // using the latest of them keeps it one contiguous block rather than
-      // implying a gap partway through for a member that isn't ready yet.
-      readyDate: members.reduce((r, m) => (m.readyDate > r ? m.readyDate : r), members[0].readyDate),
+      // implying a gap partway through for a member that isn't ready yet. If
+      // even one member has no ready date set at all (#59), the whole group
+      // doesn't either — a blank date isn't "earliest", it's "unknown", so
+      // treating it as the minimum would let the other members' real dates
+      // silently outvote it instead of blocking the group like it should.
+      readyDate: members.some((m) => !m.readyDate) ? '' : members.reduce((r, m) => (m.readyDate > r ? m.readyDate : r), members[0].readyDate),
       // Earliest (effective) due date among members drives placement
       // priority — the group is only as un-urgent as its most urgent member.
       dueDate: new Date(Math.min(...members.map((m) => new Date(effectiveDueDate(m)).getTime()))).toISOString().slice(0, 10),
@@ -767,6 +802,16 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   });
 
   unpinned.forEach((job) => {
+    // No ready-for-processing date is not the same as "ready now" (#59) — a
+    // blank field means nobody has actually confirmed materials/prior-stage
+    // work are in this department yet, so the job sits out of auto-placement
+    // entirely (same "needs scheduling" list as no capacity found) until
+    // someone sets a real date, rather than quietly defaulting to today.
+    if (!job.readyDate) {
+      job.assignment = null;
+      job.unschedReason = whyUnscheduled(job, equipment, staff, days);
+      return;
+    }
     const compatibleEquip = equipment.filter((e) => e.processes.includes(job.process) && tagOk(job, e));
     const compatibleStaffIds = eligibleStaffIds(job, staff);
     const seedStaffId = stickyStaff.get(job.id);
@@ -774,7 +819,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
     // Never auto-place into the past: `days` starts behind today so history
     // stays visible, but new work begins today at the earliest.
     let floorIdx = earliestIdx;
-    if (job.readyDate) {
+    {
       const readyIdx = days.findIndex((d) => d >= job.readyDate);
       floorIdx = readyIdx === -1 ? days.length : Math.max(floorIdx, readyIdx);
     }

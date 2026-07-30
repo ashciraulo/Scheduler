@@ -1490,7 +1490,11 @@ export default function WeldingScheduler() {
       showToast(`${eq.name} doesn't have: ${missingTags.join(', ')} — drop rejected.`);
       return;
     }
-    if (job.readyDate && date < job.readyDate) {
+    if (!job.readyDate) {
+      showToast(`${job.name} has no ready-for-processing date set — set one on the job before scheduling it.`);
+      return;
+    }
+    if (date < job.readyDate) {
       showToast(`${job.name} isn't received/ready until ${fmtDate(job.readyDate)} — can't schedule it earlier.`);
       return;
     }
@@ -3172,7 +3176,11 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
                               const v = e.target.value;
                               if (v === 'off') updateDay(m, key, { working: false, production: true, hours: 0 });
                               else if (v === 'nonprod') updateDay(m, key, { working: true, production: false, hours: 0 });
-                              else updateDay(m, key, { working: true, production: true, shift: v, hours: pattern.hours || SHIFT_DEFS[v].defaultHours });
+                              // Saturday is a shortened day on the shop floor (6h, not the
+                              // ordinary 8h shift) — defaulting a freshly-turned-on Saturday
+                              // to the same 8h as a weekday silently over-rostered it unless
+                              // someone remembered to correct it by hand (#59).
+                              else updateDay(m, key, { working: true, production: true, shift: v, hours: pattern.hours || (key === 'sat' ? 6 : SHIFT_DEFS[v].defaultHours) });
                             }}
                           >
                             <option value="off">Off</option>
@@ -3305,25 +3313,45 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const isNew = !job;
   const [parts, setParts] = useState(job?.parts ? job.parts.map((p) => ({ ...p })) : null);
   const [splitHoursA, setSplitHoursA] = useState(job ? Math.round((job.hoursTotal / 2) * 100) / 100 : 0);
-  const [templateId, setTemplateId] = useState(job?.templateId || (templates[0]?.id ?? ''));
-  const [name, setName] = useState(job?.name || templates[0]?.name || '');
-  const [process, setProcess] = useState(job?.process || templates[0]?.process || processes[0] || '');
+  // A new job starts with NO template picked (#59) — it used to default to
+  // templates[0], and the "custom job instead" toggle below only cleared
+  // templateId itself, not the name/process/hours it had already copied in,
+  // so there was no way to actually land on a blank job: the toggle changed
+  // what got saved but the fields on screen still showed template #1's data
+  // either way. Editing an existing job is unaffected — it still opens on
+  // whatever template (or none) it already has.
+  const [templateId, setTemplateId] = useState(job?.templateId || '');
+  const [name, setName] = useState(job?.name || '');
+  const [process, setProcess] = useState(job?.process || processes[0] || '');
   const [quantity, setQuantity] = useState(job?.quantity ?? 1);
-  const [hoursPerUnit, setHoursPerUnit] = useState(job ? (job.quantity ? job.hoursTotal / job.quantity : job.hoursTotal) : (templates[0]?.hoursPerUnit ?? 1));
-  const [readyDate, setReadyDate] = useState(job?.readyDate || isoDate(new Date()));
+  const [hoursPerUnit, setHoursPerUnit] = useState(job ? (job.quantity ? job.hoursTotal / job.quantity : job.hoursTotal) : 1);
+  // Blank by default, not today (#59) — this is the scheduling gate that
+  // says materials/prior-stage work have actually arrived, which isn't true
+  // just because someone happened to create the job today. See the
+  // "Ready for processing" field below, and whyUnscheduled/#59 in
+  // scheduler.js for what a blank one does at placement time.
+  const [readyDate, setReadyDate] = useState(job?.readyDate || '');
   const [needsFurtherProcessing, setNeedsFurtherProcessing] = useState(!!job?.needsFurtherProcessing);
   const [parallelProcessing, setParallelProcessing] = useState(!!job?.parallelProcessing);
   const [dueDate, setDueDate] = useState(job?.dueDate || addDays(isoDate(new Date()), 14));
   const [departmentDueDate, setDepartmentDueDate] = useState(job?.departmentDueDate || '');
   const [notes, setNotes] = useState(job?.notes || '');
   const [custom, setCustom] = useState(isNew ? false : !job.templateId);
-  const [totalValue, setTotalValue] = useState(job?.totalValue ?? (templates[0]?.totalValuePerUnit ? templates[0].totalValuePerUnit * (job?.quantity ?? 1) : 0));
-  const [departmentValue, setDepartmentValue] = useState(job?.departmentValue ?? (templates[0]?.departmentValuePerUnit ? templates[0].departmentValuePerUnit * (job?.quantity ?? 1) : 0));
+  const [totalValue, setTotalValue] = useState(job?.totalValue ?? 0);
+  const [departmentValue, setDepartmentValue] = useState(job?.departmentValue ?? 0);
   const [percentComplete, setPercentComplete] = useState(job?.percentComplete ?? 0);
   const [bcJobNo, setBcJobNo] = useState(job?.bcJobNo || '');
   const [bcJobTaskNo, setBcJobTaskNo] = useState(job?.bcJobTaskNo || '');
   const [search, setSearch] = useState('');
-  const [category, setCategory] = useState((templates.find((t) => t.id === templateId) || {}).category || 'Uncategorised');
+  // '' (no category filter applied yet) when no template is selected, vs.
+  // the real 'Uncategorised' bucket once a found template's own category is
+  // blank — those are different states: the first means nothing's been
+  // picked, the second means something was picked and genuinely has no
+  // category (see templateCategories() below, which buckets those there).
+  const [category, setCategory] = useState(() => {
+    const t = templates.find((x) => x.id === templateId);
+    return t ? (t.category || 'Uncategorised') : '';
+  });
   const [staffId, setStaffId] = useState(job?.staffId || '');
   const [tags, setTags] = useState(job?.tags || (job ? [] : (templates.find((t) => t.id === templateId) || {}).tags) || []);
   const [procedureId, setProcedureId] = useState(job?.procedureId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).procedureId) || '');
@@ -3401,11 +3429,18 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
     if (!manualEquipId) {
       return job?.assignment?.pinned ? { ...job.assignment, pinned: false } : (job?.assignment || null);
     }
+    // No ready date and no explicit planned start picked leaves nothing to
+    // pin to (#59) — a blank string isn't a real date, and this job isn't
+    // meant to be scheduled at all yet, so picking equipment alone can't
+    // manufacture a placement out of it. Falls back to whatever the job
+    // already had rather than silently doing nothing on Save.
+    const startDate = manualStartDate || readyDate;
+    if (!startDate) return job?.assignment || null;
     if (manualEquipId === origEquipId && manualStartDate === origStartDate) return job?.assignment || null;
     return {
       equipmentId: manualEquipId,
-      startDate: manualStartDate || readyDate,
-      endDate: manualStartDate || readyDate,
+      startDate,
+      endDate: startDate,
       pinned: true,
       conflict: false,
       days: [],
@@ -3436,6 +3471,14 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       bcJobNo: bcJobNo.trim(),
       bcJobTaskNo: bcJobTaskNo.trim(),
       completedDate: job?.completedDate || null,
+      // Not editable from this modal — joining/leaving a batch happens from
+      // the Backlog row instead — so carried straight through untouched.
+      // Without this, saving ANY edit here (this modal builds its `data`
+      // object from scratch rather than merging into the existing job)
+      // silently dropped a job out of its batch, since the fresh object
+      // never had these fields to begin with (#59).
+      batchId: job?.batchId ?? null,
+      batchOrder: job?.batchOrder ?? null,
       assignment: computeAssignment(),
       // hoursTotal/percentComplete/status are derived from parts by the
       // scheduler on the very next recompute when the job is split, but set
@@ -3461,7 +3504,10 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               onChange={(e) => {
                 const v = e.target.value; setSearch(v);
                 if (v.trim()) { const m = matchTemplates(v); if (m.length && !m.some((t) => t.id === templateId)) applyTemplate(m[0].id); }
-                else setCategory((templates.find((t) => t.id === templateId) || {}).category || 'Uncategorised');
+                else {
+                  const t = templates.find((x) => x.id === templateId);
+                  setCategory(t ? (t.category || 'Uncategorised') : '');
+                }
               }}
               placeholder="Keyword search across name, category and process…"
             />
@@ -3470,6 +3516,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
             matchTemplates(search).length ? (
               <Field label={`Matching templates (${matchTemplates(search).length})`}>
                 <select className={inputCls} value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
+                  <option value="">— Select a template —</option>
                   {matchTemplates(search).map((t) => <option key={t.id} value={t.id}>{t.name} — {t.category || 'Uncategorised'}</option>)}
                 </select>
               </Field>
@@ -3482,11 +3529,13 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                   const ts = templates.filter((t) => (t.category || 'Uncategorised') === c);
                   if (ts.length && !ts.some((t) => t.id === templateId)) applyTemplate(ts[0].id);
                 }}>
+                  <option value="">— Select a category —</option>
                   {templateCategories().map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               </Field>
               <Field label="Template">
                 <select className={inputCls} value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
+                  <option value="">— Select a template —</option>
                   {templates.filter((t) => (t.category || 'Uncategorised') === category).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </Field>
@@ -3548,7 +3597,11 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                 <input type="date" className={inputCls} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
               </Field>
             </div>
-            <p className="text-xs text-slate-500 -mt-2 mb-3">The job will never be auto-scheduled — or allowed to be dragged — before the ready date, since materials/prior-stage work won't be in your department yet.</p>
+            <p className="text-xs text-slate-500 -mt-2 mb-3">
+              {readyDate
+                ? "The job will never be auto-scheduled — or allowed to be dragged — before this date, since materials/prior-stage work won't be in your department yet."
+                : "Blank means not confirmed ready yet — the job will sit out of scheduling entirely (it won't be auto-placed or draggable) until a date is set."}
+            </p>
 
             {/* Optional and separate from the due date above on purpose (#44):
                 that date is when the client (or an end-of-month target) needs
@@ -4143,7 +4196,10 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
         process: raw?.process || '',
         quantity: Number(raw?.quantity) > 0 ? Number(raw.quantity) : 1,
         hoursTotal: Number(raw?.hoursTotal) || 0,
-        readyDate: raw?.readyDate || isoDate(new Date()),
+        // Blank, not today (#59) — a WIP export doesn't tell us whether a job
+        // has actually arrived in this department; the reviewer sets this per
+        // row below, same as they already do for process/hours/template.
+        readyDate: raw?.readyDate || '',
         dueDate: raw?.dueDate || addDays(isoDate(new Date()), 14),
         templateId: raw?.templateId || null,
         notes: raw?.notes || '',
@@ -4353,6 +4409,10 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
   // live condition rather than something settled when the rows were built.
   const includedRows = rows ? rows.filter((r) => r.include && r.name.trim()) : [];
   const missingHours = includedRows.filter((r) => !r.hoursTotal || !r.process).length;
+  // A blank ready date isn't a defect the way missing hours is — it's the
+  // normal starting state (#59) — but it does mean the job won't schedule
+  // until someone sets one, so it's worth the same nudge before Import.
+  const missingReady = includedRows.filter((r) => !r.readyDate).length;
   const dupCount = rows ? rows.filter((r) => r._dup).length : 0;
   const invalidCount = rows ? rows.filter((r) => r._invalid).length : 0;
 
@@ -4654,6 +4714,13 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
             </p>
           )}
 
+          {missingReady > 0 && (
+            <p className="text-xs text-amber-400 mb-3 flex items-center gap-1.5">
+              <AlertTriangle size={13} /> {missingReady} selected job{missingReady === 1 ? '' : 's'} still {missingReady === 1 ? 'has' : 'have'} no ready date set —
+              set the "Ready" column below for {missingReady === 1 ? 'it' : 'them'}, or {missingReady === 1 ? 'it' : 'they'} won't be scheduled until you do (you can still import and fix this later from the Backlog).
+            </p>
+          )}
+
           <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto max-h-[45vh] overflow-y-auto">
             <table className="w-full text-sm min-w-[1080px]">
               <thead className="sticky top-0 bg-slate-900 z-10">
@@ -4666,6 +4733,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                   <th className="px-3 py-2 font-medium w-full">Job</th>
                   <th className="px-3 py-2 font-medium">BC Job/Task</th>
                   <th className="px-3 py-2 font-medium">Qty</th>
+                  <th className="px-3 py-2 font-medium" title="Won't be scheduled until this is set">Ready</th>
                   <th className="px-3 py-2 font-medium">Due</th>
                   <th className="px-3 py-2 font-medium">Total $</th>
                   <th className="px-3 py-2 font-medium">Template</th>
@@ -4715,6 +4783,14 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
                     </td>
                     <td className="px-3 py-2 text-slate-500 text-xs whitespace-nowrap">{r.bcJobNo || '—'}{r.bcJobTaskNo ? ` / ${r.bcJobTaskNo}` : ''}</td>
                     <td className="px-3 py-2 text-slate-400">{r.quantity}</td>
+                    <td className="px-3 py-2">
+                      <input
+                        type="date"
+                        className={`bg-slate-800 border rounded text-xs px-1.5 py-1 text-slate-200 ${r.include && !r.readyDate ? 'border-amber-600' : 'border-slate-700'}`}
+                        value={r.readyDate || ''}
+                        onChange={(e) => updateRow(r._rowId, { readyDate: e.target.value })}
+                      />
+                    </td>
                     <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{fmtDate(r.dueDate)}</td>
                     <td className="px-3 py-2 text-slate-400 font-mono">${Number(r.totalValue || 0).toLocaleString()}</td>
                     <td className="px-3 py-2">

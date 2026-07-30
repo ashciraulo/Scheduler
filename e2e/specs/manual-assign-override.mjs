@@ -61,6 +61,10 @@ export default async function run({ page, check, errors, baseUrl }) {
   await modal().getByLabel(/job name/i).fill('Needs Solo');
   await modal().locator('label:has-text("Quantity") input').fill('1');
   await modal().locator('label:has-text("Hours per unit") input').fill('4');
+  // Ready date defaults to blank now (#59) — this job needs to actually be
+  // eligible for placement (just blocked by Solo being busy) for the
+  // override flow below to mean anything.
+  await modal().locator('label:has-text("Ready for processing") input').fill(new Date().toISOString().slice(0, 10));
   await modal().locator('label:has-text("Assigned to") select').selectOption({ label: 'Solo' });
   await modal().getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForTimeout(500);

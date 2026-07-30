@@ -26,6 +26,9 @@ export default async function run({ page, check, errors, baseUrl }) {
     await modal().getByLabel(/job name/i).fill(name);
     await modal().locator('label:has-text("Quantity") input').fill('1');
     await modal().locator('label:has-text("Hours per unit") input').fill(String(hours));
+    // Ready date defaults to blank now (#59) — these jobs need to actually
+    // schedule so they can be batched, so give them one.
+    await modal().locator('label:has-text("Ready for processing") input').fill(new Date().toISOString().slice(0, 10));
     await modal().getByRole('button', { name: 'Save', exact: true }).click();
     await page.waitForTimeout(400);
   }

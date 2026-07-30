@@ -152,6 +152,16 @@ export default async function run({ page, check, errors, baseUrl }) {
         rosterSaved.working === true && rosterSaved.production === false,
         JSON.stringify(rosterSaved));
 
+  // ---- #59: turning Saturday on for the first time defaults to the
+  // department's shortened 6h Saturday, not the ordinary 8h weekday shift ----
+  const satSelect = page.locator('table select').nth(5); // DAY_COLS: mon,tue,wed,thu,fri,sat,sun
+  await satSelect.selectOption('day');
+  await page.waitForTimeout(500);
+  const satRoster = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('wf::wf_staff') || '[]')[0].weeklyRoster.sat);
+  check('#59 turning Saturday on defaults its hours to 6, not the ordinary 8h shift',
+        satRoster.working === true && Number(satRoster.hours) === 6, JSON.stringify(satRoster));
+
   await page.locator('button:has-text("Absence for")').first().click();
   await page.waitForTimeout(500);
   const kindOpts = await modal().locator('select').first().locator('option').allInnerTexts();
