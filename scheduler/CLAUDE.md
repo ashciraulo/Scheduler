@@ -544,6 +544,29 @@ grid no longer cares about calendar month boundaries at all, just an
 arbitrary contiguous window the user controls, from a detailed few days up to
 a couple of months for a broad workload view.
 
+**A job's lane only shows on a page whose window actually overlaps where it
+was scheduled (#63).** `jobsByEquip` groups every job with an assignment by
+equipment, with no date filtering — that grouping is cached across range
+navigation. The per-equipment render loop then filters it down to `(j) =>
+j.assignment.startDate <= d1 && j.assignment.endDate >= d0` (`d0`/`d1` being
+the current page's `visibleDays` bounds), the same overlap test `totalHrs`
+already used per-day, just applied to whether the row appears at all. This
+used to be "completed jobs stay on the timeline forever, only a job with no
+assignment at all is dropped" — meaning a completed job kept its own
+permanent lane on every equipment, on every page, for as long as the
+department's history went back, regardless of how long ago it actually
+wrapped up. Paging back through the "Completed work — history only" pages
+(see below `rangeStart`) still finds it — the moment the visible window
+overlaps its own scheduled span again, its row reappears — but it's not
+bloating the current view once history has moved past it. This applies
+uniformly to active jobs too, not just completed ones: a job scheduled two
+months out doesn't show up on today's page either, same as it never showed
+on last week's — paging forward to when it's actually due finds it, exactly
+like any other job. `equipJobs`/`lanes`/`totalHrs` are all computed inside
+the `equipment.map()` render loop (not the `jobsByEquip` memo) specifically
+so this filter has `visibleDays` in scope without widening that memo's own
+dependency array on every range navigation.
+
 **Scroll/zoom (#26, #27)**: the day header row and the job-description
 column both need to stay on screen while scrolling the grid — a spreadsheet
 frozen row/column. That requires a single element that actually scrolls in
