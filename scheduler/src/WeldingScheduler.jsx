@@ -3,7 +3,7 @@ import {
   Plus, X, Settings2, Calendar, Users, Wrench, Check, AlertTriangle,
   Monitor, ChevronLeft, ChevronRight, ChevronDown, Trash2, Pencil, Pin, PinOff,
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
-  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut, Target
+  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut, Target, Lock
 } from 'lucide-react';
 import {
   parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
@@ -53,6 +53,12 @@ import {
                                     machine first when auto-placing the job and falls back to
                                     whichever compatible machine finishes soonest if it can't be
                                     honoured, flagging the assignment for review either way.
+   lockedEquipmentId            →  no BC equivalent — internal-only. A hard restriction, same
+                                    strength as job.staffId but for the machine instead of the
+                                    operator: the scheduler waits for this machine rather than
+                                    using another, but still auto-picks the day and the operator
+                                    — unlike a pin (assignment.pinned), which fixes both of those
+                                    too.
    bcJobNo                      →  Job No. (the BC key to link back to) — optional, blank until linked
    bcJobTaskNo                  →  Job Task No. — optional, blank until linked
    updatedAt                    →  used to drive delta/incremental sync (only push what changed)
@@ -1082,6 +1088,7 @@ export default function WeldingScheduler() {
   const [confirmDelete, setConfirmDelete] = useState(null); // {type, id, name}
   const [parallelConflict, setParallelConflict] = useState(null); // {job, candidates}
   const [manualAssignConflict, setManualAssignConflict] = useState(null); // {job, person, blockers}
+  const [equipmentLockConflict, setEquipmentLockConflict] = useState(null); // {job, machine, blockers}
 
   const [dragJobId, setDragJobId] = useState(null);
   const [dropHint, setDropHint] = useState(null); // {equipId, date}
@@ -1213,7 +1220,7 @@ export default function WeldingScheduler() {
   const busyEditing = !!(
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
-    || timeLogDate || parallelConflict || manualAssignConflict
+    || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1338,6 +1345,55 @@ export default function WeldingScheduler() {
     showToast(`Unpinned ${blockerIds.length} job${blockerIds.length === 1 ? '' : 's'} so it can be rescheduled.`);
   }
 
+  // The equipment equivalent of the manual-assignment blocker above: a hard
+  // equipment lock (job.lockedEquipmentId, see scheduler.js's
+  // eligibleEquipment) is a standing request to wait for one specific
+  // machine, same shape of restriction job.staffId is for a person — and hits
+  // the exact same wall when a PINNED job is already sitting on that machine
+  // for the days this one needs. Left alone the locked job just lands in
+  // "Needs scheduling" naming the machine; this finds what's holding it.
+  function findEquipmentLockBlockers(job, jobsList) {
+    if (!job.lockedEquipmentId || job.assignment) return [];
+    const from = job.readyDate;
+    const blockers = new Map();
+    jobsList.forEach((j) => {
+      if (j.id === job.id || j.status === 'complete') return;
+      const units = Array.isArray(j.parts) ? j.parts : [j];
+      const holdsIt = units.some((u) =>
+        u.assignment?.pinned && u.assignment.equipmentId === job.lockedEquipmentId
+        && (u.assignment.days || []).some((d) => d.date >= from));
+      if (holdsIt) blockers.set(j.id, j);
+    });
+    return [...blockers.values()];
+  }
+  function checkEquipmentLockConflict(result, jobId) {
+    const justPlaced = result.find((j) => j.id === jobId);
+    if (!justPlaced || !justPlaced.lockedEquipmentId || justPlaced.assignment) return;
+    const machine = equipment.find((e) => e.id === justPlaced.lockedEquipmentId);
+    if (!machine) return;
+    const blockers = findEquipmentLockBlockers(justPlaced, result);
+    if (blockers.length) setEquipmentLockConflict({ job: justPlaced, machine, blockers });
+  }
+  // Same reasoning as unpinForManualAssign: unpinning doesn't hand the
+  // machine over directly, it just frees the blocker to be re-placed like any
+  // other unpinned job — a locked job already places before automatic ones
+  // (see runScheduler), so it gets first call on the machine once it's free.
+  function unpinForEquipmentLock(targetJobId, blockerIds) {
+    const targets = new Set(blockerIds);
+    const updated = jobs.map((j) => {
+      if (!targets.has(j.id)) return j;
+      const stamp = { updatedAt: new Date().toISOString() };
+      if (Array.isArray(j.parts)) {
+        return { ...j, ...stamp, parts: j.parts.map((p) => ({ ...p, assignment: p.assignment ? { ...p.assignment, pinned: false } : null })) };
+      }
+      return { ...j, ...stamp, assignment: j.assignment ? { ...j.assignment, pinned: false } : null };
+    });
+    const result = recompute(updated, equipment, staff);
+    setEquipmentLockConflict(null);
+    checkEquipmentLockConflict(result, targetJobId);
+    showToast(`Unpinned ${blockerIds.length} job${blockerIds.length === 1 ? '' : 's'} so it can be rescheduled.`);
+  }
+
   // ---------- job actions ----------
   function addOrUpdateJob(jobData, isNew) {
     const stamped = { ...jobData, updatedAt: new Date().toISOString() };
@@ -1350,6 +1406,7 @@ export default function WeldingScheduler() {
     const result = recompute(newJobs, equipment, staff);
     checkParallelConflict(result, stamped.id);
     checkManualAssignConflict(result, stamped.id);
+    checkEquipmentLockConflict(result, stamped.id);
     setEditingJob(null);
   }
   function importJobs(newJobs, consumedParkIds) {
@@ -2214,6 +2271,47 @@ export default function WeldingScheduler() {
           </div>
         </Modal>
       )}
+
+      {equipmentLockConflict && (
+        <Modal title="Machine already committed elsewhere" onClose={() => setEquipmentLockConflict(null)}>
+          <p className="text-sm text-slate-300 mb-3">
+            <span className="font-semibold text-slate-100">{equipmentLockConflict.job.name}</span> is locked
+            to <span className="font-semibold text-slate-100">{equipmentLockConflict.machine.name}</span>,
+            but it's already pinned to{' '}
+            {equipmentLockConflict.blockers.length === 1 ? 'this job' : `these ${equipmentLockConflict.blockers.length} jobs`}
+            {' '}for the days it needs. Unpinning frees the machine to be rescheduled — onto another day or a
+            different operator — while this job takes the priority you gave it.
+          </p>
+          <div className="space-y-1.5 mb-4">
+            {equipmentLockConflict.blockers.map((b) => (
+              <button
+                key={b.id}
+                type="button"
+                className="w-full text-left text-sm bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-2 text-slate-200"
+                onClick={() => unpinForEquipmentLock(equipmentLockConflict.job.id, [b.id])}
+              >
+                Unpin <span className="font-semibold">{b.name}</span> so it can move elsewhere
+              </button>
+            ))}
+            {equipmentLockConflict.blockers.length > 1 && (
+              <button
+                type="button"
+                className="w-full text-left text-sm bg-slate-800 hover:bg-slate-700 rounded-md px-3 py-2 text-slate-200"
+                onClick={() => unpinForEquipmentLock(equipmentLockConflict.job.id, equipmentLockConflict.blockers.map((b) => b.id))}
+              >
+                Unpin all {equipmentLockConflict.blockers.length} so {equipmentLockConflict.machine.name} is free
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-slate-500 mb-3">
+            {equipmentLockConflict.machine.name} isn't guaranteed to end up free for this job again — if something
+            else needs it just as urgently it may get pinned there anyway. Check where things land afterwards.
+          </p>
+          <div className="flex justify-end">
+            <button className={btnGhost} onClick={() => setEquipmentLockConflict(null)}>Leave unscheduled</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -2558,7 +2656,8 @@ function ScheduleView({
                       const conflict = job.assignment.conflict;
                       const preferredMissed = job.assignment.preferredEquipmentUnmet;
                       const manualStaff = parent.staffId ? staff.find((s) => s.id === parent.staffId) : null;
-                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}`;
+                      const lockedEquip = parent.lockedEquipmentId;
+                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${lockedEquip ? ' · equipment locked' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}`;
                       const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
                       // A job is being dragged over THIS row's name cell,
                       // about to take its slot on drop (#55) — distinct from
@@ -2624,6 +2723,7 @@ function ScheduleView({
                               <span className="text-[11px] font-semibold text-slate-200 truncate">{job.name}</span>
                               {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
                               {job.assignment.pinned && !conflict && <Pin size={9} className="text-amber-400 shrink-0" />}
+                              {!job.assignment.pinned && lockedEquip && <Lock size={9} className="text-amber-400 shrink-0" />}
                               {preferredMissed && <Target size={9} className="text-amber-400 shrink-0" />}
                               {job.parallelProcessing && <Users size={9} className="text-sky-400 shrink-0" />}
                             </div>
@@ -2922,6 +3022,7 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
                       <span className="flex items-center gap-1">
                         {eq.name}{personLabel ? ` · ${personLabel}` : ''}
                         {j.assignment.pinned && <Pin size={11} className="text-amber-400" />}
+                        {!j.assignment.pinned && j.lockedEquipmentId && <Lock size={11} className="text-amber-400" title="Locked to this equipment" />}
                         {j.assignment.conflict && <AlertTriangle size={11} className="text-red-400" />}
                       </span>
                     ) : <span className="text-amber-500">Unscheduled</span>}
@@ -3430,6 +3531,15 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   // mean a template's preferred equipment (or picking one here) could
   // silently force-pin a job the user never asked to lock down.
   const [preferredEquipmentId, setPreferredEquipmentId] = useState(job?.preferredEquipmentId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).preferredEquipmentId) || '');
+  // A hard restriction, but a lighter one than manualEquipId/manualStartDate
+  // below: it confines the job to one machine — the scheduler will not place
+  // it anywhere else, and waits for that machine rather than quietly using a
+  // free one, same as job.staffId does for a person — but still picks the day
+  // and the operator automatically, same as an ordinary unpinned job. Neither
+  // the full pin (which also fixes the day and stops the operator moving) nor
+  // preferredEquipmentId (which only narrows the scheduler's first choice and
+  // falls back freely) covers that middle case on its own.
+  const [lockedEquipmentId, setLockedEquipmentId] = useState(job?.lockedEquipmentId || '');
   // Equipment/start date shown here reflect wherever the job currently sits
   // (auto-placed or pinned) — editing either is equivalent to dragging the
   // job on the Schedule view (#28), so it only actually re-pins the job if
@@ -3544,6 +3654,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       procedureId,
       staffId: staffId || null,
       preferredEquipmentId: preferredEquipmentId || null,
+      lockedEquipmentId: lockedEquipmentId || null,
       actualHours: job?.actualHours,
       bcJobNo: bcJobNo.trim(),
       bcJobTaskNo: bcJobTaskNo.trim(),
@@ -3766,16 +3877,48 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               </p>
             )}
 
-            {/* Preferred equipment: a soft nudge, not a pin (unlike the field
-                above). Some jobs can technically run on any compatible machine
-                but are better suited to one in particular — this narrows the
-                scheduler's choice to it when possible without fixing the day
-                or operator. If that machine genuinely can't take it (booked
-                solid, no longer compatible), the job is auto-placed on the
-                best available alternative instead and flagged for review on
-                the Schedule view rather than left unscheduled. Also settable
-                as a default on the job's template (TemplateModal) — picking a
-                template here copies it across, same as tags/process. */}
+            {/* Locked equipment: a hard restriction, but not a pin — the
+                middle ground between the Equipment field above (which also
+                fixes the exact day and stops the operator moving) and
+                Preferred equipment below (which is only a nudge and falls
+                back freely). The scheduler will only ever place this job on
+                the locked machine — waiting for it rather than quietly using
+                a free one, same as job.staffId does for a person — but the
+                day and the operator are still picked and kept up to date
+                automatically, same as any other unpinned job. If the locked
+                machine genuinely can't take it in the horizon, the job lands
+                in "Needs scheduling" naming the machine, same as a manually
+                assigned job would name an unavailable person. */}
+            {!parts && (
+              <Field label="Locked equipment (optional)">
+                <select className={inputCls} value={lockedEquipmentId} onChange={(e) => setLockedEquipmentId(e.target.value)}>
+                  <option value="">Not locked — any compatible equipment</option>
+                  {qualifiedEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  {lockedEquipmentId && !qualifiedEquip.some((e) => e.id === lockedEquipmentId) && (
+                    <option value={lockedEquipmentId}>
+                      {equipment.find((e) => e.id === lockedEquipmentId)?.name || 'Former equipment'} — no longer compatible
+                    </option>
+                  )}
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  {lockedEquipmentId
+                    ? `Locked to ${equipment.find((e) => e.id === lockedEquipmentId)?.name || 'this equipment'} — the job waits for it instead of moving to whatever's free, but the scheduler still chooses the day and the operator.`
+                    : 'Confines the job to one machine (waits for it rather than using another) without fixing the day or operator like the Equipment field above.'}
+                </p>
+              </Field>
+            )}
+
+            {/* Preferred equipment: a soft nudge, not a pin (unlike the two
+                fields above). Some jobs can technically run on any compatible
+                machine but are better suited to one in particular — this
+                narrows the scheduler's choice to it when possible without
+                fixing the day or operator. If that machine genuinely can't
+                take it (booked solid, no longer compatible), the job is
+                auto-placed on the best available alternative instead and
+                flagged for review on the Schedule view rather than left
+                unscheduled. Also settable as a default on the job's template
+                (TemplateModal) — picking a template here copies it across,
+                same as tags/process. */}
             {!parts && (
               <Field label="Preferred equipment (optional)">
                 <select className={inputCls} value={preferredEquipmentId} onChange={(e) => setPreferredEquipmentId(e.target.value)}>
