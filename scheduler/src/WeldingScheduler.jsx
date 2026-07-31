@@ -3,7 +3,7 @@ import {
   Plus, X, Settings2, Calendar, Users, Wrench, Check, AlertTriangle,
   Monitor, ChevronLeft, ChevronRight, ChevronDown, Trash2, Pencil, Pin, PinOff,
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
-  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut
+  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut, Target
 } from 'lucide-react';
 import {
   parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
@@ -48,6 +48,11 @@ import {
    departmentValue              →  no standard BC field — candidate for a custom field on the
                                     Job Task Line (this department's share of the contract value)
    status / completedDate       →  Job "Status" (Open/Completed) and its status-change date
+   preferredEquipmentId         →  no BC equivalent — internal-only. A soft scheduling nudge
+                                    (unlike a pin, or job.staffId): the scheduler tries this
+                                    machine first when auto-placing the job and falls back to
+                                    whichever compatible machine finishes soonest if it can't be
+                                    honoured, flagging the assignment for review either way.
    bcJobNo                      →  Job No. (the BC key to link back to) — optional, blank until linked
    bcJobTaskNo                  →  Job Task No. — optional, blank until linked
    updatedAt                    →  used to drive delta/incremental sync (only push what changed)
@@ -1776,9 +1781,16 @@ export default function WeldingScheduler() {
   const allTags = useMemo(() => [...new Set([...equipment.flatMap((e) => e.tags || []), ...templates.flatMap((t) => t.tags || [])])].sort(), [equipment, templates]);
 
   // Flattened to part level (not just job level) so a split job's specific
-  // unscheduled/conflicted part can be dragged onto the schedule on its own.
+  // unscheduled/conflicted/preference-missed part can be dragged onto the
+  // schedule on its own.
   const unscheduledJobs = [];
   const conflictJobs = [];
+  // Preferred equipment (job.preferredEquipmentId) is a soft nudge, not a
+  // pin — the scheduler falls back to the best available alternative rather
+  // than refusing to place the job. `preferredEquipmentUnmet` is how that
+  // fallback gets surfaced instead of silently swallowed: same idea as
+  // `conflictJobs`, just for a missed preference rather than an overbooking.
+  const preferredEquipJobs = [];
   jobs.forEach((j) => {
     if (j.status === 'complete') return;
     if (Array.isArray(j.parts)) {
@@ -1794,16 +1806,19 @@ export default function WeldingScheduler() {
           readyDate: j.readyDate,
           dueDate: j.dueDate,
           departmentDueDate: j.departmentDueDate,
+          preferredEquipmentId: j.preferredEquipmentId,
           assignment: p.assignment,
           unschedReason: p.unschedReason,
           _parentJob: j,
         };
         if (!p.assignment) unscheduledJobs.push(unit);
         if (p.assignment && p.assignment.conflict) conflictJobs.push(unit);
+        if (p.assignment && p.assignment.preferredEquipmentUnmet) preferredEquipJobs.push(unit);
       });
     } else {
       if (!j.assignment) unscheduledJobs.push(j);
       if (j.assignment && j.assignment.conflict) conflictJobs.push(j);
+      if (j.assignment && j.assignment.preferredEquipmentUnmet) preferredEquipJobs.push(j);
     }
   });
 
@@ -1905,6 +1920,7 @@ export default function WeldingScheduler() {
             onEditJob={(j) => !readOnly && setEditingJob(j)}
             unscheduledJobs={unscheduledJobs}
             conflictJobs={conflictJobs}
+            preferredEquipJobs={preferredEquipJobs}
             onAddJob={() => setEditingJob('new')}
             zoom={zoom}
             setZoom={setZoom}
@@ -2266,7 +2282,7 @@ function buildJobSegments(job, visibleDays, colWidth, staffColor) {
 function ScheduleView({
   equipment, staff, jobs, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
-  onEditJob, unscheduledJobs, conflictJobs, onAddJob, zoom, setZoom, onToggleEquipDay,
+  onEditJob, unscheduledJobs, conflictJobs, preferredEquipJobs = [], onAddJob, zoom, setZoom, onToggleEquipDay,
 }) {
   // Zoom scales both axes of the grid so more of it — including the next
   // piece of equipment — fits on screen at once. Without it, a fully-booked
@@ -2540,8 +2556,9 @@ function ScheduleView({
                       const staffIds = [...new Set((job.assignment.days || []).map((e) => e.staffId).filter(Boolean))];
                       const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Unassigned';
                       const conflict = job.assignment.conflict;
+                      const preferredMissed = job.assignment.preferredEquipmentUnmet;
                       const manualStaff = parent.staffId ? staff.find((s) => s.id === parent.staffId) : null;
-                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}`;
+                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}`;
                       const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
                       // A job is being dragged over THIS row's name cell,
                       // about to take its slot on drop (#55) — distinct from
@@ -2607,6 +2624,7 @@ function ScheduleView({
                               <span className="text-[11px] font-semibold text-slate-200 truncate">{job.name}</span>
                               {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
                               {job.assignment.pinned && !conflict && <Pin size={9} className="text-amber-400 shrink-0" />}
+                              {preferredMissed && <Target size={9} className="text-amber-400 shrink-0" />}
                               {job.parallelProcessing && <Users size={9} className="text-sky-400 shrink-0" />}
                             </div>
                             <div className="flex items-center gap-1.5 min-w-0">
@@ -2675,6 +2693,23 @@ function ScheduleView({
                 {conflictJobs.map((j) => (
                   <button key={j.id} onClick={() => onEditJob(j._parentJob || j)} className="w-full text-left text-xs bg-slate-900/60 hover:bg-slate-900 rounded px-2 py-1.5 text-slate-300">
                     {j.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {preferredEquipJobs.length > 0 && (
+            <div className="flex-1 min-w-0 border border-amber-900 bg-amber-950/20 rounded-lg p-3">
+              <h3 className="text-xs font-semibold text-amber-300 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                <Target size={13} /> Not on preferred equipment ({preferredEquipJobs.length})
+              </h3>
+              <div className="space-y-1.5">
+                {preferredEquipJobs.map((j) => (
+                  <button key={j.id} onClick={() => onEditJob(j._parentJob || j)} className="w-full text-left text-xs bg-slate-900/60 hover:bg-slate-900 rounded px-2 py-1.5 text-slate-300">
+                    {j.name}
+                    <span className="block text-slate-500">
+                      wanted {equipment.find((e) => e.id === j.preferredEquipmentId)?.name || 'equipment no longer available'}, placed elsewhere — not a conflict, just worth a look
+                    </span>
                   </button>
                 ))}
               </div>
@@ -3388,6 +3423,13 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [staffId, setStaffId] = useState(job?.staffId || '');
   const [tags, setTags] = useState(job?.tags || (job ? [] : (templates.find((t) => t.id === templateId) || {}).tags) || []);
   const [procedureId, setProcedureId] = useState(job?.procedureId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).procedureId) || '');
+  // A soft nudge, not a pin — deliberately its own field, independent of
+  // manualEquipId/manualStartDate below. Those two build a hard placement
+  // (exact day, no operator picked automatically); this only ever narrows
+  // which machine the scheduler tries first, so conflating the two would
+  // mean a template's preferred equipment (or picking one here) could
+  // silently force-pin a job the user never asked to lock down.
+  const [preferredEquipmentId, setPreferredEquipmentId] = useState(job?.preferredEquipmentId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).preferredEquipmentId) || '');
   // Equipment/start date shown here reflect wherever the job currently sits
   // (auto-placed or pinned) — editing either is equivalent to dragging the
   // job on the Schedule view (#28), so it only actually re-pins the job if
@@ -3419,6 +3461,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       setHoursPerUnit(t.hoursPerUnit);
       setTags(t.tags || []);
       setProcedureId(t.procedureId || '');
+      setPreferredEquipmentId(t.preferredEquipmentId || '');
       if (t.totalValuePerUnit) setTotalValue(Math.round(t.totalValuePerUnit * quantity * 100) / 100);
       if (t.departmentValuePerUnit) setDepartmentValue(Math.round(t.departmentValuePerUnit * quantity * 100) / 100);
     }
@@ -3500,6 +3543,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       tags,
       procedureId,
       staffId: staffId || null,
+      preferredEquipmentId: preferredEquipmentId || null,
       actualHours: job?.actualHours,
       bcJobNo: bcJobNo.trim(),
       bcJobTaskNo: bcJobTaskNo.trim(),
@@ -3720,6 +3764,35 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                   ? `Pinned to ${equipment.find((e) => e.id === manualEquipId)?.name || 'this equipment'} starting ${fmtDate(manualStartDate || readyDate)} on Save — same as dragging it there on the Schedule view. Won't move until this is changed or unpinned.`
                   : 'The scheduler will pick whichever compatible, free equipment fits it in soonest.'}
               </p>
+            )}
+
+            {/* Preferred equipment: a soft nudge, not a pin (unlike the field
+                above). Some jobs can technically run on any compatible machine
+                but are better suited to one in particular — this narrows the
+                scheduler's choice to it when possible without fixing the day
+                or operator. If that machine genuinely can't take it (booked
+                solid, no longer compatible), the job is auto-placed on the
+                best available alternative instead and flagged for review on
+                the Schedule view rather than left unscheduled. Also settable
+                as a default on the job's template (TemplateModal) — picking a
+                template here copies it across, same as tags/process. */}
+            {!parts && (
+              <Field label="Preferred equipment (optional)">
+                <select className={inputCls} value={preferredEquipmentId} onChange={(e) => setPreferredEquipmentId(e.target.value)}>
+                  <option value="">No preference — any compatible equipment</option>
+                  {qualifiedEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  {preferredEquipmentId && !qualifiedEquip.some((e) => e.id === preferredEquipmentId) && (
+                    <option value={preferredEquipmentId}>
+                      {equipment.find((e) => e.id === preferredEquipmentId)?.name || 'Former equipment'} — no longer compatible
+                    </option>
+                  )}
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  {preferredEquipmentId
+                    ? "The scheduler will try this machine first when placing the job, without pinning its day or operator. If it can't, the job goes to the best available alternative instead and is flagged for review."
+                    : "Set this when a job can run on several machines but is better suited to one — doesn't pin the day or operator like the Equipment field above."}
+                </p>
+              </Field>
             )}
 
             {/* Manual staff assignment. Normally the scheduler picks whoever is free
@@ -4235,6 +4308,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
         readyDate: raw?.readyDate || '',
         dueDate: raw?.dueDate || addDays(isoDate(new Date()), 14),
         templateId: raw?.templateId || null,
+        preferredEquipmentId: raw?.preferredEquipmentId || null,
         notes: raw?.notes || '',
         totalValue: Number(raw?.totalValue) || 0,
         departmentValue: Number(raw?.departmentValue) || 0,
@@ -4423,7 +4497,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
       if (r._rowId !== rowId) return r;
       const hoursTotal = Math.round(r.quantity * t.hoursPerUnit * 100) / 100;
       const departmentValue = r.departmentValue > 0 ? r.departmentValue : Math.round(r.quantity * (t.departmentValuePerUnit || 0) * 100) / 100;
-      return { ...r, templateId, process: t.process, hoursTotal, departmentValue };
+      return { ...r, templateId, process: t.process, hoursTotal, departmentValue, preferredEquipmentId: t.preferredEquipmentId || null };
     }));
   }
 
@@ -4434,7 +4508,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
       if (!r.include || r.templateId) return r; // don't clobber rows already assigned
       const hoursTotal = Math.round(r.quantity * t.hoursPerUnit * 100) / 100;
       const departmentValue = r.departmentValue > 0 ? r.departmentValue : Math.round(r.quantity * (t.departmentValuePerUnit || 0) * 100) / 100;
-      return { ...r, templateId: bulkTemplateId, process: t.process, hoursTotal, departmentValue };
+      return { ...r, templateId: bulkTemplateId, process: t.process, hoursTotal, departmentValue, preferredEquipmentId: t.preferredEquipmentId || null };
     }));
   }
 
@@ -4953,6 +5027,7 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
   const [hoursPerUnit, setHoursPerUnit] = useState(template?.hoursPerUnit ?? 1);
   const [totalValuePerUnit, setTotalValuePerUnit] = useState(template?.totalValuePerUnit ?? '');
   const [departmentValuePerUnit, setDepartmentValuePerUnit] = useState(template?.departmentValuePerUnit ?? '');
+  const [preferredEquipmentId, setPreferredEquipmentId] = useState(template?.preferredEquipmentId || '');
 
   const compatibleEquip = equipment.filter((e) => e.processes.includes(process));
   // Live preview of what the scheduler will actually use — same test as
@@ -5025,6 +5100,20 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
           </div>
         )}
       </Field>
+      <Field label="Preferred equipment (optional)">
+        <select className={inputCls} value={preferredEquipmentId} onChange={(e) => setPreferredEquipmentId(e.target.value)}>
+          <option value="">No preference — any compatible equipment</option>
+          {matchingEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          {preferredEquipmentId && !matchingEquip.some((e) => e.id === preferredEquipmentId) && (
+            <option value={preferredEquipmentId}>
+              {equipment.find((e) => e.id === preferredEquipmentId)?.name || 'Former equipment'} — no longer compatible
+            </option>
+          )}
+        </select>
+        <p className="text-xs text-slate-500 mt-1">
+          A job made from this template (directly, or via WIP import) starts with this as its own preferred equipment — a soft nudge the scheduler tries first, not a pin. Still editable per job.
+        </p>
+      </Field>
       <div className="flex justify-end gap-2 pt-2 border-t border-slate-800 mt-3">
         <button className={btnGhost} onClick={onClose}>Cancel</button>
         <button
@@ -5039,6 +5128,7 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
             hoursPerUnit: Number(hoursPerUnit) || 1,
             totalValuePerUnit: totalValuePerUnit === '' ? null : Number(totalValuePerUnit),
             departmentValuePerUnit: departmentValuePerUnit === '' ? null : Number(departmentValuePerUnit),
+            preferredEquipmentId: preferredEquipmentId || null,
           })}
         ><Check size={14} /> Save</button>
       </div>

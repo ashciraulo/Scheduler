@@ -710,6 +710,53 @@ modal never force-pins an auto-placed job. Clearing the equipment field back
 to "Automatic" unpins a pinned job the same way the existing "Unpin" button
 does.
 
+### Preferred equipment — a soft nudge, not a pin
+
+Some jobs can technically run on any process/tag-compatible machine but are
+better suited to one in particular. `job.preferredEquipmentId` (optional,
+nullable) records that without pinning the job the way the Equipment field
+above does — no exact day, no operator lock, and the job stays free to move
+on future recomputes. It's set two ways: by hand, from a dedicated "Preferred
+equipment" select in `JobModal`'s Scheduling section (deliberately a
+*separate* field from the hard-pin Equipment select right above it — the two
+build genuinely different assignment shapes, and conflating them risked a
+picked preference silently turning into a full pin, or a template's default
+preference silently overwriting a manual pin); or inherited from a job's
+template (`TemplateModal` has the same field, `applyTemplate` copies it
+across exactly like tags/process/hours, and `ImportJobsModal`'s
+`applyTemplateToRow`/`applyBulkTemplate` do the same when a WIP import row
+gets a template assigned during review).
+
+`runScheduler` only ever consults it when auto-placing an **unpinned** job —
+a pin is already a stronger, exact placement, so a pinned job's own
+preference (if it has one) is simply never looked at. Among the machines that can
+actually fit the job somewhere in the horizon (`candidates`, built the same
+way as ever from process + `tagOk`), the preferred one wins outright if it's
+among them — not just as a tie-break the way `exclusiveDemand` is — so it can
+beat a machine that would otherwise finish the job sooner. It's still only a
+preference: if the preferred machine isn't process/tag-compatible, or
+genuinely has no free slot anywhere in the horizon, it never makes it into
+`candidates` at all, and placement falls straight through to the ordinary
+soonest-finish selection — the job still gets scheduled, just not where it
+was preferred. Either way the resulting `assignment.preferredEquipmentUnmet`
+records which happened (`false` when honoured, `true` when it had to fall
+back), computed once from `best.equipId !== job.preferredEquipmentId` rather
+than threaded through as extra state.
+
+`preferredEquipmentUnmet` is deliberately not folded into `conflict` — a
+missed preference isn't an overbooking, it's a "the schedule is fine, but
+you might want to look at this" signal, so it gets its own amber
+"Not on preferred equipment" panel on the Schedule view (next to Overbooked
+and Needs scheduling) and its own small `Target` icon on the job tile,
+distinct from the red `AlertTriangle` conflict marker. A split job's parts
+all carry the parent's preference (same as tags/`parallelProcessing`) and
+are judged individually — one part can land on its preferred machine while a
+sibling part doesn't. A batch only carries a preference forward if every
+member agreed on the same equipment, same reasoning as batch `staffId`; a
+mixed batch places as if no preference were set at all, and the per-member
+`preferredEquipmentUnmet` on expansion is still judged against each member's
+own preference, not the batch's (possibly absent) unanimous one.
+
 ### Parallel processing (#30)
 
 By default the scheduler never double-books an operator — `tryFit` requires
