@@ -159,6 +159,121 @@ describe('machine choice', () => {
   });
 });
 
+describe('preferred equipment — a soft nudge, not a pin', () => {
+  test('an unpinned job with a preference is placed there even when another machine would finish it sooner', () => {
+    const d = days();
+    // e1 is already tied up, so e2 would ordinarily win on "finishes soonest"
+    // — but the job prefers e1, and e1 is not full, just slower to free up.
+    const blocker = job('blocker', {
+      hoursTotal: 16,
+      assignment: { equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+    });
+    const out = runScheduler(
+      [blocker, job('preferring', { hoursTotal: 8, preferredEquipmentId: 'e1', dueDate: '2026-03-19' })],
+      [equip('e1'), equip('e2')],
+      [person('s1'), person('s2')],
+      d,
+    );
+    const a = byId(out, 'preferring').assignment;
+    assert.equal(a.equipmentId, 'e1', 'the preference should win over the machine that would finish soonest');
+    assert.equal(a.preferredEquipmentUnmet, false, 'the preference was honoured, so nothing needs review');
+  });
+
+  test('falls back to the best available machine, flagged for review, when the preferred one has no free capacity in the horizon', () => {
+    const d = days();
+    // e1 is blocked out for every day in the horizon, so it can never offer a
+    // fit — this must not leave the job unscheduled, just not on e1.
+    const out = runScheduler(
+      [job('preferring', { hoursTotal: 8, preferredEquipmentId: 'e1', dueDate: '2026-03-19' })],
+      [equip('e1', { unavailableDates: [...d] }), equip('e2')],
+      [person('s1'), person('s2')],
+      d,
+    );
+    const a = byId(out, 'preferring').assignment;
+    assert.ok(a, 'the job must still be placed somewhere, not left unscheduled');
+    assert.equal(a.equipmentId, 'e2', 'falls back to the only other compatible machine');
+    assert.equal(a.preferredEquipmentUnmet, true, 'the missed preference should be flagged for review');
+  });
+
+  test('falls back, flagged, when the preferred equipment cannot run the process at all', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('preferring', { hoursTotal: 8, preferredEquipmentId: 'wrongProcess' })],
+      [equip('wrongProcess', { processes: ['Coat'] }), equip('e2')],
+      [person('s1')], d,
+    );
+    const a = byId(out, 'preferring').assignment;
+    assert.equal(a.equipmentId, 'e2');
+    assert.equal(a.preferredEquipmentUnmet, true);
+  });
+
+  test('a pinned job is unaffected by its own preference — pinning is already a stronger, exact placement', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('pinned-elsewhere', {
+        hoursTotal: 8, preferredEquipmentId: 'e1',
+        assignment: { equipmentId: 'e2', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+      })],
+      [equip('e1'), equip('e2')], [person('s1')], d,
+    );
+    assert.equal(byId(out, 'pinned-elsewhere').assignment.equipmentId, 'e2');
+  });
+
+  test('no preference set behaves exactly as before — finishes-soonest selection, no flag', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('plain', { hoursTotal: 8 })],
+      [equip('e1'), equip('e2')], [person('s1')], d,
+    );
+    assert.equal(byId(out, 'plain').assignment.preferredEquipmentUnmet, false);
+  });
+
+  test('every part of a split job inherits the parent’s preference', () => {
+    const d = days();
+    const split = job('split', {
+      preferredEquipmentId: 'e1',
+      hoursTotal: 16,
+      parts: [
+        { id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+      ],
+    });
+    const out = runScheduler([split], [equip('e1'), equip('e2')], [person('s1'), person('s2')], d);
+    const parts = byId(out, 'split').parts;
+    assert.ok(parts.every((p) => p.assignment.equipmentId === 'e1'), 'both parts should land on the preferred machine');
+  });
+
+  test('a batch only carries the preference forward if every member agreed on the same equipment', () => {
+    const d = days();
+    const agreed = runScheduler(
+      [
+        job('b1', { hoursTotal: 8, batchId: 'batchPref', batchOrder: 0, preferredEquipmentId: 'e1' }),
+        job('b2', { hoursTotal: 8, batchId: 'batchPref', batchOrder: 1, preferredEquipmentId: 'e1' }),
+      ],
+      [equip('e1'), equip('e2')], [person('s1')], d,
+    );
+    assert.equal(byId(agreed, 'b1').assignment.equipmentId, 'e1');
+    assert.equal(byId(agreed, 'b2').assignment.equipmentId, 'e1');
+
+    const blocker = job('blocker', {
+      hoursTotal: 16,
+      assignment: { equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+    });
+    const mixed = runScheduler(
+      [
+        blocker,
+        job('c1', { hoursTotal: 8, batchId: 'batchPref2', batchOrder: 0, preferredEquipmentId: 'e1', dueDate: '2026-03-19' }),
+        job('c2', { hoursTotal: 8, batchId: 'batchPref2', batchOrder: 1, preferredEquipmentId: 'e2', dueDate: '2026-03-19' }),
+      ],
+      [equip('e1'), equip('e2')], [person('s1'), person('s2')], d,
+    );
+    // No unanimous preference, so the group places automatically — off the
+    // busy e1, same as it would with no preference at all.
+    assert.equal(byId(mixed, 'c1').assignment.equipmentId, 'e2');
+    assert.equal(byId(mixed, 'c2').assignment.equipmentId, 'e2');
+  });
+});
+
 describe('who gets the work', () => {
   test('work does not all pile onto the first person in the list', () => {
     const d = days();

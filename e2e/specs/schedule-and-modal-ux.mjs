@@ -34,7 +34,9 @@ export default async function run({ page, check, errors, baseUrl }) {
         bodyScroll === 0, `scrollY=${bodyScroll}`);
 
   // ---- #28: equipment + planned start date are editable in the job modal ----
-  const equipSelect = modal().locator('label:has-text("Equipment") select');
+  // Exact label match, not has-text: "Preferred equipment (optional)" also
+  // contains the substring "Equipment" and would make this ambiguous.
+  const equipSelect = modal().locator('label:has(span:text-is("Equipment")) select');
   check('#28 the job modal has an Equipment field', (await equipSelect.count()) === 1);
   const dateInput = modal().locator('label:has-text("Planned start date") input[type=date]');
   check('#28 the job modal has a Planned start date field', (await dateInput.count()) === 1);
@@ -65,7 +67,7 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.locator(`tr:has-text("${before.name}")`).first().locator('button[title="Edit"]').click();
   await page.waitForSelector(modalSel);
   await page.waitForTimeout(200);
-  const sel = modal().locator('label:has-text("Equipment") select');
+  const sel = modal().locator('label:has(span:text-is("Equipment")) select');
   const values = await sel.locator('option').evaluateAll((opts) => opts.map((o) => o.value));
   const otherId = values.find((v) => v && v !== before.equipmentId);
   check('#28 another compatible equipment option exists to switch to', !!otherId, JSON.stringify(values));
@@ -84,7 +86,7 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.locator(`tr:has-text("${before.name}")`).first().locator('button[title="Edit"]').click();
   await page.waitForSelector(modalSel);
   await page.waitForTimeout(200);
-  await modal().locator('label:has-text("Equipment") select').selectOption('');
+  await modal().locator('label:has(span:text-is("Equipment")) select').selectOption('');
   await page.waitForTimeout(150);
   await modal().getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForTimeout(600);

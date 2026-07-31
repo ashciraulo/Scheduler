@@ -600,6 +600,10 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
           // part of it — the parts are separately *placed*, not separately
           // staffed.
           staffId: j.staffId || null,
+          // A preferred equipment (checkbox on the job, or inherited from its
+          // template) is a property of the work, same as tags — every part
+          // prefers the same machine the parent did.
+          preferredEquipmentId: j.preferredEquipmentId || null,
           // Same reasoning as tags: parallel-processing is a property of the
           // work (the automation runs unattended either way), so every part
           // gets it too, not just whichever part happened to trigger it.
@@ -624,6 +628,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
     // borrows whichever member most recently had a primary operator.
     const seedStaffId = members.map((m) => primaryStaffOf(m.assignment)).find(Boolean) || null;
     const staffIds = new Set(members.map((m) => m.staffId).filter(Boolean));
+    const preferredEquipIds = new Set(members.map((m) => m.preferredEquipmentId).filter(Boolean));
     jobs.push({
       id: `batch:${batchId}`,
       _batchId: batchId,
@@ -634,6 +639,9 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
       // the same person — a mixed group has no single "the user named them"
       // to honour, so it's automatic like an ordinary multi-person job.
       staffId: staffIds.size === 1 ? [...staffIds][0] : null,
+      // Same reasoning as staffId: a preference only carries into the combined
+      // run if every member agreed on the same equipment.
+      preferredEquipmentId: preferredEquipIds.size === 1 ? [...preferredEquipIds][0] : null,
       // Conservative both ways: the combined run can only share an operator
       // if EVERY member individually tolerates it, and needs to clear early
       // if ANY member does — being wrong the safe direction on either one is
@@ -841,29 +849,46 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
       // completely free — which is exactly what was piling every job onto one
       // robot and pushing due dates out.
       if (candidates.length) {
-        candidates.sort((a, b) => {
-          if (a.endDate !== b.endDate) return a.endDate < b.endDate ? -1 : 1;
-          if (a.startDate !== b.startDate) return a.startDate < b.startDate ? -1 : 1;
-          // This job would finish equally well on either machine — prefer the
-          // one fewer other pending jobs are exclusively stuck with, so a
-          // flexible job doesn't block a less-flexible one for no gain.
-          const aExcl = exclusiveDemand[a.equipId] || 0;
-          const bExcl = exclusiveDemand[b.equipId] || 0;
-          if (aExcl !== bExcl) return aExcl - bExcl;
-          // Still tied: take the machine that keeps the person who already had
-          // this job on it. Moving a job between equipment shouldn't change who
-          // is doing it when they're perfectly free to carry on.
-          if (seedStaffId) {
-            const aKeeps = primaryStaffOf({ days: a.plan }) === seedStaffId;
-            const bKeeps = primaryStaffOf({ days: b.plan }) === seedStaffId;
-            if (aKeeps !== bKeeps) return aKeeps ? -1 : 1;
-          }
-          const aStaffCount = new Set(a.plan.map((d) => d.staffId)).size;
-          const bStaffCount = new Set(b.plan.map((d) => d.staffId)).size;
-          if (aStaffCount !== bStaffCount) return aStaffCount - bStaffCount; // fewer different people = less handover
-          return a.plan.length - b.plan.length; // fewer chunks = less fragmented
-        });
-        best = candidates[0];
+        // Preferred equipment (job.preferredEquipmentId — a soft nudge, set
+        // by hand on the job or inherited from its template) wins outright
+        // over "finishes soonest" whenever it's actually among the feasible
+        // candidates, rather than only breaking ties. It's still just a
+        // preference, not a pin: if it's not process/tag-compatible, or
+        // genuinely has no free slot in the horizon, it never makes it into
+        // `candidates` at all, and placement falls through to the ordinary
+        // soonest-finish selection below — the job still gets scheduled, just
+        // not where it was preferred, which is what the
+        // `preferredEquipmentUnmet` flag on the resulting assignment is for.
+        const preferred = job.preferredEquipmentId
+          ? candidates.find((c) => c.equipId === job.preferredEquipmentId)
+          : null;
+        if (preferred) {
+          best = preferred;
+        } else {
+          candidates.sort((a, b) => {
+            if (a.endDate !== b.endDate) return a.endDate < b.endDate ? -1 : 1;
+            if (a.startDate !== b.startDate) return a.startDate < b.startDate ? -1 : 1;
+            // This job would finish equally well on either machine — prefer the
+            // one fewer other pending jobs are exclusively stuck with, so a
+            // flexible job doesn't block a less-flexible one for no gain.
+            const aExcl = exclusiveDemand[a.equipId] || 0;
+            const bExcl = exclusiveDemand[b.equipId] || 0;
+            if (aExcl !== bExcl) return aExcl - bExcl;
+            // Still tied: take the machine that keeps the person who already had
+            // this job on it. Moving a job between equipment shouldn't change who
+            // is doing it when they're perfectly free to carry on.
+            if (seedStaffId) {
+              const aKeeps = primaryStaffOf({ days: a.plan }) === seedStaffId;
+              const bKeeps = primaryStaffOf({ days: b.plan }) === seedStaffId;
+              if (aKeeps !== bKeeps) return aKeeps ? -1 : 1;
+            }
+            const aStaffCount = new Set(a.plan.map((d) => d.staffId)).size;
+            const bStaffCount = new Set(b.plan.map((d) => d.staffId)).size;
+            if (aStaffCount !== bStaffCount) return aStaffCount - bStaffCount; // fewer different people = less handover
+            return a.plan.length - b.plan.length; // fewer chunks = less fragmented
+          });
+          best = candidates[0];
+        }
       }
     }
     if (best) {
@@ -874,6 +899,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
         endDate: best.plan[best.plan.length - 1].date,
         pinned: false,
         conflict: false,
+        preferredEquipmentUnmet: !!(job.preferredEquipmentId && best.equipId !== job.preferredEquipmentId),
         days: best.plan,
         claimOrder: claimCounter++,
       };
@@ -910,6 +936,10 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
             endDate: memberDays[memberDays.length - 1].date,
             pinned: false,
             conflict: false,
+            // Judged per member, not from the batch's own (unanimous-only)
+            // preference — a member can prefer equipment none of the others
+            // agreed on and still have that preference honoured or missed.
+            preferredEquipmentUnmet: !!(m.preferredEquipmentId && unit.assignment.equipmentId !== m.preferredEquipmentId),
             days: memberDays,
             claimOrder: unit.assignment.claimOrder,
           } : null,
