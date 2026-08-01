@@ -42,8 +42,9 @@ export default async function run({ page, check, errors, baseUrl }) {
     await modal().locator('label:has-text("Quantity") input').fill('8');
     await modal().locator('label:has-text("Hours per unit") input').fill('1');
     await modal().locator('label:has-text("Assigned to") select').selectOption({ label: 'Alex' });
-    // Exact match, not has-text: "Preferred equipment (optional)" also
-    // contains the substring "Equipment" and would make this ambiguous.
+    // Exact match, not has-text: "Preferred equipment (optional)" and
+    // "Locked equipment (optional)" also contain the substring "Equipment"
+    // and would make this ambiguous.
     await modal().locator('label:has(span:text-is("Equipment")) select').selectOption({ label: equipLabel });
     await modal().locator('label:has-text("Planned start date") input[type=date]').fill(dateIso);
     await modal().getByRole('button', { name: 'Save', exact: true }).click();

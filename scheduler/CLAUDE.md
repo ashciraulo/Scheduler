@@ -757,6 +757,64 @@ mixed batch places as if no preference were set at all, and the per-member
 `preferredEquipmentUnmet` on expansion is still judged against each member's
 own preference, not the batch's (possibly absent) unanimous one.
 
+### Locked equipment — a hard restriction, not a pin
+
+Sits between the two mechanisms above: stronger than `preferredEquipmentId`
+(which the scheduler will happily abandon if the preferred machine can't take
+the job), but lighter than the Equipment field's full pin (which also fixes
+the exact day and stops the operator moving). `job.lockedEquipmentId`
+(optional, nullable) confines a job to one machine — the scheduler waits for
+it rather than quietly using a free one — while still auto-choosing the day
+and the operator on every recompute, exactly like an ordinary unpinned job.
+It's the equipment equivalent of `job.staffId`: same kind of hard
+restriction, just naming a machine instead of a person, and it's implemented
+that way — `eligibleEquipment(job, equipment)` (`scheduler.js`) narrows the
+process/tag-compatible fleet down to just the locked machine before
+placement is even attempted, the same way `eligibleStaffIds` narrows to a
+named person. Set from a dedicated "Locked equipment" select in `JobModal`'s
+Scheduling section, positioned between the Equipment field and Preferred
+equipment so the three read in order of strength.
+
+Because it's a straight restriction on `eligibleEquipment`, not a step
+`runScheduler` special-cases, it composes for free with everything already
+built on that function: `exclusiveDemand` counts a locked job as exclusively
+demanding its one machine (same as a job with only one process-compatible
+machine to begin with), the unpinned placement sort gives it the same
+first-call priority a manually-assigned (`staffId`) job gets — it only has
+one resource to draw on — and a pinned job's own lock is never consulted,
+same reasoning as a pinned job's own preference: pinning is already a
+stronger, exact placement. If the locked machine genuinely can't take the
+job anywhere in the horizon (no capacity, or it's no longer process/tag
+compatible), the job lands in "Needs scheduling" naming the machine
+specifically (`whyUnscheduled`), rather than silently falling back to
+another machine the way a missed preference does — that fallback is exactly
+what a lock is for *not* doing. Split-job parts all inherit the parent's
+lock (same as `tags`/`preferredEquipmentId`); a batch only carries it
+forward if every member agreed on the same machine, same reasoning as batch
+`staffId`/`preferredEquipmentId` — a mixed group places as if unrestricted.
+
+**The equipment equivalent of "Overriding a busy person" (#46)**: a lock
+only wins against another *unpinned* job automatically (placement order
+already favours it, same as `staffId`) — a **pinned** job already sitting on
+the locked machine for the days this one needs is a standing claim
+`runScheduler` settles before the locked job gets a turn at all (pinned jobs
+place first, full stop), so it lands unscheduled instead.
+`findEquipmentLockBlockers` (`WeldingScheduler.jsx`) is called right after a
+save that leaves a locked job with no assignment: it looks for pinned jobs
+(or pinned parts) sitting on that same machine on or after the job's
+`readyDate` and, if it finds any, opens a "Machine already committed
+elsewhere" dialog naming them with an "Unpin so it can move elsewhere"
+action per blocker — the direct equipment-side mirror of
+`findManualAssignBlockers`/`checkManualAssignConflict`/
+`unpinForManualAssign`, right down to unpinning only freeing the blocker to
+be re-placed (not handing the machine over directly), since a locked job
+already places before automatic ones among the unpinned.
+
+A small `Lock` marker (amber, same treatment as the `UserCheck` staff-lock
+marker) shows on a locked job's Schedule-view tile and its Backlog row,
+suppressed whenever the job is actually pinned — a pin already implies a
+fixed machine, so showing both markers would be redundant.
+
 ### Parallel processing (#30)
 
 By default the scheduler never double-books an operator — `tryFit` requires

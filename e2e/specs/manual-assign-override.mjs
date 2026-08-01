@@ -2,7 +2,7 @@
    elsewhere for those days should offer to unpin the blocker rather than
    just leaving the new job silently unscheduled. */
 
-import { modalSel } from '../lib/harness.mjs';
+import { modalSel, nextWeekday, isoDate } from '../lib/harness.mjs';
 
 export default async function run({ page, check, errors, baseUrl }) {
   const modal = () => page.locator(modalSel);
@@ -10,12 +10,21 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.goto(baseUrl, { waitUntil: 'load' });
   await page.waitForSelector('text=WELDCELL SCHEDULER');
 
+  // Anchored to the next Mon-Fri day, not literal "today" (#46's own
+  // conflict-dialog check flaked whenever the suite ran on a weekend, since
+  // Solo's roster below is Mon-Fri only — see nextWeekday). Computed here in
+  // Node and threaded into the page rather than recomputed with `new Date()`
+  // inside the evaluate callback, which runs in the browser and can't see
+  // this import.
+  const anchorIso = isoDate(nextWeekday(new Date()));
+
   // Seed a staff member whose only free time anywhere in the horizon is
-  // today, fully consumed by a pinned job — so a second, manually-assigned
-  // job to the same person is genuinely, unavoidably stuck without an
-  // override, not just unlucky with the auto-placement order.
-  await page.evaluate(() => {
-    const today = new Date();
+  // the anchor day, fully consumed by a pinned job — so a second,
+  // manually-assigned job to the same person is genuinely, unavoidably
+  // stuck without an override, not just unlucky with the auto-placement
+  // order.
+  await page.evaluate((anchorIso) => {
+    const today = new Date(anchorIso + 'T00:00:00');
     const iso = (d) => { const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0'); return `${y}-${m}-${day}`; };
     const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
     const farOut = new Date(today); farOut.setDate(farOut.getDate() + 200);
@@ -45,7 +54,7 @@ export default async function run({ page, check, errors, baseUrl }) {
     localStorage.setItem('wf::wf_staff', JSON.stringify(staff));
     localStorage.setItem('wf::wf_equipment', JSON.stringify(equipment));
     localStorage.setItem('wf::wf_jobs', JSON.stringify(jobs));
-  });
+  }, anchorIso);
   await page.reload({ waitUntil: 'load' });
   await page.waitForSelector('text=WELDCELL SCHEDULER');
   await page.waitForTimeout(400);
@@ -63,8 +72,9 @@ export default async function run({ page, check, errors, baseUrl }) {
   await modal().locator('label:has-text("Hours per unit") input').fill('4');
   // Ready date defaults to blank now (#59) — this job needs to actually be
   // eligible for placement (just blocked by Solo being busy) for the
-  // override flow below to mean anything.
-  await modal().locator('label:has-text("Ready for processing") input').fill(new Date().toISOString().slice(0, 10));
+  // override flow below to mean anything. Same anchor day as the seed data
+  // above, not literal "today".
+  await modal().locator('label:has-text("Ready for processing") input').fill(anchorIso);
   await modal().locator('label:has-text("Assigned to") select').selectOption({ label: 'Solo' });
   await modal().getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForTimeout(500);

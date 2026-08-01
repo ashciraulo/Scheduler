@@ -339,6 +339,127 @@ describe('manual staff assignment', () => {
   });
 });
 
+describe('hard equipment lock — like staffId, but for the machine', () => {
+  test('a locked job waits for its machine rather than taking one that would finish sooner', () => {
+    const d = days();
+    // e1 is tied up for a while; e2 is free the whole time and would
+    // ordinarily win on "finishes soonest" — but the job is locked to e1.
+    const blocker = job('blocker', {
+      hoursTotal: 16,
+      assignment: { equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+    });
+    const out = runScheduler(
+      [blocker, job('locked', { hoursTotal: 8, lockedEquipmentId: 'e1', dueDate: '2026-03-19' })],
+      [equip('e1'), equip('e2')],
+      [person('s1'), person('s2')],
+      d,
+    );
+    assert.equal(byId(out, 'locked').assignment.equipmentId, 'e1', 'must wait for its locked machine, not fall back to e2');
+  });
+
+  test('unlike a preference, a lock that the machine cannot honour leaves the job unscheduled instead of falling back', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('locked', { hoursTotal: 8, lockedEquipmentId: 'e1' })],
+      [equip('e1', { unavailableDates: [...d] }), equip('e2')],
+      [person('s1'), person('s2')],
+      d,
+    );
+    assert.equal(byId(out, 'locked').assignment, null, 'e2 is free but the lock forbids using it');
+    assert.match(byId(out, 'locked').unschedReason, /no free/i);
+  });
+
+  test('a lock onto equipment that cannot run the process leaves the job unscheduled, named specifically', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('locked', { hoursTotal: 8, lockedEquipmentId: 'wrongProcess' })],
+      [equip('wrongProcess', { processes: ['Coat'] }), equip('e2')],
+      [person('s1')], d,
+    );
+    assert.equal(byId(out, 'locked').assignment, null);
+    assert.match(byId(out, 'locked').unschedReason, /wrongProcess/);
+  });
+
+  test("the scheduler still picks the date and the operator — only the machine is fixed", () => {
+    const d = days();
+    // s1 only works Wednesday, s2 covers the rest — the locked job should
+    // still land on whichever operator is actually free, same as automatic.
+    const out = runScheduler(
+      [job('locked', { hoursTotal: 8, lockedEquipmentId: 'e1' })],
+      [equip('e1'), equip('e2')],
+      [person('s1', { roster: rosterOn(['wed']) }), person('s2')],
+      d,
+    );
+    const a = byId(out, 'locked').assignment;
+    assert.equal(a.equipmentId, 'e1');
+    assert.equal(a.pinned, false, 'a lock is not a pin — the day is still auto-chosen and can move on future recomputes');
+    assert.deepEqual(staffOn(a), ['s2'], 'the operator is still whoever is free, not fixed by the lock');
+  });
+
+  test('a pinned job is unaffected by its own lock — pinning is already a stronger, exact placement', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('pinned-elsewhere', {
+        hoursTotal: 8, lockedEquipmentId: 'e1',
+        assignment: { equipmentId: 'e2', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+      })],
+      [equip('e1'), equip('e2')], [person('s1')], d,
+    );
+    assert.equal(byId(out, 'pinned-elsewhere').assignment.equipmentId, 'e2');
+  });
+
+  test('a locked job is placed before automatic ones, same priority as a manually assigned one', () => {
+    const d = days();
+    const out = runScheduler(
+      [
+        job('auto', { dueDate: '2026-03-09', hoursTotal: 8 }),
+        job('locked', { dueDate: '2026-03-12', hoursTotal: 8, lockedEquipmentId: 'e1' }),
+      ],
+      [equip('e1')], [person('s1')], d,
+    );
+    assert.ok(byId(out, 'locked').assignment.startDate <= byId(out, 'auto').assignment.startDate);
+  });
+
+  test('every part of a split job inherits the parent’s lock', () => {
+    const d = days();
+    const split = job('split', {
+      lockedEquipmentId: 'e1',
+      hoursTotal: 16,
+      parts: [
+        { id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+      ],
+    });
+    const out = runScheduler([split], [equip('e1'), equip('e2')], [person('s1'), person('s2')], d);
+    const parts = byId(out, 'split').parts;
+    assert.ok(parts.every((p) => p.assignment.equipmentId === 'e1'), 'both parts should be confined to the locked machine');
+  });
+
+  test('a batch only carries the lock forward if every member agreed on the same machine', () => {
+    const d = days();
+    const agreed = runScheduler(
+      [
+        job('b1', { hoursTotal: 8, batchId: 'batchLock', batchOrder: 0, lockedEquipmentId: 'e1' }),
+        job('b2', { hoursTotal: 8, batchId: 'batchLock', batchOrder: 1, lockedEquipmentId: 'e1' }),
+      ],
+      [equip('e1'), equip('e2')], [person('s1')], d,
+    );
+    assert.equal(byId(agreed, 'b1').assignment.equipmentId, 'e1');
+    assert.equal(byId(agreed, 'b2').assignment.equipmentId, 'e1');
+
+    const mixed = runScheduler(
+      [
+        job('c1', { hoursTotal: 8, batchId: 'batchLock2', batchOrder: 0, lockedEquipmentId: 'e1' }),
+        job('c2', { hoursTotal: 8, batchId: 'batchLock2', batchOrder: 1, lockedEquipmentId: 'e2' }),
+      ],
+      [equip('e1'), equip('e2')], [person('s1')], d,
+    );
+    // No unanimous lock, so the group places automatically, same as no lock at all.
+    assert.ok(byId(mixed, 'c1').assignment, 'the mismatched group should still be schedulable, just unrestricted');
+    assert.equal(byId(mixed, 'c1').assignment.equipmentId, byId(mixed, 'c2').assignment.equipmentId);
+  });
+});
+
 describe('ordering', () => {
   test('equal due dates break toward the job needing further processing', () => {
     const d = days();

@@ -217,6 +217,20 @@ export function eligibleStaffIds(job, staff) {
   return qualified.map((s) => s.id);
 }
 
+// Equipment a job could actually run on: every process+tag compatible
+// machine, narrowed to exactly one if the job carries `job.lockedEquipmentId`
+// — the equipment equivalent of `job.staffId`: a hard restriction, not a
+// hint. Unlike `preferredEquipmentId` (a soft nudge only ever consulted among
+// machines that already fit), a lock changes which machines are even
+// considered in the first place — if the locked machine isn't process/tag
+// compatible, `eligibleEquipment` returns nothing for it at all, same as
+// naming someone via `job.staffId` who isn't signed off on the process.
+export function eligibleEquipment(job, equipment) {
+  const compat = equipment.filter((e) => e.processes.includes(job.process) && tagOk(job, e));
+  if (job.lockedEquipmentId) return compat.filter((e) => e.id === job.lockedEquipmentId);
+  return compat;
+}
+
 // `dueDate` is when the job is due to the client (or an end-of-month target)
 // — it's not necessarily when THIS department has to be finished with it.
 // `departmentDueDate` (optional) is the earlier internal deadline for jobs
@@ -546,9 +560,19 @@ export function whyUnscheduled(job, equipment, staff, days) {
     if (!person) return 'the person this job was assigned to is no longer on staff — reassign it or set it back to automatic';
     if (!person.processes.includes(job.process)) return `${person.name} isn't signed off on ${job.process} — reassign this job or set it back to automatic`;
   }
+  // Same reasoning, for a hard equipment lock (job.lockedEquipmentId): it
+  // narrows the job to one machine, so a lock the machine can no longer
+  // honour is the most likely explanation and worth naming directly.
+  if (job.lockedEquipmentId) {
+    const locked = equipment.find((e) => e.id === job.lockedEquipmentId);
+    if (!locked) return 'the equipment this job is locked to no longer exists — unlock it or lock it to a different machine';
+    if (!locked.processes.includes(job.process) || !tagOk(job, locked)) return `${locked.name} can't run this job — unlock it or lock it to a different machine`;
+  }
   if (job.readyDate && job.readyDate > days[days.length - 1]) return `not ready until ${fmtDate(job.readyDate)} — beyond the schedule horizon`;
   const assignee = job.staffId ? staff.find((s) => s.id === job.staffId) : null;
   if (assignee) return `${assignee.name} has no free ${job.hoursTotal}h alongside a free machine in the horizon — reassign this job or set it back to automatic`;
+  const lockedMachine = job.lockedEquipmentId ? equipment.find((e) => e.id === job.lockedEquipmentId) : null;
+  if (lockedMachine) return `${lockedMachine.name} has no free ${job.hoursTotal}h in the horizon — unlock this job or lock it to a different machine`;
   return `no free equipment/staff capacity in the horizon for ${job.hoursTotal}h`;
 }
 
@@ -604,6 +628,10 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
           // template) is a property of the work, same as tags — every part
           // prefers the same machine the parent did.
           preferredEquipmentId: j.preferredEquipmentId || null,
+          // A hard equipment lock is a property of the work too, same as
+          // staffId above — every part is restricted to the same machine the
+          // parent was.
+          lockedEquipmentId: j.lockedEquipmentId || null,
           // Same reasoning as tags: parallel-processing is a property of the
           // work (the automation runs unattended either way), so every part
           // gets it too, not just whichever part happened to trigger it.
@@ -629,6 +657,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
     const seedStaffId = members.map((m) => primaryStaffOf(m.assignment)).find(Boolean) || null;
     const staffIds = new Set(members.map((m) => m.staffId).filter(Boolean));
     const preferredEquipIds = new Set(members.map((m) => m.preferredEquipmentId).filter(Boolean));
+    const lockedEquipIds = new Set(members.map((m) => m.lockedEquipmentId).filter(Boolean));
     jobs.push({
       id: `batch:${batchId}`,
       _batchId: batchId,
@@ -642,6 +671,9 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
       // Same reasoning as staffId: a preference only carries into the combined
       // run if every member agreed on the same equipment.
       preferredEquipmentId: preferredEquipIds.size === 1 ? [...preferredEquipIds][0] : null,
+      // Same reasoning again, for a hard lock: only unanimous agreement
+      // carries it forward, otherwise the group places as if unrestricted.
+      lockedEquipmentId: lockedEquipIds.size === 1 ? [...lockedEquipIds][0] : null,
       // Conservative both ways: the combined run can only share an operator
       // if EVERY member individually tolerates it, and needs to clear early
       // if ANY member does — being wrong the safe direction on either one is
@@ -781,11 +813,12 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   // 2. Auto-schedule unpinned jobs into the earliest available slot, in order
   // of how little room each has to move.
   unpinned.sort((a, b) => {
-    // A job with a manual staff assignment places first: it can only draw on
-    // the one person the user named, so it gets first call on their time. An
-    // automatic job still has the whole qualified team to fall back on.
-    const aManual = a.staffId ? 0 : 1;
-    const bManual = b.staffId ? 0 : 1;
+    // A job with a manual staff assignment or a hard equipment lock places
+    // first: it can only draw on the one person named, or the one machine
+    // locked, so it gets first call on that resource. An automatic job still
+    // has the whole qualified team / compatible fleet to fall back on.
+    const aManual = (a.staffId || a.lockedEquipmentId) ? 0 : 1;
+    const bManual = (b.staffId || b.lockedEquipmentId) ? 0 : 1;
     if (aManual !== bManual) return aManual - bManual;
     // Then earliest (effective) due date.
     const byDue = new Date(effectiveDueDate(a)) - new Date(effectiveDueDate(b));
@@ -802,10 +835,13 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
   // machines finds them equally good, it defers to whichever one nothing
   // else is depending on exclusively — instead of camping on a machine a
   // less-flexible job needs and blocking it for no benefit to anyone.
+  // A job locked to one machine (job.lockedEquipmentId) is exclusive by
+  // definition, same as one with only a single process/tag-compatible
+  // machine to begin with — eligibleEquipment folds both cases together.
   const exclusiveDemand = {};
   equipment.forEach((e) => { exclusiveDemand[e.id] = 0; });
   unpinned.forEach((j) => {
-    const compat = equipment.filter((e) => e.processes.includes(j.process) && tagOk(j, e));
+    const compat = eligibleEquipment(j, equipment);
     if (compat.length === 1) exclusiveDemand[compat[0].id] += 1;
   });
 
@@ -820,7 +856,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
       job.unschedReason = whyUnscheduled(job, equipment, staff, days);
       return;
     }
-    const compatibleEquip = equipment.filter((e) => e.processes.includes(job.process) && tagOk(job, e));
+    const compatibleEquip = eligibleEquipment(job, equipment);
     const compatibleStaffIds = eligibleStaffIds(job, staff);
     const seedStaffId = stickyStaff.get(job.id);
     let best = null;
