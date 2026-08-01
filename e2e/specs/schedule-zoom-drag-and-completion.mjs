@@ -3,9 +3,17 @@
    switching away from the Schedule tab and back), and #51 (jobs should be
    draggable from the name column, not just the thin timeline bar). */
 
+import { nextWeekday, isoDate } from '../lib/harness.mjs';
+
 export default async function run({ page, check, errors, baseUrl }) {
   await page.goto(baseUrl, { waitUntil: 'load' });
   await page.waitForSelector('text=WELDCELL SCHEDULER');
+
+  // #49's fixtures below pin a job to "today" as the one day Alex (Mon-Fri
+  // roster) is busy — anchored to the next Mon-Fri day instead of literal
+  // "today" so the suite doesn't flake whenever it happens to run on a
+  // weekend (see nextWeekday).
+  const anchorIso = isoDate(nextWeekday(new Date()));
 
   // ---- #50: zoom persists across a tab switch ----
   await page.click('nav >> text=Schedule');
@@ -46,8 +54,8 @@ export default async function run({ page, check, errors, baseUrl }) {
         `${before.equipmentId} -> ${after.equipmentId}`);
 
   // ---- #49: completing a job doesn't reshuffle the schedule unless it finished early ----
-  await page.evaluate(() => {
-    const today = new Date();
+  await page.evaluate((anchorIso) => {
+    const today = new Date(anchorIso + 'T00:00:00');
     const iso = (d) => { const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0'); return `${y}-${m}-${day}`; };
     const staff = [{
       id: 'st_1', name: 'Alex', processes: ['Robotic MIG Welding'],
@@ -86,7 +94,7 @@ export default async function run({ page, check, errors, baseUrl }) {
     localStorage.setItem('wf::wf_staff', JSON.stringify(staff));
     localStorage.setItem('wf::wf_equipment', JSON.stringify(equipment));
     localStorage.setItem('wf::wf_jobs', JSON.stringify(jobs));
-  });
+  }, anchorIso);
   await page.reload({ waitUntil: 'load' });
   await page.waitForSelector('text=WELDCELL SCHEDULER');
   await page.waitForTimeout(500);
@@ -117,8 +125,8 @@ export default async function run({ page, check, errors, baseUrl }) {
 
   // Finishing early is the one case that's allowed to free anything up — and
   // only the amount actually saved.
-  await page.evaluate(() => {
-    const today = new Date();
+  await page.evaluate((anchorIso) => {
+    const today = new Date(anchorIso + 'T00:00:00');
     const iso = (d) => { const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0'); return `${y}-${m}-${day}`; };
     const staff = [{
       id: 'st_1', name: 'Alex', processes: ['Robotic MIG Welding'],
@@ -157,7 +165,7 @@ export default async function run({ page, check, errors, baseUrl }) {
     localStorage.setItem('wf::wf_staff', JSON.stringify(staff));
     localStorage.setItem('wf::wf_equipment', JSON.stringify(equipment));
     localStorage.setItem('wf::wf_jobs', JSON.stringify(jobs));
-  });
+  }, anchorIso);
   await page.reload({ waitUntil: 'load' });
   await page.waitForSelector('text=WELDCELL SCHEDULER');
   await page.waitForTimeout(500);
@@ -175,9 +183,9 @@ export default async function run({ page, check, errors, baseUrl }) {
 
   const dAfter = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_jobs') || '[]')
     .find((j) => j.name === 'Completion Test D')?.assignment);
-  const todayIso = await page.evaluate(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; });
+  // Same anchor day as the seed data above, not literal "today".
   check('#49 finishing 3h early frees exactly that 3h for another job the same day',
-        dAfter?.startDate === todayIso, JSON.stringify(dAfter));
+        dAfter?.startDate === anchorIso, JSON.stringify(dAfter));
 
   check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 }

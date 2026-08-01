@@ -77,6 +77,25 @@ export async function runSpec(spec, { baseUrl = BASE_URL, artifactDir } = {}) {
 /** Locator for the app's modal backdrop — see `Modal` in WeldingScheduler.jsx. */
 export const modalSel = 'div.fixed.inset-0.bg-black\\/60';
 
+/**
+ * Nudges a Date forward to the next Mon-Fri day. Several specs pin a
+ * fixture job to "today" as the one day a seeded Mon-Fri-only staff member
+ * is busy, or drop a job onto whatever the leftmost visible Schedule column
+ * is — both silently break whenever the suite happens to run on a weekend,
+ * the same class of flake `lastDay` was nudged for in
+ * parallel-processing.mjs (that one steps backward since it's picking the
+ * last day of a fixed horizon; this steps forward since it's picking an
+ * anchor "today").
+ */
+export function nextWeekday(d) {
+  const nd = new Date(d);
+  while (nd.getDay() === 0 || nd.getDay() === 6) nd.setDate(nd.getDate() + 1);
+  return nd;
+}
+
+/** ISO (YYYY-MM-DD) for a Date, in local time — matches scheduler.js's own isoDate. */
+export const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
 /** The toast names records it just changed, so wait it out before reading page text. */
 export async function clearToast(page) {
   await page.locator('div.fixed.bottom-5')

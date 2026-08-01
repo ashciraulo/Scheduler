@@ -21,16 +21,23 @@ export default async function run({ page, check, errors, baseUrl }) {
   const beforeAssign = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_jobs') || '[]')
     .find((j) => j.name === 'Bracket Weld - Standard')?.assignment);
 
-  // Block the first visible day on the first piece of equipment.
-  await dayButtons.nth(0).click();
+  // Block the day the seeded job is actually scheduled on — not assumed to
+  // be the first visible column (literal "today"), since the default
+  // Mon-Fri roster can push the job's real start a day or two later when
+  // the suite happens to run on a weekend.
+  const targetDate = beforeAssign.startDate;
+  const dayIndex = await page.evaluate((targetDate) => {
+    const today = new Date();
+    const t0 = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const [y, m, d] = targetDate.split('-').map(Number);
+    const target = new Date(y, m - 1, d);
+    return Math.round((target - t0) / 86400000);
+  }, targetDate);
+  await dayButtons.nth(dayIndex).click();
   await page.waitForTimeout(400);
 
   const eqAfter = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_equipment') || '[]')[0]);
-  const firstDay = await page.evaluate(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  });
-  check('#53 clicking the toggle adds the date to unavailableDates', eqAfter.unavailableDates.includes(firstDay), JSON.stringify(eqAfter.unavailableDates));
+  check('#53 clicking the toggle adds the date to unavailableDates', eqAfter.unavailableDates.includes(targetDate), JSON.stringify(eqAfter.unavailableDates));
 
   const afterAssign = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_jobs') || '[]')
     .find((j) => j.name === 'Bracket Weld - Standard')?.assignment);
@@ -38,11 +45,11 @@ export default async function run({ page, check, errors, baseUrl }) {
         afterAssign.equipmentId !== beforeAssign.equipmentId || afterAssign.startDate !== beforeAssign.startDate,
         `${JSON.stringify(beforeAssign)} -> ${JSON.stringify(afterAssign)}`);
 
-  // Toggling again clears it.
-  await dayButtons.nth(0).click();
+  // Toggling the same button again clears it.
+  await dayButtons.nth(dayIndex).click();
   await page.waitForTimeout(400);
   const eqCleared = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_equipment') || '[]')[0]);
-  check('#53 clicking the toggle again clears the block', !eqCleared.unavailableDates.includes(firstDay), JSON.stringify(eqCleared.unavailableDates));
+  check('#53 clicking the toggle again clears the block', !eqCleared.unavailableDates.includes(targetDate), JSON.stringify(eqCleared.unavailableDates));
 
   // Dragging a job onto a blocked day/equipment is rejected outright, not
   // silently accepted as an overbooked pin.
