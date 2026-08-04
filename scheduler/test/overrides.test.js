@@ -21,7 +21,8 @@ import assert from 'node:assert/strict';
 
 import {
   buildOverrideRecord, appendOverride, summariseOverrides, equipmentFlow,
-  attributeAffinity, MAX_OVERRIDES,
+  attributeAffinity, classifyAffinity, affinityFindings, dedupeFindings, weightEvidence,
+  overrideDateRange, TERM_READINGS, AFFINITY_TIERS, MAX_OVERRIDES,
 } from '../src/overrides.js';
 import { runScheduler } from '../src/scheduler.js';
 import { MONDAY, days, equip, person, job } from './helpers.js';
@@ -257,6 +258,177 @@ describe('attributeAffinity — "this kind of work belongs on that machine"', ()
   test('an empty history gives an empty grouping rather than throwing', () => {
     assert.deepEqual(attributeAffinity([], 'templateId'), {});
     assert.deepEqual(attributeAffinity(null, 'templateId'), {});
+  });
+});
+
+describe('presenting findings to a person who has to judge them', () => {
+  const group = (over = {}) => ({
+    n: 8, movedTo: { eq_2: 7, eq_3: 1 }, movedFrom: { eq_1: 8 }, existingPreferences: {},
+    top: { equipmentId: 'eq_2', count: 7, share: 7 / 8 }, ...over,
+  });
+
+  test('a group with no dominant machine is not a finding at all', () => {
+    const spread = group({ top: { equipmentId: 'eq_2', count: 3, share: 0.3 } });
+    assert.equal(classifyAffinity(spread), null,
+      'work being spread around says nothing — showing it as a pattern would be noise');
+  });
+
+  test('a thin group is still shown but labelled as too few to call', () => {
+    const thin = group({ n: 2, top: { equipmentId: 'eq_2', count: 2, share: 1 } });
+    assert.equal(classifyAffinity(thin).tier, 'too-few',
+      'two corrections at 100% is not a pattern, and the label has to say so');
+  });
+
+  test('tiers escalate with both count and consistency', () => {
+    assert.equal(classifyAffinity(group({ n: 4, top: { equipmentId: 'eq_2', count: 3, share: 0.75 } })).tier, 'emerging');
+    assert.equal(classifyAffinity(group()).tier, 'consistent');
+    // High count but scattered is deliberately NOT promoted.
+    assert.equal(classifyAffinity(group({ n: 20, top: { equipmentId: 'eq_2', count: 13, share: 0.65 } })).tier, 'emerging');
+  });
+
+  test('the SAME numbers classify differently depending on an existing preference', () => {
+    // This is the distinction the whole record.job capture exists to make.
+    const fresh = classifyAffinity(group());
+    const already = classifyAffinity(group({ existingPreferences: { eq_2: 7 } }));
+
+    assert.equal(fresh.kind, 'set-preference', 'nothing claimed yet → suggest recording a preference');
+    assert.equal(already.kind, 'preference-ignored',
+      'already prefers that exact machine → the preference is being outvoted; recording it again fixes nothing');
+    assert.equal(fresh.n, already.n, 'identical counts…');
+    assert.equal(fresh.share, already.share, '…and identical shares, but opposite conclusions');
+  });
+
+  test('an existing preference for a DIFFERENT machine is still a new suggestion', () => {
+    const c = classifyAffinity(group({ existingPreferences: { eq_9: 8 } }));
+    assert.equal(c.kind, 'set-preference',
+      'preferring eq_9 while everything moves to eq_2 means the recorded preference is simply wrong');
+  });
+
+  test('affinityFindings sorts strongest first and drops the non-findings', () => {
+    const list = [];
+    const rec = (templateId, to) => ({
+      changed: ['equipment'], scheduler: { equipmentId: 'eq_1' }, user: { equipmentId: to },
+      job: { templateId, tags: [], preferredEquipmentId: null },
+    });
+    for (let i = 0; i < 6; i++) list.push(rec('tp_strong', 'eq_2'));
+    for (let i = 0; i < 3; i++) list.push(rec('tp_weak', 'eq_2'));
+    // Scattered: 2 each to three different machines — no dominant target.
+    ['eq_2', 'eq_2', 'eq_3', 'eq_3', 'eq_4', 'eq_4'].forEach((to) => list.push(rec('tp_spread', to)));
+
+    const found = affinityFindings(list, 'templateId');
+    assert.deepEqual(found.map((f) => f.value), ['tp_strong', 'tp_weak'],
+      'the scattered template is not a finding and must not be listed');
+    assert.equal(found[0].tier, 'consistent');
+    assert.equal(found[1].tier, 'emerging');
+  });
+
+  // Every template has exactly one process, so an un-deduped view reports the
+  // same corrections two or three times over and one pattern looks like
+  // several corroborating ones.
+  test('a process finding built from the same corrections as a template finding is dropped', () => {
+    const rec = (id, templateId, process, to) => ({
+      id, changed: ['equipment'], scheduler: { equipmentId: 'eq_1' }, user: { equipmentId: to },
+      job: { templateId, process, tags: [], preferredEquipmentId: null },
+    });
+    const list = [];
+    for (let i = 0; i < 6; i++) list.push(rec('r' + i, 'tp_1', 'Weld', 'eq_2'));
+
+    const byKey = {
+      templateId: affinityFindings(list, 'templateId'),
+      process: affinityFindings(list, 'process'),
+    };
+    assert.equal(byKey.process.length, 1, 'un-deduped, the process repeats the template finding');
+
+    const out = dedupeFindings(byKey, ['templateId', 'process']);
+    assert.equal(out.templateId.length, 1, 'the specific, actionable finding is the one kept');
+    assert.equal(out.process.length, 0, 'its restatement adds nothing and is dropped');
+  });
+
+  test('but a BROADER pattern spanning several templates survives — it is the more informative one', () => {
+    const rec = (id, templateId, to) => ({
+      id, changed: ['equipment'], scheduler: { equipmentId: 'eq_1' }, user: { equipmentId: to },
+      job: { templateId, process: 'Thermal Spray - HVOF', tags: [], preferredEquipmentId: null },
+    });
+    // Three templates, two corrections each — no single template reaches the
+    // threshold, but together the process clearly does.
+    const list = [
+      rec('a1', 'tp_1', 'eq_9'), rec('a2', 'tp_1', 'eq_9'),
+      rec('b1', 'tp_2', 'eq_9'), rec('b2', 'tp_2', 'eq_9'),
+      rec('c1', 'tp_3', 'eq_9'), rec('c2', 'tp_3', 'eq_9'),
+    ];
+    const out = dedupeFindings({
+      templateId: affinityFindings(list, 'templateId'),
+      process: affinityFindings(list, 'process'),
+    }, ['templateId', 'process']);
+
+    assert.equal(out.process.length, 1, 'all HVOF work heading to one cell is a real finding in its own right');
+    assert.equal(out.process[0].n, 6, 'and it spans records no single template covers');
+    assert.ok(out.templateId.every((f) => f.tier === 'too-few'),
+      'the per-template views are individually thin, which is exactly why the broader one matters');
+  });
+
+  test('a finding pointing at a DIFFERENT machine is never treated as a duplicate', () => {
+    const rec = (id, templateId, process, to) => ({
+      id, changed: ['equipment'], scheduler: { equipmentId: 'eq_1' }, user: { equipmentId: to },
+      job: { templateId, process, tags: [], preferredEquipmentId: null },
+    });
+    const list = [];
+    for (let i = 0; i < 6; i++) list.push(rec('r' + i, 'tp_1', 'Weld', 'eq_2'));
+    // Same records, but suppose the process group somehow favoured another
+    // machine — that is a different claim and must not be silently swallowed.
+    const byKey = {
+      templateId: affinityFindings(list, 'templateId'),
+      process: [{ key: 'process', value: 'Weld', equipmentId: 'eq_7', n: 6, share: 1, count: 6,
+        kind: 'set-preference', tier: 'consistent', alreadyPrefers: 0,
+        recordIds: new Set(list.map((r) => r.id)) }],
+    };
+    const out = dedupeFindings(byKey, ['templateId', 'process']);
+    assert.equal(out.process.length, 1, 'same records, different conclusion — both deserve to be seen');
+  });
+
+  test('weightEvidence turns a mean delta into something a person can agree or disagree with', () => {
+    const mk = (delta) => ({ changed: ['equipment'], comparable: true, delta, scheduler: {}, user: {}, job: {} });
+    const ev = weightEvidence([
+      mk({ staffContinuity: 1, finishDelay: 3, handover: -1 }),
+      mk({ staffContinuity: 1, finishDelay: 3, handover: -1 }),
+    ]);
+    const byTerm = Object.fromEntries(ev.map((e) => [e.term, e]));
+    assert.equal(byTerm.staffContinuity.reading, TERM_READINGS.staffContinuity.more);
+    assert.equal(byTerm.handover.reading, TERM_READINGS.handover.less,
+      'a negative mean must read as avoiding the thing, not accepting it');
+    assert.equal(byTerm.finishDelay.mean, 3);
+    assert.ok(ev[0].n === 2, 'the sample size travels with every reading');
+  });
+
+  test('terms hovering around zero are dropped — they mean "this played no part"', () => {
+    const mk = (delta) => ({ changed: ['equipment'], comparable: true, delta, scheduler: {}, user: {}, job: {} });
+    const ev = weightEvidence([mk({ staffContinuity: 0, finishDelay: 0, handover: 0 })]);
+    assert.equal(ev.length, 0,
+      'an all-zero delta means the features do not explain the correction — better shown as nothing than as evidence');
+  });
+
+  test('every scoring term has a reading in both directions', () => {
+    // A missing reading would silently render as a raw field name in the UI.
+    const terms = ['finishDelay', 'startDelay', 'lateness', 'preferredEquipment',
+      'exclusiveDemand', 'staffContinuity', 'handover', 'fragmentation'];
+    terms.forEach((t) => {
+      assert.ok(TERM_READINGS[t]?.more, `${t} has no "more" reading`);
+      assert.ok(TERM_READINGS[t]?.less, `${t} has no "less" reading`);
+    });
+  });
+
+  test('the date range reports the span the history actually covers', () => {
+    const r = overrideDateRange([
+      { at: '2026-08-04T09:00:00Z' }, { at: '2026-07-01T09:00:00Z' }, { at: '2026-08-20T09:00:00Z' },
+    ]);
+    assert.equal(r.first, '2026-07-01T09:00:00Z');
+    assert.equal(r.last, '2026-08-20T09:00:00Z');
+    assert.equal(overrideDateRange([]), null, 'an empty history has no span to claim');
+  });
+
+  test('the tier thresholds are exported so they can be tuned without hunting through the UI', () => {
+    assert.ok(AFFINITY_TIERS.minShare > 0 && AFFINITY_TIERS.minShare <= 1);
+    assert.ok(AFFINITY_TIERS.consistentN > AFFINITY_TIERS.emergingN);
   });
 });
 

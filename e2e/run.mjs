@@ -28,6 +28,7 @@ import batchEditNewjobReadydate from './specs/batch-edit-newjob-readydate.mjs';
 import costingModalLabelsAndWidth from './specs/costing-modal-labels-and-width.mjs';
 import scheduleTimelineWindowFilter from './specs/schedule-timeline-window-filter.mjs';
 import overrideCapture from './specs/override-capture.mjs';
+import patternsView from './specs/patterns-view.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -55,6 +56,7 @@ const SUITES = [
   ['costing modal labels + width (#61)', costingModalLabelsAndWidth],
   ['schedule timeline windowed to the visible date range (#63)', scheduleTimelineWindowFilter],
   ['override capture — recording where the user overruled the scheduler', overrideCapture],
+  ['patterns view — showing the user what their corrections imply', patternsView],
 ];
 
 const only = process.argv[2]; // optional substring filter

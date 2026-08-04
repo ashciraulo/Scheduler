@@ -237,15 +237,21 @@ export function summariseOverrides(list) {
 // would dilute every share toward meaninglessness.
 export function attributeAffinity(list, key) {
   const groups = {};
-  (list || []).forEach((r) => {
+  (list || []).forEach((r, idx) => {
     if (!(r.changed || []).includes('equipment')) return;
     const raw = r.job?.[key];
     if (raw === null || raw === undefined || raw === '') return;
     const values = Array.isArray(raw) ? raw : [raw];
     values.forEach((value) => {
       const g = groups[value] || (groups[value] = {
-        n: 0, movedTo: {}, movedFrom: {}, existingPreferences: {},
+        n: 0, movedTo: {}, movedFrom: {}, existingPreferences: {}, recordIds: new Set(),
       });
+      // Which corrections built this group. Needed because the same
+      // corrections show up under several attributes at once — a template has
+      // exactly one process, so every template finding reproduces itself as a
+      // process finding, and one pattern would read as two or three. See
+      // dedupeFindings.
+      g.recordIds.add(r.id ?? idx);
       g.n += 1;
       const to = r.user?.equipmentId;
       const from = r.scheduler?.equipmentId;
@@ -288,4 +294,144 @@ export function equipmentFlow(list) {
     bump(r.user?.equipmentId, 'movedTo');
   });
   return flow;
+}
+
+/* ============================================================
+   TURNING THE PILE INTO SOMETHING A PERSON CAN JUDGE
+   ============================================================ */
+
+// Display thresholds — NOT statistics. There is no significance test here and
+// pretending otherwise would be worse than saying nothing: with a handful of
+// corrections from one person over a few weeks, any p-value would be theatre.
+// These exist so the UI can avoid announcing a "pattern" built on two clicks,
+// and so findings sort sensibly. Tune them freely; nothing depends on the
+// exact numbers.
+export const AFFINITY_TIERS = {
+  minShare: 0.6,      // below this there's no dominant machine — not a finding at all
+  emergingN: 3,       // worth showing, clearly labelled as thin
+  consistentN: 6,     // worth taking seriously
+  consistentShare: 0.75,
+};
+
+// Classifies one `attributeAffinity` group into something presentable.
+// Returns null when the group says nothing — no dominant machine, or the work
+// is being spread around rather than consistently redirected.
+//
+// `kind` is the important half, and the two values mean OPPOSITE things:
+//
+//   'set-preference'     nothing was ever claimed for this kind of work, and it
+//                        keeps being moved to one machine → a suggestion to
+//                        record `preferredEquipmentId`.
+//
+//   'preference-ignored' this work ALREADY prefers that exact machine and the
+//                        user still has to move it there by hand → the
+//                        preference is being outvoted, which is a WEIGHTS
+//                        problem. Recording the preference again would fix
+//                        nothing, because it is already recorded.
+//
+// Identical counts and shares produce these two different conclusions, which
+// is precisely why `record.job.preferredEquipmentId` is captured.
+export function classifyAffinity(group) {
+  if (!group || !group.top || group.n < 1) return null;
+  const { top, n } = group;
+  if (top.share < AFFINITY_TIERS.minShare) return null;
+  const tier = n >= AFFINITY_TIERS.consistentN && top.share >= AFFINITY_TIERS.consistentShare
+    ? 'consistent'
+    : n >= AFFINITY_TIERS.emergingN ? 'emerging' : 'too-few';
+  const alreadyPrefers = (group.existingPreferences || {})[top.equipmentId] || 0;
+  return {
+    kind: alreadyPrefers > 0 ? 'preference-ignored' : 'set-preference',
+    tier,
+    alreadyPrefers,
+    equipmentId: top.equipmentId,
+    count: top.count,
+    n,
+    share: top.share,
+  };
+}
+
+// attributeAffinity + classifyAffinity, sorted strongest first, with the
+// nothing-to-say groups dropped. One call per attribute for a view to render.
+export function affinityFindings(list, key) {
+  const groups = attributeAffinity(list, key);
+  return Object.entries(groups)
+    .map(([value, group]) => {
+      const c = classifyAffinity(group);
+      return c ? { key, value, recordIds: group.recordIds || new Set(), ...c } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => (b.n - a.n) || (b.share - a.share));
+}
+
+// Drops findings that are just a re-statement of one already shown.
+//
+// The same corrections appear under several attributes at once: a template has
+// exactly one process, so a template-level finding reproduces itself as a
+// process-level finding built from the identical records, and often as a
+// capability-tag one too. Left alone, one real pattern reads as three
+// independent ones and looks far more corroborated than it is.
+//
+// A finding is dropped only when its records are a SUBSET of an already-kept
+// finding's AND it points at the same machine — i.e. it genuinely adds
+// nothing. A broader group is kept: if three different templates all send work
+// to the same cell, the process-level finding spans records no single template
+// finding covers, and it is the MORE informative statement, not a duplicate.
+//
+// `order` is most-specific-first, because the specific finding is the more
+// actionable one — a template has a `preferredEquipmentId` field to set; a
+// process does not.
+export function dedupeFindings(findingsByKey, order = ['templateId', 'procedureId', 'process', 'tags']) {
+  const kept = [];
+  const out = {};
+  order.forEach((key) => {
+    out[key] = (findingsByKey[key] || []).filter((f) => {
+      const ids = f.recordIds || new Set();
+      const redundant = kept.some((k) => k.equipmentId === f.equipmentId
+        && [...ids].every((id) => k.recordIds.has(id)));
+      if (!redundant) kept.push(f);
+      return !redundant;
+    });
+  });
+  return out;
+}
+
+// Plain-language readings for the mean feature deltas. A number like
+// "+2.4 finishDelay" is not something anyone can agree or disagree with; "you
+// accept a later finish" is. Kept here rather than in the view so the script
+// and the UI say the same thing, and so the wording is testable.
+//
+// `more`/`less` describe what a POSITIVE / NEGATIVE mean delta means, given
+// the delta is user-minus-scheduler.
+export const TERM_READINGS = {
+  finishDelay: { more: 'accept a later finish than the scheduler picks', less: 'want work finished sooner than the scheduler picks' },
+  startDelay: { more: 'accept a later start', less: 'want work started sooner' },
+  lateness: { more: 'tolerate running past the due date', less: 'protect the due date more than the scheduler does' },
+  preferredEquipment: { more: 'move work ONTO its preferred machine', less: 'move work OFF its preferred machine' },
+  exclusiveDemand: { more: 'accept taking a machine another job depends on', less: 'avoid taking a machine another job depends on' },
+  staffContinuity: { more: 'keep the same operator on a job', less: 'change the operator more than the scheduler does' },
+  handover: { more: 'accept more operator changes', less: 'avoid operator changes' },
+  fragmentation: { more: 'accept work broken into more chunks', less: 'prefer work in fewer chunks' },
+};
+
+// The mean deltas that are actually worth showing, biggest first. `minMean`
+// filters out terms hovering around zero, which are the majority and mean
+// "this played no part" rather than anything worth reading.
+export function weightEvidence(list, minMean = 0.05) {
+  const { meanDelta, nComparable } = summariseOverrides(list);
+  return Object.entries(meanDelta)
+    .filter(([, v]) => Math.abs(v) >= minMean)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .map(([term, mean]) => ({
+      term,
+      mean,
+      n: nComparable,
+      reading: (TERM_READINGS[term] || {})[mean > 0 ? 'more' : 'less'] || null,
+    }));
+}
+
+// Oldest and newest correction, so a view can say "over the last N weeks"
+// rather than implying the history is timeless.
+export function overrideDateRange(list) {
+  const times = (list || []).map((r) => r.at).filter(Boolean).sort();
+  return times.length ? { first: times[0], last: times[times.length - 1] } : null;
 }

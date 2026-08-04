@@ -129,7 +129,8 @@ Top-to-bottom, the single component file contains:
    without a tab of its own once StaffView absorbed the rest of the old
    "Equipment & Staff" tab — it has no data-model link to cost centres or
    procedures, so the placement is purely a home for it, not a data
-   relationship), ReportsView.
+   relationship), ReportsView, PatternsView (what the user's own corrections
+   imply — review only, applies nothing; see "The Patterns tab" below).
 9. **Modals** — JobModal, ImportJobsModal, TemplateModal, EquipmentModal, StaffModal.
 
 ## Importing jobs from a Business Central WIP export
@@ -1018,13 +1019,64 @@ all jobs of that kind — the history alone can't know the latter. A consumer
 wanting "7 of 9 Bracket Weld **jobs**" has to bring its own denominator;
 conflating the two would overstate every finding.
 
-**`npm run show-overrides -- path/to/scheduler-data.json`** prints what has
-accumulated: counts by source, which machines work is moved off and onto, the
-per-template/process/procedure/tag affinities (with the
-"already prefers" vs "consider setting" distinction above), and the mean
-feature delta. Step 1 deliberately ships no UI, so this is the only way to
-look — and data being collected that nobody has eyeballed is precisely how a
-learning system ends up confidently trained on a bug.
+**`npm run show-overrides -- path/to/scheduler-data.json`** prints the same
+material as the Patterns tab below, for a shared-mode data file (useful when
+the app isn't in front of you).
+
+### The Patterns tab — showing the user what their corrections imply
+
+`PatternsView` is a **review surface**: it reads `wf_overrides` and shows what
+the history implies. The only thing it can write is clearing that history — it
+applies nothing, sets no preference, changes no weight.
+
+That restraint is the design, not an unfinished edge. Every finding is a claim
+about how someone works, derived from a small sample by a heuristic, and the
+entire point of showing it is so a person can say *"no, that's not why I did
+that"* **before** any of it is trusted. A view that quietly acted on these
+would delete the only checkpoint the whole approach has. The one action offered
+is navigational — a template-level finding can open that template so the user
+sets the preference themselves. Showing someone where to go is not the same as
+going there for them.
+
+**The two conclusions must never render alike.** `classifyAffinity` returns
+`kind: 'set-preference'` or `'preference-ignored'` from *identical* counts and
+shares — the only difference is whether the job already preferred the machine
+it keeps being moved to. One means "record a preference"; the other means "the
+preference is recorded and keeps being outvoted", which is a weights problem
+that recording it again would not touch. They get different wording and
+different styling, and an e2e check asserts the text actually differs.
+
+**Findings are de-duplicated across attributes (`dedupeFindings`).** A template
+has exactly one process, so every template finding reproduces itself verbatim
+as a process finding — and often as a capability-tag one too. Un-deduped, one
+pattern reads as three independent, mutually corroborating ones. A finding is
+dropped only when its record set is a **subset** of one already kept *and* it
+points at the same machine. A genuinely broader group survives: three
+templates all feeding one cell spans records no single template covers, and is
+the *more* informative statement. Order is most-specific-first, because
+specificity is what makes a finding actionable — a template has a
+`preferredEquipmentId` field; a process does not, and the copy says so rather
+than pointing at a control that doesn't exist.
+
+**`AFFINITY_TIERS` are display thresholds, not statistics.** There is no
+significance test here and pretending otherwise would be worse than saying
+nothing — with a handful of corrections from one person, any p-value would be
+theatre. They exist so the UI doesn't announce a "pattern" built on two clicks
+(`too-few` / `emerging` / `consistent`), and `n` is shown next to every claim.
+The page states the small-sample caveat up front rather than burying it.
+
+**`TERM_READINGS`** turns a mean feature delta into a sentence someone can
+agree or disagree with — "+2.9 finishDelay" is not checkable, "you accept a
+later finish than the scheduler picks" is. Shared with `show-overrides` so both
+say the same thing. Terms hovering near zero are dropped: an all-zero delta
+means the features don't explain the correction, which is better shown as
+nothing than as evidence.
+
+**Clearing is all-or-nothing, and confirmed.** Worth having, since after a
+roster change or a new machine the old corrections describe a department that
+no longer exists. Deliberately not per-record: letting individual corrections
+be deleted would invite curating the history into agreeing with whatever you
+already believed. It touches only `wf_overrides` — never jobs or the schedule.
 
 ### Parallel processing (#30)
 

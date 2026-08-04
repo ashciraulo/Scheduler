@@ -18,7 +18,10 @@ import {
   getStaffDayInfo, fmtDay, fmtDate, fmtDateRange,
   runScheduler, whyUnscheduled, primaryStaffOf, tagOk, findStaffConflictJobs, effectiveDueDate,
 } from './scheduler.js';
-import { buildOverrideRecord, appendOverride } from './overrides.js';
+import {
+  buildOverrideRecord, appendOverride, summariseOverrides, equipmentFlow,
+  affinityFindings, dedupeFindings, weightEvidence, overrideDateRange,
+} from './overrides.js';
 
 /* ============================================================
    DATA MODEL REFERENCE (for future Business Central integration)
@@ -1093,6 +1096,7 @@ export default function WeldingScheduler() {
   const [parallelConflict, setParallelConflict] = useState(null); // {job, candidates}
   const [manualAssignConflict, setManualAssignConflict] = useState(null); // {job, person, blockers}
   const [equipmentLockConflict, setEquipmentLockConflict] = useState(null); // {job, machine, blockers}
+  const [confirmClearPatterns, setConfirmClearPatterns] = useState(false);
 
   const [dragJobId, setDragJobId] = useState(null);
   const [dropHint, setDropHint] = useState(null); // {equipId, date}
@@ -1255,6 +1259,7 @@ export default function WeldingScheduler() {
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
     || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
+    || confirmClearPatterns
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1454,6 +1459,20 @@ export default function WeldingScheduler() {
     setEquipmentLockConflict(null);
     checkEquipmentLockConflict(result, targetJobId);
     showToast(`Unpinned ${blockerIds.length} job${blockerIds.length === 1 ? '' : 's'} so it can be rescheduled.`);
+  }
+
+  // Throws the correction history away. Worth having rather than letting it
+  // silently accumulate forever: after a roster change, a new machine, or a
+  // shift in what the department takes on, the old corrections describe a
+  // department that no longer exists, and averaging them in would defend a
+  // way of working nobody follows any more. Deliberately all-or-nothing —
+  // letting individual records be deleted would invite curating the history
+  // into agreeing with whatever you already believed.
+  function clearOverrideHistory() {
+    setOverrides([]);
+    saveKey(OVERRIDES_KEY, []);
+    setConfirmClearPatterns(false);
+    showToast('Correction history cleared.');
   }
 
   // ---------- job actions ----------
@@ -2005,6 +2024,7 @@ export default function WeldingScheduler() {
                 { id: 'templates', label: 'Templates', icon: Calendar },
                 { id: 'costing', label: 'Costing', icon: DollarSign },
                 { id: 'reports', label: 'Value Reports', icon: DollarSign },
+                { id: 'patterns', label: 'Patterns', icon: Target },
               ].map((t) => (
                 <button
                   key={t.id}
@@ -2145,6 +2165,20 @@ export default function WeldingScheduler() {
         {tab === 'reports' && !displayMode && (
           <ReportsView jobs={jobs} equipment={equipment} staff={staff} procedures={procedures} costCentres={costCentres} />
         )}
+        {tab === 'patterns' && !displayMode && (
+          <PatternsView
+            overrides={overrides}
+            equipment={equipment}
+            templates={templates}
+            procedures={procedures}
+            readOnly={readOnly}
+            onOpenTemplate={(id) => {
+              const t = templates.find((x) => x.id === id);
+              if (t) setEditingTemplate(t);
+            }}
+            onClearHistory={() => setConfirmClearPatterns(true)}
+          />
+        )}
       </main>
 
       {/* ---------- Modals ---------- */}
@@ -2280,6 +2314,26 @@ export default function WeldingScheduler() {
               }}
             >
               <Trash2 size={14} /> Delete
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {confirmClearPatterns && (
+        <Modal title="Clear correction history" onClose={() => setConfirmClearPatterns(false)}>
+          <p className="text-sm text-slate-300 mb-3">
+            Discard all {overrides.length} recorded correction{overrides.length === 1 ? '' : 's'}? The patterns on
+            this page are derived entirely from them, so they'll go too. This can't be undone.
+          </p>
+          <p className="text-xs text-slate-500 mb-4">
+            Worth doing after something changes what "normal" means here — a new machine, a roster change, a
+            different mix of work — since corrections from before that describe a department that no longer
+            exists. Your schedule and jobs are not affected.
+          </p>
+          <div className="flex justify-end gap-2">
+            <button className={btnGhost} onClick={() => setConfirmClearPatterns(false)}>Cancel</button>
+            <button className={btnDanger} onClick={clearOverrideHistory}>
+              <Trash2 size={14} /> Clear history
             </button>
           </div>
         </Modal>
@@ -5437,6 +5491,254 @@ function overlaps(aStart, aEnd, bStart, bEnd) {
 
 function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function endOfMonth(d) { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
+
+/* ============================================================
+   PATTERNS VIEW — what the scheduler has noticed about your corrections
+   ------------------------------------------------------------
+   Step 2 of learning from overrides (see scheduler/CLAUDE.md). Strictly a
+   REVIEW surface: it reads `wf_overrides` and shows what the history implies,
+   and the only thing it can write is clearing that history.
+
+   It deliberately does NOT apply anything. Every finding here is a claim about
+   how the user works, derived from a small sample by a heuristic, and the
+   entire purpose of showing it is so a person can say "no, that's not why I
+   did that" BEFORE any of it is trusted. A view that silently acted on these
+   would remove the only checkpoint the design has.
+
+   The one action offered is navigational: a template-level finding can open
+   that template so the user can set the preference themselves. Showing someone
+   where to go is not the same as going there for them.
+   ============================================================ */
+function PatternsView({ overrides, equipment, templates, procedures, onOpenTemplate, onClearHistory, readOnly }) {
+  const equipName = (id) => equipment.find((e) => e.id === id)?.name || id || '—';
+  const labelFor = (key, value) => {
+    if (key === 'templateId') return templates.find((t) => t.id === value)?.name || 'Deleted template';
+    if (key === 'procedureId') return procedures.find((p) => p.id === value)?.name || 'Deleted procedure';
+    return value;
+  };
+  const ATTRS = [
+    ['templateId', 'Template'],
+    ['process', 'Process'],
+    ['procedureId', 'Procedure'],
+    ['tags', 'Capability tag'],
+  ];
+
+  const summary = useMemo(() => summariseOverrides(overrides), [overrides]);
+  const flow = useMemo(() => equipmentFlow(overrides), [overrides]);
+  const range = useMemo(() => overrideDateRange(overrides), [overrides]);
+  const evidence = useMemo(() => weightEvidence(overrides), [overrides]);
+  // Deduped: a template has exactly one process, so every template finding
+  // would otherwise reappear verbatim as a process finding (and often as a
+  // capability-tag one), making one pattern look like three corroborating
+  // ones. A genuinely broader group — several templates all feeding the same
+  // machine — survives, since it spans records no single template covers.
+  const findings = useMemo(() => {
+    const byKey = {};
+    ATTRS.forEach(([key]) => { byKey[key] = affinityFindings(overrides, key); });
+    const deduped = dedupeFindings(byKey);
+    return ATTRS.map(([key, label]) => [key, label, deduped[key] || []]);
+  }, [overrides]);
+  const anyFindings = findings.some(([, , f]) => f.length);
+
+  if (!overrides.length) {
+    return (
+      <div className="border border-slate-800 bg-slate-900 rounded-lg p-6 text-center">
+        <h2 className="text-sm font-semibold text-slate-200 mb-1">No corrections recorded yet</h2>
+        <p className="text-xs text-slate-500 max-w-xl mx-auto">
+          Every time you drag a job to different equipment, pin one from its detail view, or lock one to a
+          machine, that correction is recorded here alongside what the scheduler had chosen. Once there are a
+          few, this page will show what they have in common. Nothing recorded here changes how the scheduler
+          behaves.
+        </p>
+      </div>
+    );
+  }
+
+  const tierLabel = { 'too-few': 'too few to call', emerging: 'emerging', consistent: 'consistent' };
+
+  return (
+    <div className="space-y-4">
+      <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-200">
+              {summary.n} correction{summary.n === 1 ? '' : 's'} recorded
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">
+              {range ? `${fmtDate(range.first.slice(0, 10))} – ${fmtDate(range.last.slice(0, 10))}. ` : ''}
+              {summary.byChange.equipment || 0} changed the machine, {summary.byChange.startDate || 0} changed the day.
+            </p>
+          </div>
+          {!readOnly && (
+            <button className={btnGhost} onClick={onClearHistory} title="Discard every recorded correction">
+              <Trash2 size={14} /> Clear history
+            </button>
+          )}
+        </div>
+        {/* The honest caveat, stated up front rather than buried. Nothing on
+            this page is a significance test, and a page that looks analytical
+            invites more trust than a handful of clicks can justify. */}
+        <p className="text-[11px] text-slate-500 mt-3 border-t border-slate-800 pt-3">
+          These are observations from a small sample, not statistics — read them as “is that actually why I did
+          that?”, and ignore anything that doesn’t match how you'd describe your own reasoning. Nothing here
+          changes how the scheduler behaves.
+        </p>
+      </div>
+
+      {/* ---- the actionable half: this kind of work keeps going to that machine ---- */}
+      {anyFindings && (
+        <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3">
+            Work that keeps moving to the same machine
+          </h3>
+          <div className="space-y-4">
+            {findings.filter(([, , f]) => f.length).map(([key, label, list]) => (
+              <div key={key}>
+                <p className="text-[11px] uppercase tracking-wide text-slate-600 mb-1.5">{label}</p>
+                <div className="space-y-1.5">
+                  {list.map((f) => {
+                    // These two read almost identically in the numbers and call
+                    // for completely different fixes — see classifyAffinity.
+                    const ignored = f.kind === 'preference-ignored';
+                    return (
+                      <div
+                        key={`${key}:${f.value}`}
+                        className={`rounded-md px-3 py-2 border ${ignored ? 'border-amber-900 bg-amber-950/20' : 'border-slate-700 bg-slate-800/50'}`}
+                      >
+                        <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                          <span className="text-sm text-slate-200 font-medium">{labelFor(key, f.value)}</span>
+                          <span className="text-[11px] text-slate-500">
+                            {f.count} of {f.n} moves → {equipName(f.equipmentId)} ({Math.round(f.share * 100)}%) · {tierLabel[f.tier]}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-400 mt-1">
+                          {ignored ? (
+                            <>
+                              This work <span className="text-amber-300">already prefers {equipName(f.equipmentId)}</span>, and
+                              you still have to move it there by hand — the preference is set but keeps being
+                              outvoted when the scheduler picks a machine.
+                            </>
+                          ) : key === 'templateId' ? (
+                            <>Consider setting this template’s preferred equipment to {equipName(f.equipmentId)}.</>
+                          ) : (
+                            // Only a template carries a preferredEquipmentId. A
+                            // process, procedure or tag has no field to set, so
+                            // pointing at one would send the user looking for a
+                            // control that doesn't exist.
+                            <>
+                              Work like this keeps ending up on {equipName(f.equipmentId)} — worth setting preferred
+                              equipment on the templates that produce it.
+                            </>
+                          )}
+                        </p>
+                        {key === 'templateId' && !ignored && !readOnly && onOpenTemplate && (
+                          <button
+                            className="text-[11px] text-amber-400 hover:underline mt-1"
+                            onClick={() => onOpenTemplate(f.value)}
+                          >
+                            Open this template →
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-col lg:flex-row gap-4">
+        <div className="flex-1 min-w-0 border border-slate-800 bg-slate-900 rounded-lg p-4">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3">Where work gets moved</h3>
+          {Object.keys(flow).length === 0 ? (
+            <p className="text-xs text-slate-600">No machine changes recorded — every correction so far has been about timing.</p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-slate-600 uppercase text-[10px]">
+                  <th className="text-left font-medium pb-1">Equipment</th>
+                  <th className="text-right font-medium pb-1">Moved off</th>
+                  <th className="text-right font-medium pb-1">Moved onto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(flow)
+                  .sort((a, b) => (b[1].movedFrom + b[1].movedTo) - (a[1].movedFrom + a[1].movedTo))
+                  .map(([id, f]) => (
+                    <tr key={id} className="border-t border-slate-800">
+                      <td className="py-1.5 text-slate-300">{equipName(id)}</td>
+                      <td className="py-1.5 text-right text-slate-400 font-mono">{f.movedFrom}</td>
+                      <td className="py-1.5 text-right text-slate-400 font-mono">{f.movedTo}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0 border border-slate-800 bg-slate-900 rounded-lg p-4">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">What you trade off</h3>
+          <p className="text-[11px] text-slate-600 mb-3">
+            From {summary.nComparable} correction{summary.nComparable === 1 ? '' : 's'} where the scheduler had
+            actually evaluated the machine you picked.
+          </p>
+          {!evidence.length ? (
+            <p className="text-xs text-slate-600">
+              {summary.nComparable === 0
+                ? 'None of the recorded corrections are directly comparable yet — see below.'
+                : 'No consistent trade-off yet: the machines you moved between scored about the same, so these corrections were made for a reason the scheduler doesn’t currently measure.'}
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {evidence.map((e) => (
+                <div key={e.term} className="flex items-baseline gap-2">
+                  <span className="font-mono text-[11px] text-slate-500 w-10 text-right shrink-0">
+                    {e.mean > 0 ? '+' : ''}{e.mean.toFixed(1)}
+                  </span>
+                  <span className="text-xs text-slate-300">You {e.reading || e.term}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {(summary.notComparable.infeasiblePick > 0 || summary.notComparable.movedToUnevaluatedDay > 0) && (
+            <p className="text-[11px] text-slate-600 mt-3 border-t border-slate-800 pt-2">
+              {summary.notComparable.movedToUnevaluatedDay > 0 && (
+                <>{summary.notComparable.movedToUnevaluatedDay} correction(s) moved a job to a day the scheduler
+                  never considered, so there’s nothing to compare against. </>
+              )}
+              {summary.notComparable.infeasiblePick > 0 && (
+                <>{summary.notComparable.infeasiblePick} put a job somewhere the scheduler found no room at all.</>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3">Recent corrections</h3>
+        <div className="space-y-1">
+          {[...overrides].slice(-12).reverse().map((r) => (
+            <div key={r.id} className="flex items-baseline gap-2 text-xs border-t border-slate-800 pt-1.5 first:border-t-0 first:pt-0">
+              <span className="text-slate-600 font-mono text-[10px] shrink-0">{(r.at || '').slice(0, 10)}</span>
+              <span className="text-slate-300 truncate">{r.jobName}</span>
+              {/* A timing-only correction has the same machine on both sides,
+                  which renders as "Robot 1 → Robot 1" and reads as a no-op.
+                  Show whichever dimension the user actually changed. */}
+              <span className="text-slate-500 ml-auto shrink-0 text-right">
+                {(r.changed || []).includes('equipment')
+                  ? <>{equipName(r.scheduler?.equipmentId)} → {equipName(r.user?.equipmentId)}</>
+                  : <>{fmtDate(r.scheduler?.startDate)} → {fmtDate(r.user?.startDate)}</>}
+                <span className="text-slate-600"> · {r.source}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = [] }) {
   const today = new Date();
