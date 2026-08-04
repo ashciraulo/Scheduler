@@ -31,6 +31,7 @@ import overrideCapture from './specs/override-capture.mjs';
 import patternsView from './specs/patterns-view.mjs';
 import trainingPartner from './specs/training-partner.mjs';
 import reworkQuality from './specs/rework-quality.mjs';
+import rdProjectsAndTasks from './specs/rd-projects-and-tasks.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -61,6 +62,7 @@ const SUITES = [
   ['patterns view — showing the user what their corrections imply', patternsView],
   ['training partner — a second person riding along on a job', trainingPartner],
   ['rework + quality — linked rework jobs and the Quality tab', reworkQuality],
+  ['R&D projects and tasks — non-job schedulable items sharing the engine', rdProjectsAndTasks],
 ];
 
 const only = process.argv[2]; // optional substring filter

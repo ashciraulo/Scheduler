@@ -1714,6 +1714,108 @@ side effect. Fixed by explicitly carrying `job?.batchId ?? null` /
 to the job shape that isn't surfaced in this modal, it needs the same
 treatment — the fresh-object pattern is a trap by default, not a merge.
 
+## R&D projects and tasks
+
+A **project** is tracking-only — `id`/`name`/`description`/`status`
+(`active`/`onhold`/`complete`). It is never scheduled and never appears on
+the timeline; it exists purely so a **task**'s hours and cost have somewhere
+to roll up. `ProjectsView` (the R&D nav tab) is the whole of its UI: a card
+per project with a live rollup (task count, hours logged, cost) computed by
+`projectRollup()`, and `ProjectModal` for create/edit/delete. Deleting a
+project does **not** touch the tasks that named it — `deleteTask` is never
+called, only `projectId` stops resolving to anything, exactly like a
+deleted template not erasing the jobs that used it.
+
+A **task** is the non-job schedulable item from the original request: "a
+task on the timeline that is not a job... no job numbers, no job values,
+none of the usual job specific data." Its own array (`tasks`/`wf_tasks`),
+its own leaner modal (`TaskModal`) — task description, process, procedure
+(optional, for cost), expected duration, required completion date,
+equipment, ready-for-processing, planned start date, an optional manual
+staff assignment, and an optional project link (deliberately optional: a
+maintenance task on a piece of equipment has nothing to align to, and
+forcing a project on it would just push people back to the old workaround —
+marking the staff member AND the equipment unavailable for the day by hand).
+
+**Tasks are always created already pinned.** Equipment and Planned start
+date are both required fields in TaskModal — there is no "automatic, find
+it a slot" mode the way a job has, so a task's `assignment` is built exactly
+like a job's own Equipment/Planned start date pin (#28): `{ equipmentId,
+startDate, pinned: true, days: [] }`, filled in by the same pinned-placement
+path in `scheduler.js` on the very next recompute. There is currently no
+drag-and-drop for a task on the Schedule view and no unpin — deliberately
+out of scope for v1 (a task is meant to be simple to set up and rare to
+need moved); reassigning one means reopening TaskModal and changing
+Equipment/Planned start date, the same as any other pin edit.
+
+**Tasks share the scheduling engine with jobs, but never the `jobs` array.**
+Keeping them out of `jobs` was the point of "not a job" — Job Backlog,
+Reports, batching, WIP import, the value report all stay exactly as they
+were, seeing only real jobs. But a task genuinely has to draw on the same
+equipment/staff capacity a job does (that's what makes "mark the equipment
+and the staff unavailable" unnecessary), which means it has to go through
+`runScheduler` too. The bridge is `taskToJobUnit`/`splitTaskUnits` in
+`WeldingScheduler.jsx`:
+- `taskToJobUnit(task)` adapts a task into the exact job shape the engine
+  reads (`process`, `hoursTotal`, `readyDate`, `dueDate`, `staffId`,
+  `assignment`, …), tagged `_isTask: true`.
+- `recompute` merges `[...jobsList, ...tasksList.map(taskToJobUnit)]` into
+  ONE `runScheduler` call, so a task competes for the same day/shift/person
+  a job would, in the same placement pass — not a separate blocking
+  mechanism to keep in sync with leave, rosters or unavailable dates.
+- `splitTaskUnits(merged, tasksList)` pulls the result back apart by
+  `_isTask`, merging each unit's fresh `assignment` onto the task's own
+  record (which carries everything else the engine never needed to see).
+  This works because `runScheduler` spreads/mutates units in place end to
+  end — it never rebuilds a narrower object — so `_isTask` and every field
+  `taskToJobUnit` didn't set survive the round trip untouched. Confirmed
+  live, not just read from the source: see "a competing job needing the
+  same person is pushed off that day" in
+  `e2e/specs/rd-projects-and-tasks.mjs`.
+- Because of this, **every** job-affecting change has to carry tasks along
+  too: `recompute(jobsList, eqList, stList, tasksList = tasks)` takes an
+  optional 4th argument that task mutations pass explicitly (their own
+  just-built list, same reason job mutations always pass a freshly-built
+  `jobsList` rather than trusting the `jobs` state closure to be caught up
+  yet) and everything else defaults to current `tasks` state — an
+  equipment/staff edit recomputes both for free with no call-site changes.
+  Initial load and `reloadFromStore` (live sync) do the same merge/split by
+  hand, since they run before `recompute`'s own closure exists.
+- `lastTasksResultRef` mirrors `lastTraceRef`'s reasoning: a task mutation
+  needs to know synchronously, in the same event, whether the task it just
+  placed came back conflicted (for a toast) — by the time `tasks` state has
+  actually re-rendered, the event that needed the answer is long over.
+
+**Nothing task-specific was built for hours logging, completion, or
+costing** — same principle as Rework above. A task is close enough to a job
+shape that:
+- `TimeLogModal` needs zero changes: it's handed `[...jobs, ...tasks]` as
+  its generic `jobs` prop at the one call site that opens it, and
+  `wf_timelog` entries are already keyed by "the schedulable item's id",
+  not specifically a job's.
+- `ActualHoursModal` is shared too, with one small addition — a `kind`
+  prop (`'job'` default, `'task'` for a task's own completion flow) so its
+  copy says "task" where it used to always say "job". Everything else
+  (`toggleTaskComplete`/`completeTaskWithHours`, mirroring
+  `toggleComplete`/`completeWithHours`) is a task-shaped copy of the job
+  version, minus the `wf_actuals`/template-hours-averaging step, which has
+  no task equivalent (no `templateId`).
+- Cost is `jobCost(task, procedures, costCentres)` — the same helper every
+  job and every rework goes through — unmodified, because the task shape
+  deliberately reuses the exact field names it reads
+  (`procedureId`/`status`/`actualHours`/`hoursTotal`).
+
+**Schedule view rendering is additive, not integrated into the job drag-drop
+system.** `tasksByEquip` is a second, much simpler map alongside
+`jobsByEquip`; each equipment group renders its task lanes right after its
+job lanes, reusing `buildJobSegments` (generic over anything with
+`.assignment.days`/`.status`/`.percentComplete`) for the coloured-by-staff
+segments, but with **no `draggable`, no `onDragStart`/`onDrop`** — click
+only, opening `TaskModal`. A dashed border and a small `FlaskConical` icon
+in the name cell are the only visual distinction from a job tile; there was
+no reason to invent a whole second colour language when "which staff member,
+which day" should read exactly the same way a job's does.
+
 ## Persistence — IMPORTANT
 
 The app calls `window.storage.get/set/delete/list` (async). That global only
@@ -1744,8 +1846,8 @@ start.
 
 Data keys: `wf_equipment`, `wf_staff`, `wf_templates`, `wf_processes`,
 `wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`,
-`wf_wipparked`, `wf_categories`, `wf_timelog`, `wf_overrides` (each a JSON
-blob).
+`wf_wipparked`, `wf_categories`, `wf_timelog`, `wf_overrides`, `wf_projects`,
+`wf_tasks` (each a JSON blob).
 
 ### Live sync (shared mode)
 

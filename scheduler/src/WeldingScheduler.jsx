@@ -3,7 +3,7 @@ import {
   Plus, X, Settings2, Calendar, Users, Wrench, Check, AlertTriangle,
   Monitor, ChevronLeft, ChevronRight, ChevronDown, Trash2, Pencil, Pin, PinOff,
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
-  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut, Target, Lock
+  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut, Target, Lock, FlaskConical
 } from 'lucide-react';
 import {
   parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
@@ -733,23 +733,25 @@ function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, o
   );
 }
 
-function ActualHoursModal({ job, logged = 0, onCancel, onConfirm }) {
+function ActualHoursModal({ job, logged = 0, onCancel, onConfirm, kind = 'job' }) {
   // Prefer what was logged day by day over anything recalled now: that's the
   // whole point of the daily log. Fall back to a stored actual, then estimate.
   const [hours, setHours] = useState(String(logged > 0 ? logged : (job.actualHours ?? job.hoursTotal ?? '')));
   return (
-    <Modal title="Job complete — record actual hours" onClose={onCancel}>
+    <Modal title={`${kind === 'task' ? 'Task' : 'Job'} complete — record actual hours`} onClose={onCancel}>
       <p className="text-sm text-slate-300 mb-3"><span className="font-semibold text-slate-100">{job.name}</span> is being marked complete.</p>
       <Field label={`Actual hours taken — estimated ${job.hoursTotal}h${job.quantity > 1 ? ` for ${job.quantity} units` : ''}`}>
         <input type="number" min={0} step={0.25} className={inputCls} value={hours} onChange={(e) => setHours(e.target.value)} autoFocus />
       </Field>
       {logged > 0 && (
         <p className="text-xs text-emerald-400 -mt-2 mb-3">
-          Pre-filled from {logged}h logged daily against this job. Adjust if the log missed something.
+          Pre-filled from {logged}h logged daily against this {kind}. Adjust if the log missed something.
         </p>
       )}
       <p className="text-xs text-slate-500 mb-3">
-        {job.templateId
+        {kind === 'task'
+          ? 'Saved to the task history — see the R&D tab for hours and cost.'
+          : job.templateId
           ? "Saved to the job history — the template's hours-per-unit becomes the average of actual hours across its completed jobs."
           : 'Saved to the job history. This job has no template, so no hours-per-unit figure is updated.'}
       </p>
@@ -1139,6 +1141,16 @@ export default function WeldingScheduler() {
   // src/overrides.js. Recorded only; nothing reads it back into placement.
   const [overrides, setOverrides] = useState([]);
 
+  // R&D projects (tracking-only — see ProjectsView) and the non-job tasks
+  // that can align to one. Tasks share the scheduling engine with jobs (see
+  // taskToJobUnit/splitTaskUnits and "R&D projects and tasks" in
+  // scheduler/CLAUDE.md) so they consume the exact same equipment/staff
+  // capacity a job would, but they're never mixed into the `jobs` array
+  // itself — Job Backlog, Reports, batching, WIP import etc. all stay
+  // exactly as they were, seeing only real jobs.
+  const [projects, setProjects] = useState([]);
+  const [tasks, setTasks] = useState([]);
+
   const [tab, setTab] = useState('schedule');
   const [readOnly, setReadOnly] = useState(false);
   const [displayMode, setDisplayMode] = useState(false);
@@ -1150,7 +1162,10 @@ export default function WeldingScheduler() {
   const [editingStaff, setEditingStaff] = useState(null);
   const [editingProcedure, setEditingProcedure] = useState(null); // procedure object or 'new' or null
   const [editingCentre, setEditingCentre] = useState(null);       // cost-centre object or 'new' or null
+  const [editingTask, setEditingTask] = useState(null);           // task object or 'new' or null
+  const [editingProject, setEditingProject] = useState(null);     // project object or 'new' or null
   const [pendingComplete, setPendingComplete] = useState(null);   // job awaiting actual-hours entry
+  const [pendingTaskComplete, setPendingTaskComplete] = useState(null); // task awaiting actual-hours entry
   const [confirmDelete, setConfirmDelete] = useState(null); // {type, id, name}
   const [parallelConflict, setParallelConflict] = useState(null); // {job, candidates}
   const [manualAssignConflict, setManualAssignConflict] = useState(null); // {job, person, blockers}
@@ -1195,6 +1210,12 @@ export default function WeldingScheduler() {
   // generating candidates, so the only run that knows what the automatic
   // choice would have been is the one that already happened.
   const lastTraceRef = useRef([]);
+  // The tasksResult half of the most recent recompute — nothing renders from
+  // this either. Task mutations need to know synchronously, in the same
+  // event, whether the task they just placed came back conflicted (for a
+  // toast) — by the time `tasks` state itself has updated, the event that
+  // needs the answer has already finished.
+  const lastTasksResultRef = useRef([]);
 
   // EVERY runScheduler call in this component goes through here. An earlier
   // version traced only inside `recompute`, which silently missed the initial
@@ -1223,7 +1244,7 @@ export default function WeldingScheduler() {
   // ---------- initial load ----------
   useEffect(() => {
     (async () => {
-      const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov] = await Promise.all([
+      const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov, pj, tk] = await Promise.all([
         loadKey('wf_equipment', null),
         loadKey('wf_staff', null),
         loadKey('wf_templates', null),
@@ -1235,6 +1256,8 @@ export default function WeldingScheduler() {
         loadKey('wf_categories', null),
         loadKey(TIMELOG_KEY, null),
         loadKey(OVERRIDES_KEY, null),
+        loadKey(PROJECTS_KEY, null),
+        loadKey(TASKS_KEY, null),
       ]);
       if (pk) setParked(pk);
       if (tl) setTimeLog(tl);
@@ -1246,6 +1269,8 @@ export default function WeldingScheduler() {
       const finalJb = jb || seedJobs();
       const finalCc = cc || seedCostCentres();
       const finalPc = pc || seedProcedures();
+      const finalPj = pj || [];
+      const finalTk = tk || [];
 
       setEquipment(finalEq);
       setStaff(finalSt);
@@ -1253,23 +1278,28 @@ export default function WeldingScheduler() {
       setProcesses(finalPr);
       setCostCentres(finalCc);
       setProcedures(finalPc);
+      setProjects(finalPj);
       // Categories used to be free text typed per template. Seed the managed
       // list from whatever the existing templates already use, so nothing an
       // existing user set up disappears the first time they load this.
       const finalCt = ct || [...new Set(finalTp.map((t) => t.category).filter(Boolean))].sort();
       setCategories(finalCt);
 
-      const scheduled = runSchedulerTraced(finalJb, finalEq, finalSt);
+      const merged = runSchedulerTraced([...finalJb, ...finalTk.map(taskToJobUnit)], finalEq, finalSt);
+      const { jobsResult: scheduled, tasksResult: scheduledTasks } = splitTaskUnits(merged, finalTk);
       setJobs(scheduled);
+      setTasks(scheduledTasks);
 
       if (!eq) saveKey('wf_equipment', finalEq);
       saveKey('wf_staff', finalSt);
       if (!tp) saveKey('wf_templates', finalTp);
       if (!pr) saveKey('wf_processes', finalPr);
       saveKey('wf_jobs', scheduled);
+      saveKey(TASKS_KEY, scheduledTasks);
       if (!cc) saveKey('wf_costcentres', finalCc);
       if (!pc) saveKey('wf_procedures', finalPc);
       if (!ct) saveKey('wf_categories', finalCt);
+      if (!pj) saveKey(PROJECTS_KEY, finalPj);
 
       setLoaded(true);
     })();
@@ -1278,14 +1308,14 @@ export default function WeldingScheduler() {
   // ---------- live sync with other people (shared deployment only) ----------
   // Latest values, for reloadFromStore to fall back on without making itself
   // depend on (and be rebuilt by) every state change.
-  const latest = useRef({ equipment, staff });
-  latest.current = { equipment, staff };
+  const latest = useRef({ equipment, staff, jobs, tasks });
+  latest.current = { equipment, staff, jobs, tasks };
 
   // Re-read everything someone else may have changed. Deliberately does NOT
   // write anything back: a save would bump the server's version and every
   // other screen would see *that* as a change, and so on around the loop.
   const reloadFromStore = useCallback(async () => {
-    const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov] = await Promise.all([
+    const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov, pj, tk] = await Promise.all([
       loadKey('wf_equipment', null),
       loadKey('wf_staff', null),
       loadKey('wf_templates', null),
@@ -1297,10 +1327,13 @@ export default function WeldingScheduler() {
       loadKey('wf_categories', null),
       loadKey(TIMELOG_KEY, null),
       loadKey(OVERRIDES_KEY, null),
+      loadKey(PROJECTS_KEY, null),
+      loadKey(TASKS_KEY, null),
     ]);
     if (ct) setCategories(ct);
     if (tl) setTimeLog(tl);
     if (ov) setOverrides(ov);
+    if (pj) setProjects(pj);
     const nextEq = eq || latest.current.equipment;
     const nextSt = st ? st.map(normalizeStaff) : latest.current.staff;
     if (eq) setEquipment(nextEq);
@@ -1309,7 +1342,18 @@ export default function WeldingScheduler() {
     if (pr) setProcesses(pr);
     if (cc) setCostCentres(cc);
     if (pc) setProcedures(pc);
-    if (jb) setJobs(runSchedulerTraced(jb, nextEq, nextSt));
+    // Either side recomputing has to carry the other along, same reason as
+    // `recompute` above — they share one capacity pool. Only actually
+    // reruns the engine when something that affects placement came back
+    // (a job, a task, equipment or staff), not on every poll.
+    if (jb || tk) {
+      const nextJb = jb || latest.current.jobs;
+      const nextTk = tk || latest.current.tasks;
+      const merged = runSchedulerTraced([...nextJb, ...nextTk.map(taskToJobUnit)], nextEq, nextSt);
+      const { jobsResult, tasksResult } = splitTaskUnits(merged, nextTk);
+      setJobs(jobsResult);
+      setTasks(tasksResult);
+    }
     if (pk) setParked(pk);
   }, [runSchedulerTraced]);
 
@@ -1323,7 +1367,7 @@ export default function WeldingScheduler() {
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
     || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
-    || confirmClearPatterns || reworkOf
+    || confirmClearPatterns || reworkOf || editingTask || editingProject || pendingTaskComplete
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1331,12 +1375,25 @@ export default function WeldingScheduler() {
     reloadFromStore();
   }, [remoteChange, loaded, busyEditing, reloadFromStore]);
 
-  const recompute = useCallback((jobsList, eqList, stList) => {
-    const result = runSchedulerTraced(jobsList, eqList, stList);
-    setJobs(result);
-    saveKey('wf_jobs', result);
-    return result;
-  }, [runSchedulerTraced]);
+  // Tasks ride along on every job recompute (see taskToJobUnit/
+  // splitTaskUnits) because they draw on the exact same equipment/staff
+  // capacity a job does — an equipment edit, a staff roster change, or just
+  // another job landing on the same day all have to be able to bump a task,
+  // and vice versa. `tasksList` defaults to current state for the vastly
+  // more common case (a job-only change, tasks untouched); task mutations
+  // pass their own just-built list explicitly, the same reason job mutations
+  // below always pass a freshly-built jobsList rather than relying on the
+  // `jobs` state closure being caught up yet.
+  const recompute = useCallback((jobsList, eqList, stList, tasksList = tasks) => {
+    const merged = runSchedulerTraced([...jobsList, ...tasksList.map(taskToJobUnit)], eqList, stList);
+    const { jobsResult, tasksResult } = splitTaskUnits(merged, tasksList);
+    lastTasksResultRef.current = tasksResult;
+    setJobs(jobsResult);
+    saveKey('wf_jobs', jobsResult);
+    setTasks(tasksResult);
+    saveKey(TASKS_KEY, tasksResult);
+    return jobsResult;
+  }, [runSchedulerTraced, tasks]);
 
   // Records that the user placed a job somewhere other than where the
   // scheduler had put it. Called BEFORE the recompute that applies the
@@ -1727,6 +1784,91 @@ export default function WeldingScheduler() {
     const newParts = job.parts.map((p, i) => (i === partIndex ? { ...p, assignment: p.assignment ? { ...p.assignment, pinned: false } : null } : p));
     recompute(jobs.map((j) => (j.id === job.id ? { ...job, parts: newParts, updatedAt: new Date().toISOString() } : j)), equipment, staff);
   }
+  // ============================================================
+  // R&D PROJECTS AND TASKS
+  // A project is tracking-only (name/description/status) — it is never
+  // scheduled and never appears on the timeline itself. A task is what gets
+  // scheduled: a non-job work item (maintenance, R&D, anything that isn't a
+  // production job) that can optionally align to a project so its hours and
+  // cost roll up there. See "R&D projects and tasks" in scheduler/CLAUDE.md.
+  // ============================================================
+  function addOrUpdateProject(data, isNew) {
+    const stamped = { ...data, updatedAt: new Date().toISOString() };
+    const next = isNew ? [...projects, stamped] : projects.map((p) => (p.id === stamped.id ? stamped : p));
+    setProjects(next);
+    saveKey(PROJECTS_KEY, next);
+    setEditingProject(null);
+  }
+  function deleteProject(id) {
+    const next = projects.filter((p) => p.id !== id);
+    setProjects(next);
+    saveKey(PROJECTS_KEY, next);
+    // Tasks already logged against a deleted project keep their history —
+    // same reasoning as a deleted template not erasing the jobs that used
+    // it. `projectId` just stops resolving to anything in ProjectsView; the
+    // task itself, its hours and its cost are untouched.
+    setConfirmDelete(null);
+    setEditingProject(null);
+  }
+  // A task is always created already pinned — Equipment and Planned start
+  // date are both required fields (see TaskModal), there's no "automatic"
+  // placement mode to fall back to the way an ordinary job has. Editing
+  // either one rebuilds the pin exactly the way JobModal's own Equipment/
+  // Planned start date fields do (#28) — `pinned: true, days: []`, letting
+  // the recompute this triggers fill in the day-by-day plan.
+  function addOrUpdateTask(data, isNew) {
+    const stamped = { ...data, updatedAt: new Date().toISOString() };
+    const nextTasks = isNew ? [...tasks, stamped] : tasks.map((t) => (t.id === stamped.id ? stamped : t));
+    recompute(jobs, equipment, staff, nextTasks);
+    const placed = lastTasksResultRef.current.find((t) => t.id === stamped.id);
+    if (placed?.assignment?.conflict) {
+      showToast(`${stamped.name} saved, but is over capacity on ${fmtDate(placed.assignment.startDate)} — see the Schedule view.`);
+    } else {
+      showToast(`${stamped.name} ${isNew ? 'created' : 'saved'}.`);
+    }
+    setEditingTask(null);
+  }
+  function deleteTask(id) {
+    recompute(jobs, equipment, staff, tasks.filter((t) => t.id !== id));
+    setConfirmDelete(null);
+    setEditingTask(null);
+  }
+  function toggleTaskComplete(task) {
+    if (task.status !== 'complete') {
+      setPendingTaskComplete(task);
+      return;
+    }
+    const updated = { ...task, status: 'active', completedDate: null, updatedAt: new Date().toISOString() };
+    recompute(jobs, equipment, staff, tasks.map((t) => (t.id === task.id ? updated : t)));
+  }
+  function completeTaskWithHours(hours) {
+    const task = pendingTaskComplete;
+    if (!task) return;
+    const updated = {
+      ...task, status: 'complete', completedDate: isoDate(new Date()), actualHours: hours,
+      updatedAt: new Date().toISOString(),
+    };
+    recompute(jobs, equipment, staff, tasks.map((t) => (t.id === task.id ? updated : t)));
+    setPendingTaskComplete(null);
+    showToast(`${task.name} marked complete — ${hours}h recorded.`);
+  }
+  // Same reasoning as unpinJob: this IS the manual-placement mechanism, not
+  // a separate one — clearing the pin doesn't remove the task, just lets the
+  // next recompute find it a new slot (or leave it in conflict if nothing
+  // else fits, same as any unpinned-but-unplaceable job).
+  function unpinTask(task) {
+    const updated = { ...task, assignment: task.assignment ? { ...task.assignment, pinned: false } : null, updatedAt: new Date().toISOString() };
+    recompute(jobs, equipment, staff, tasks.map((t) => (t.id === task.id ? updated : t)));
+  }
+  // Mirrors openRelatedJob — see its comment for why this can't just be
+  // setEditingTask(target) while the modal's already open.
+  function openTask(taskId) {
+    const target = tasks.find((t) => t.id === taskId);
+    if (!target) return;
+    setEditingTask(null);
+    setTimeout(() => setEditingTask(target), 0);
+  }
+
   // Resolves a dragged id back to either a whole job, or a specific part
   // within a split job — parts are draggable/droppable in their own right.
   function findDragTarget(dragId) {
@@ -2173,6 +2315,7 @@ export default function WeldingScheduler() {
                 { id: 'costing', label: 'Costing', icon: DollarSign },
                 { id: 'reports', label: 'Value Reports', icon: DollarSign },
                 { id: 'quality', label: 'Quality', icon: Wrench },
+                { id: 'rd', label: 'R&D', icon: FlaskConical },
                 { id: 'patterns', label: 'Patterns', icon: Target },
               ].map((t) => (
                 <button
@@ -2221,6 +2364,9 @@ export default function WeldingScheduler() {
             equipment={equipment}
             staff={staff}
             jobs={jobs}
+            tasks={tasks}
+            onEditTask={(t) => !readOnly && setEditingTask(t)}
+            onAddTask={() => setEditingTask('new')}
             visibleDays={visibleDays}
             rangeStart={rangeStart}
             setRangeStart={setRangeStart}
@@ -2324,6 +2470,21 @@ export default function WeldingScheduler() {
             onEditJob={(j) => !readOnly && setEditingJob(j)}
           />
         )}
+        {tab === 'rd' && !displayMode && (
+          <ProjectsView
+            projects={projects}
+            tasks={tasks}
+            timeLog={timeLog}
+            procedures={procedures}
+            costCentres={costCentres}
+            staff={staff}
+            readOnly={readOnly}
+            onAddProject={() => setEditingProject('new')}
+            onEditProject={(p) => !readOnly && setEditingProject(p)}
+            onAddTask={() => setEditingTask('new')}
+            onEditTask={(t) => !readOnly && setEditingTask(t)}
+          />
+        )}
         {tab === 'patterns' && !displayMode && (
           <PatternsView
             overrides={overrides}
@@ -2374,6 +2535,30 @@ export default function WeldingScheduler() {
         />
       )}
 
+      {editingTask && (
+        <TaskModal
+          task={editingTask === 'new' ? null : editingTask}
+          processes={processes}
+          staff={staff}
+          equipment={equipment}
+          procedures={procedures}
+          projects={projects}
+          onClose={() => setEditingTask(null)}
+          onSave={(data, isNew) => addOrUpdateTask(data, isNew)}
+          onDelete={editingTask !== 'new' ? () => setConfirmDelete({ type: 'task', id: editingTask.id, name: editingTask.name }) : null}
+          onToggleComplete={editingTask !== 'new' ? () => { toggleTaskComplete(editingTask); setEditingTask(null); } : null}
+        />
+      )}
+
+      {editingProject && (
+        <ProjectModal
+          project={editingProject === 'new' ? null : editingProject}
+          onClose={() => setEditingProject(null)}
+          onSave={(data, isNew) => addOrUpdateProject(data, isNew)}
+          onDelete={editingProject !== 'new' ? () => setConfirmDelete({ type: 'project', id: editingProject.id, name: editingProject.name }) : null}
+        />
+      )}
+
       {importOpen && (
         <ImportJobsModal
           templates={templates}
@@ -2388,7 +2573,12 @@ export default function WeldingScheduler() {
       {timeLogDate && (
         <TimeLogModal
           date={timeLogDate}
-          jobs={jobs}
+          // Tasks are ordinary rows in the same daily log as jobs (same
+          // wf_timelog, keyed generically by "the schedulable item's id") —
+          // merged here, at the point TimeLogModal is actually opened, so
+          // the modal itself needs no changes at all to log hours against
+          // either kind. See "R&D projects and tasks" in scheduler/CLAUDE.md.
+          jobs={[...jobs, ...tasks]}
           staff={staff}
           entries={timeLog}
           onClose={() => setTimeLogDate(null)}
@@ -2469,6 +2659,16 @@ export default function WeldingScheduler() {
         />
       )}
 
+      {pendingTaskComplete && (
+        <ActualHoursModal
+          kind="task"
+          logged={loggedHours(timeLog, pendingTaskComplete.id)}
+          job={pendingTaskComplete}
+          onCancel={() => setPendingTaskComplete(null)}
+          onConfirm={completeTaskWithHours}
+        />
+      )}
+
       {confirmDelete && (
         <Modal title="Confirm delete" onClose={() => setConfirmDelete(null)}>
           <p className="text-sm text-slate-300 mb-4">
@@ -2483,6 +2683,8 @@ export default function WeldingScheduler() {
                 if (confirmDelete.type === 'template') deleteTemplate(confirmDelete.id);
                 if (confirmDelete.type === 'equipment') deleteEquipment(confirmDelete.id);
                 if (confirmDelete.type === 'staff') deleteStaff(confirmDelete.id);
+                if (confirmDelete.type === 'task') deleteTask(confirmDelete.id);
+                if (confirmDelete.type === 'project') deleteProject(confirmDelete.id);
               }}
             >
               <Trash2 size={14} /> Delete
@@ -2696,7 +2898,7 @@ function buildJobSegments(job, visibleDays, colWidth, staffColor) {
 }
 
 function ScheduleView({
-  equipment, staff, jobs, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
+  equipment, staff, jobs, tasks = [], onEditTask, onAddTask, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
   onEditJob, unscheduledJobs, conflictJobs, preferredEquipJobs = [], secondStaffUnmetJobs = [], onAddJob, zoom, setZoom, onToggleEquipDay,
 }) {
@@ -2770,6 +2972,18 @@ function ScheduleView({
     return map;
   }, [equipment, jobs]);
 
+  // Tasks get their own, much simpler lane per equipment — no split parts,
+  // no drag-drop (a task is always placed exactly where TaskModal's
+  // Equipment/Planned start date pinned it; see taskToJobUnit's comment for
+  // why there's no "automatic" mode to reassign it out of), just a row that
+  // opens TaskModal on click.
+  const tasksByEquip = useMemo(() => {
+    const map = {};
+    equipment.forEach((e) => { map[e.id] = []; });
+    tasks.forEach((t) => { if (t.assignment && map[t.assignment.equipmentId]) map[t.assignment.equipmentId].push(t); });
+    return map;
+  }, [equipment, tasks]);
+
   const canPrev = rangeStart > 0;
   const canNext = rangeStart + rangeLength < totalDays;
   const rangeLabel = visibleDays.length ? fmtDateRange(visibleDays[0], visibleDays[visibleDays.length - 1]) : '';
@@ -2830,6 +3044,9 @@ function ScheduleView({
               >
                 {RANGE_PRESETS.map((p) => <option key={p.days} value={p.days}>{p.label}</option>)}
               </select>
+            )}
+            {!readOnly && !displayMode && (
+              <button className={btnGhost} onClick={onAddTask}><FlaskConical size={15} /> New task</button>
             )}
             {!readOnly && !displayMode && (
               <button className={btnPrimary} onClick={onAddJob}><Plus size={15} /> New job</button>
@@ -2897,6 +3114,9 @@ function ScheduleView({
                   a.assignment.startDate < b.assignment.startDate ? -1
                     : a.assignment.startDate > b.assignment.startDate ? 1
                     : (a.assignment.claimOrder ?? 0) - (b.assignment.claimOrder ?? 0));
+                const equipTasks = (tasksByEquip[eq.id] || [])
+                  .filter((t) => t.assignment.startDate <= d1 && t.assignment.endDate >= d0)
+                  .sort((a, b) => (a.assignment.startDate < b.assignment.startDate ? -1 : a.assignment.startDate > b.assignment.startDate ? 1 : 0));
                 const cells = () => (
                   <div className="absolute inset-0 flex">
                     {visibleDays.map((day) => {
@@ -2965,7 +3185,7 @@ function ScheduleView({
                         })}
                       </div>
                     </div>
-                    {lanes.length === 0 && (
+                    {lanes.length === 0 && equipTasks.length === 0 && (
                       <div className="flex">
                         <div className="shrink-0 px-3 border-r border-slate-800 flex items-center sticky left-0 bg-slate-900" style={{ width: JOB_COL_WIDTH }}>
                           <span className="text-[10px] text-slate-600">No jobs scheduled</span>
@@ -3115,6 +3335,64 @@ function ScheduleView({
                                   borderRadius: 4,
                                   opacity: 0.92,
                                   border: conflict ? '1.5px solid #ef4444' : job.assignment.pinned ? '1.5px solid #E0523C' : '1px solid rgba(37,54,70,.35)',
+                                }}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {/* Tasks (R&D/maintenance/anything that isn't a job) get
+                        their own lane, same colour-by-staff-per-day language
+                        as a job tile (buildJobSegments is generic) but a
+                        dashed border and a flask icon so the distinction
+                        reads at a glance — and no drag handles: a task is
+                        always exactly where its own modal pinned it (see
+                        taskToJobUnit's comment), there's no "automatic" mode
+                        to reassign it out of by dragging. */}
+                    {equipTasks.map((task) => {
+                      const person = task.staffId ? staff.find((s) => s.id === task.staffId) : null;
+                      const conflict = task.assignment.conflict;
+                      const tip = `Task · ${task.name} · ${task.hoursTotal}h${person ? ` · ${person.name}` : ''}${conflict ? ' · OVER CAPACITY' : ''}`;
+                      const segs = buildJobSegments(task, visibleDays, colWidth, staffColor);
+                      return (
+                        <div key={task.id} className="flex border-b border-slate-800/40">
+                          <div
+                            className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 bg-slate-900"
+                            style={{ width: JOB_COL_WIDTH }}
+                            onClick={() => onEditTask(task)}
+                            title={tip}
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <FlaskConical size={10} className="text-violet-400 shrink-0" />
+                              <span className="text-[11px] font-semibold text-violet-200 truncate">{task.name}</span>
+                              {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
+                            </div>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-[10px] text-slate-400 truncate">{person ? person.name : 'Anyone qualified'} · {task.hoursTotal}h</span>
+                            </div>
+                          </div>
+                          <div className="relative" style={{ height: laneH, width: visibleDays.length * colWidth }}>
+                            {cells()}
+                            {segs.map((sg, si) => (
+                              <div
+                                key={si}
+                                onClick={() => onEditTask(task)}
+                                title={tip}
+                                className="absolute cursor-pointer"
+                                style={{
+                                  left: sg.left + 1,
+                                  width: Math.max(4, sg.width - 2),
+                                  top: 7,
+                                  height: laneH - 14,
+                                  background: sg.grey >= 0.999
+                                    ? COMPLETE_GREY
+                                    : sg.grey > 0
+                                    ? `linear-gradient(90deg, ${COMPLETE_GREY} ${(sg.grey * 100).toFixed(1)}%, ${sg.color} ${(sg.grey * 100).toFixed(1)}%)`
+                                    : sg.color,
+                                  borderRadius: 4,
+                                  opacity: 0.85,
+                                  border: conflict ? '1.5px solid #ef4444' : '1.5px dashed #a78bfa',
                                 }}
                               />
                             ))}
@@ -3507,6 +3785,325 @@ function QualityView({ jobs, procedures = [], costCentres = [], timeLog = [], on
             )}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   R&D PROJECTS AND TASKS
+   A project is a tracking-only record — name, description, status — never
+   scheduled and never shown on the timeline itself; it exists purely so
+   tasks have something to roll their hours and cost up to. A task IS
+   scheduled, sharing the engine with jobs (see taskToJobUnit/splitTaskUnits
+   in the main component) but living in its own array — see PROJECTS_KEY/
+   TASKS_KEY and "R&D projects and tasks" in scheduler/CLAUDE.md.
+   ============================================================ */
+
+function ProjectModal({ project, onClose, onSave, onDelete }) {
+  const isNew = !project;
+  const [name, setName] = useState(project?.name || '');
+  const [description, setDescription] = useState(project?.description || '');
+  const [status, setStatus] = useState(project?.status || 'active');
+  const canSave = name.trim().length > 0;
+  return (
+    <Modal title={isNew ? 'New R&D project' : 'Edit project'} onClose={onClose}>
+      <Field label="Project name">
+        <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+      </Field>
+      <Field label="Description (optional)">
+        <textarea className={inputCls} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
+      </Field>
+      <Field label="Status">
+        <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="active">Active</option>
+          <option value="onhold">On hold</option>
+          <option value="complete">Complete</option>
+        </select>
+      </Field>
+      <div className="flex items-center justify-between pt-2 border-t border-slate-800 mt-2">
+        {onDelete ? <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button> : <span />}
+        <div className="flex gap-2">
+          <button className={btnGhost} onClick={onClose}>Cancel</button>
+          <button
+            className={btnPrimary} disabled={!canSave}
+            onClick={() => onSave({
+              id: project?.id || uid('proj'),
+              name: name.trim(),
+              description,
+              status,
+              createdAt: project?.createdAt || new Date().toISOString(),
+            }, isNew)}
+          >
+            <Check size={14} /> Save
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// The deliberately lighter modal from the original request: "no job
+// numbers, no job values, none of the usual job specific data" — every
+// field here is one of the eight the user actually asked for (task
+// description, process, procedure, expected duration, required completion
+// date, equipment, ready for processing, planned start date) plus the
+// optional project link and a manual staff assignment (needed so "who it
+// was done by" — see the R&D view's per-project rollup — has something to
+// log against beyond whatever the daily hours log records by hand).
+//
+// A task is always created already pinned: Equipment and Planned start date
+// are both required here, there's no "automatic, find it a slot" mode the
+// way a job has — see taskToJobUnit's comment for why. Editing either field
+// rebuilds the pin exactly like JobModal's own Equipment/Planned start date
+// pair does (#28).
+function TaskModal({ task, processes, staff, equipment = [], procedures = [], projects = [], onClose, onSave, onDelete, onToggleComplete }) {
+  const isNew = !task;
+  const [name, setName] = useState(task?.name || '');
+  const [process, setProcess] = useState(task?.process || '');
+  const [procedureId, setProcedureId] = useState(task?.procedureId || '');
+  const [hoursTotal, setHoursTotal] = useState(task?.hoursTotal ?? '');
+  const [readyDate, setReadyDate] = useState(task?.readyDate || '');
+  const [dueDate, setDueDate] = useState(task?.dueDate || '');
+  const [equipmentId, setEquipmentId] = useState(task?.assignment?.equipmentId || '');
+  const [startDate, setStartDate] = useState(task?.assignment?.startDate || '');
+  const [staffId, setStaffId] = useState(task?.staffId || '');
+  const [projectId, setProjectId] = useState(task?.projectId || '');
+  const [notes, setNotes] = useState(task?.notes || '');
+
+  // No capability tags on a task (it has nothing equivalent to set them
+  // with), so this is just the process match — simpler than JobModal's
+  // qualifiedEquip, which also runs tagOk.
+  const qualifiedEquip = process ? equipment.filter((e) => e.processes.includes(process)) : [];
+  const qualifiedStaff = process ? staff.filter((s) => s.processes.includes(process)) : [];
+  const relevantProcedures = process ? procedures.filter((p) => p.process === process) : [];
+
+  const canSave = name.trim() && process && Number(hoursTotal) > 0 && dueDate && equipmentId && startDate;
+
+  function handleSave() {
+    const stamped = {
+      id: task?.id || uid('task'),
+      name: name.trim(),
+      process,
+      procedureId: procedureId || '',
+      hoursTotal: Math.max(0, Math.round((Number(hoursTotal) || 0) * 100) / 100),
+      readyDate: readyDate || '',
+      dueDate,
+      projectId: projectId || null,
+      staffId: staffId || null,
+      notes,
+      status: task?.status || 'active',
+      completedDate: task?.completedDate || null,
+      actualHours: task?.actualHours ?? null,
+      assignment: { equipmentId, startDate, endDate: startDate, pinned: true, conflict: false, days: [] },
+    };
+    onSave(stamped, isNew);
+  }
+
+  return (
+    <Modal title={isNew ? 'New task' : 'Edit task'} onClose={onClose}>
+      <Field label="Task description">
+        <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Process">
+          <select
+            className={inputCls} value={process}
+            onChange={(e) => { setProcess(e.target.value); setProcedureId(''); setEquipmentId(''); setStaffId(''); }}
+          >
+            <option value="">Select…</option>
+            {processes.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </Field>
+        <Field label="Procedure — for cost (optional)">
+          <select className={inputCls} value={procedureId} onChange={(e) => setProcedureId(e.target.value)} disabled={!process}>
+            <option value="">None</option>
+            {relevantProcedures.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Expected duration (hours)">
+          <input type="number" min={0} step={0.25} className={inputCls} value={hoursTotal} onChange={(e) => setHoursTotal(e.target.value)} />
+        </Field>
+        <Field label="Required completion date">
+          <input type="date" className={inputCls} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Ready for processing">
+          <input type="date" className={inputCls} value={readyDate} onChange={(e) => setReadyDate(e.target.value)} />
+        </Field>
+        <Field label="Planned start date">
+          <input type="date" className={inputCls} min={readyDate} value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Equipment">
+          <select className={inputCls} value={equipmentId} onChange={(e) => setEquipmentId(e.target.value)} disabled={!process}>
+            <option value="">Select…</option>
+            {qualifiedEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Assigned to (optional)">
+          <select className={inputCls} value={staffId} onChange={(e) => setStaffId(e.target.value)} disabled={!process}>
+            <option value="">Automatic — anyone qualified &amp; free</option>
+            {qualifiedStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <p className="text-xs text-slate-500 -mt-2 mb-3">
+        {equipmentId && startDate
+          ? `Pinned to ${equipment.find((e) => e.id === equipmentId)?.name || 'this equipment'} starting ${fmtDate(startDate)} on Save, same as a job pinned from its own modal — won't move until this is changed.`
+          : 'Equipment and a planned start date are both required — a task is placed exactly where you put it, not auto-scheduled.'}
+      </p>
+      <Field label="Project (optional)">
+        <select className={inputCls} value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+          <option value="">No project — standalone task</option>
+          {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Notes (optional)">
+        <textarea className={inputCls} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </Field>
+      <div className="flex items-center justify-between pt-2 border-t border-slate-800 mt-2">
+        <div className="flex gap-2">
+          {onDelete && <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button>}
+        </div>
+        <div className="flex gap-2">
+          {onToggleComplete && (
+            <button className={btnGhost} onClick={onToggleComplete}>
+              <CircleCheck size={14} /> {task?.status === 'complete' ? 'Mark active' : 'Mark complete'}
+            </button>
+          )}
+          <button className={btnPrimary} disabled={!canSave} onClick={handleSave}><Check size={14} /> Save</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Every task that names this project, for the rollup below — hours from the
+// same loggedHours() any job uses, cost from the same jobCost() (task field
+// names deliberately match: procedureId/status/actualHours/hoursTotal), so
+// nothing project-specific had to be built for either number.
+function projectRollup(project, tasks, timeLog, procedures, costCentres) {
+  const own = tasks.filter((t) => t.projectId === project.id);
+  const hours = own.reduce((s, t) => s + loggedHours(timeLog, t.id), 0);
+  const cost = own.reduce((s, t) => s + (jobCost(t, procedures, costCentres) || 0), 0);
+  return { taskCount: own.length, hours: Math.round(hours * 100) / 100, cost };
+}
+
+function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff, readOnly, onAddProject, onEditProject, onAddTask, onEditTask }) {
+  const [projectFilter, setProjectFilter] = useState('all');
+  const sortedProjects = [...projects].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const visibleTasks = (projectFilter === 'all' ? tasks : tasks.filter((t) => t.projectId === projectFilter))
+    .slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">Projects</h2>
+          {!readOnly && <button className={btnPrimary} onClick={onAddProject}><Plus size={15} /> New project</button>}
+        </div>
+        {sortedProjects.length === 0 ? (
+          <div className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-8 text-center text-slate-600 text-sm">
+            No R&D projects yet — set one up to start tracking hours and cost against it, or leave tasks standalone.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {sortedProjects.map((p) => {
+              const roll = projectRollup(p, tasks, timeLog, procedures, costCentres);
+              return (
+                <button
+                  key={p.id} type="button"
+                  className="text-left bg-slate-900 border border-slate-800 rounded-lg p-3 hover:border-slate-600 transition-colors"
+                  onClick={() => onEditProject(p)}
+                >
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <span className="font-semibold text-slate-100 text-sm truncate">{p.name}</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full border shrink-0 ${
+                      p.status === 'complete' ? 'bg-emerald-950/60 border-emerald-900 text-emerald-300'
+                      : p.status === 'onhold' ? 'bg-slate-800 border-slate-700 text-slate-400'
+                      : 'bg-amber-950/60 border-amber-900 text-amber-300'
+                    }`}>{p.status === 'onhold' ? 'On hold' : p.status === 'complete' ? 'Complete' : 'Active'}</span>
+                  </div>
+                  {p.description && <p className="text-xs text-slate-500 mb-2 line-clamp-2">{p.description}</p>}
+                  <div className="flex items-center gap-3 text-xs text-slate-400">
+                    <span>{roll.taskCount} task{roll.taskCount === 1 ? '' : 's'}</span>
+                    <span>{roll.hours}h logged</span>
+                    <span className="text-amber-300 font-mono">{fmtMoney(roll.cost)}</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">Tasks</h2>
+          <div className="flex items-center gap-2">
+            <select
+              className="bg-slate-900 border border-slate-800 rounded-md text-xs px-2.5 py-2 text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-500/60"
+              value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}
+            >
+              <option value="all">All tasks</option>
+              <option value="">No project (standalone)</option>
+              {sortedProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            {!readOnly && <button className={btnPrimary} onClick={onAddTask}><Plus size={15} /> New task</button>}
+          </div>
+        </div>
+        <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase tracking-wide">
+              <tr>
+                <th className="px-3 py-2 text-left">Task</th>
+                <th className="px-3 py-2 text-left">Project</th>
+                <th className="px-3 py-2 text-left">Process</th>
+                <th className="px-3 py-2 text-left">Who</th>
+                <th className="px-3 py-2 text-left">Status</th>
+                <th className="px-3 py-2 text-right">Est. hours</th>
+                <th className="px-3 py-2 text-right">Hours logged</th>
+                <th className="px-3 py-2 text-right">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleTasks.map((t) => {
+                const project = projects.find((p) => p.id === t.projectId);
+                const person = staff.find((s) => s.id === t.staffId);
+                const hours = loggedHours(timeLog, t.id);
+                const cost = jobCost(t, procedures, costCentres);
+                const status = t.status === 'complete' ? 'Complete' : t.assignment?.conflict ? 'Over capacity' : 'Scheduled';
+                return (
+                  <tr key={t.id} className="border-b border-slate-800/60 hover:bg-slate-800/40 cursor-pointer" onClick={() => onEditTask(t)}>
+                    <td className="px-3 py-2 font-medium text-slate-200">{t.name}</td>
+                    <td className="px-3 py-2 text-slate-400">{project ? project.name : '—'}</td>
+                    <td className="px-3 py-2 text-slate-400">{t.process}</td>
+                    <td className="px-3 py-2 text-slate-400">{person ? person.name : 'Anyone qualified'}</td>
+                    <td className="px-3 py-2">
+                      <span className={
+                        status === 'Complete' ? 'text-emerald-400' : status === 'Over capacity' ? 'text-red-400' : 'text-slate-300'
+                      }>{status}</span>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-slate-400">{t.hoursTotal}h</td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-slate-300">{hours}h</td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-amber-300">{cost != null ? fmtMoney(cost) : '—'}</td>
+                  </tr>
+                );
+              })}
+              {visibleTasks.length === 0 && (
+                <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-600 text-sm">
+                  No tasks{projectFilter !== 'all' ? ' for this project' : ''} yet — set one up from here or straight
+                  from the Schedule view.
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -4911,11 +5508,68 @@ const TIMELOG_KEY = 'wf_timelog';
 // scheduler-data.json on the host PC like everything else.
 const OVERRIDES_KEY = 'wf_overrides';
 
+// R&D projects — tracking-only records (name/description/status), never
+// scheduled themselves. See "R&D projects and tasks" in scheduler/CLAUDE.md.
+const PROJECTS_KEY = 'wf_projects';
+
+// Non-job schedulable items — see "R&D projects and tasks" in
+// scheduler/CLAUDE.md for why these are a separate array from `jobs` (kept
+// out of Job Backlog, Reports, batching, WIP import) while still sharing the
+// scheduling engine (see taskToJobUnit/splitTaskUnits below).
+const TASKS_KEY = 'wf_tasks';
+
 // Hours logged against a job so far, across every day.
 function loggedHours(timeLog, jobId) {
   return Math.round(
     (timeLog || []).filter((e) => e.jobId === jobId).reduce((s, e) => s + (Number(e.hours) || 0), 0) * 100
   ) / 100;
+}
+
+// A task, adapted into the job shape runScheduler expects, so it competes
+// for the exact same equipment/staff capacity a job would — no separate
+// blocking mechanism to keep in sync with leave/rosters/unavailable dates.
+// `_isTask` survives the round trip (runScheduler spreads/mutates units in
+// place, it never rebuilds a narrower object — see splitTaskUnits below,
+// which relies on that), so the merged result can be split straight back
+// into jobs vs. tasks with no extra bookkeeping. Always pinned: a task's
+// equipment and planned start date are both required at creation (see
+// TaskModal), there is no "automatic" placement mode for one.
+function taskToJobUnit(t) {
+  return {
+    id: t.id,
+    _isTask: true,
+    name: t.name,
+    process: t.process,
+    hoursTotal: t.hoursTotal,
+    readyDate: t.readyDate,
+    dueDate: t.dueDate,
+    departmentDueDate: null,
+    status: t.status,
+    actualHours: t.actualHours,
+    parts: null,
+    batchId: null,
+    needsFurtherProcessing: false,
+    parallelProcessing: false,
+    preferredEquipmentId: null,
+    staffId: t.staffId || null,
+    secondStaffId: null,
+    lockedEquipmentId: null,
+    tags: [],
+    assignment: t.assignment ? { ...t.assignment } : null,
+  };
+}
+// The reverse of taskToJobUnit: pull the scheduler's output apart into the
+// real jobs array and the real tasks array (merging each scheduled unit's
+// fresh `assignment` back onto the task's own record, which carries
+// everything else — description, procedureId, projectId, etc. — that the
+// engine never needed to see).
+function splitTaskUnits(merged, tasksList) {
+  const jobsResult = merged.filter((u) => !u._isTask);
+  const tasksResult = merged.filter((u) => u._isTask).map((u) => ({
+    ...(tasksList.find((t) => t.id === u.id) || {}),
+    assignment: u.assignment,
+  }));
+  return { jobsResult, tasksResult };
 }
 
 // Chip editor for the include/exclude keyword lists. Deliberately plain: type
