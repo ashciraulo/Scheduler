@@ -1959,6 +1959,13 @@ export default function WeldingScheduler() {
   // fallback gets surfaced instead of silently swallowed: same idea as
   // `conflictJobs`, just for a missed preference rather than an overbooking.
   const preferredEquipJobs = [];
+  // A second person (job.secondStaffId — a training partner riding along on
+  // the primary, see scheduler.js's attachSecondStaff) who couldn't actually
+  // be paired onto the days the job landed on. Same treatment as a missed
+  // preference above: the job itself is scheduled fine, this is a "you
+  // wanted a trainee here too, but they weren't free" signal, not an
+  // overbooking, so it gets its own panel rather than joining conflictJobs.
+  const secondStaffUnmetJobs = [];
   jobs.forEach((j) => {
     if (j.status === 'complete') return;
     if (Array.isArray(j.parts)) {
@@ -1975,6 +1982,9 @@ export default function WeldingScheduler() {
           dueDate: j.dueDate,
           departmentDueDate: j.departmentDueDate,
           preferredEquipmentId: j.preferredEquipmentId,
+          // Own field, not the parent's (#68's same reasoning) — a training
+          // pairing is per part now, same as staffId/lockedEquipmentId.
+          secondStaffId: p.secondStaffId,
           assignment: p.assignment,
           unschedReason: p.unschedReason,
           _parentJob: j,
@@ -1982,11 +1992,13 @@ export default function WeldingScheduler() {
         if (!p.assignment) unscheduledJobs.push(unit);
         if (p.assignment && p.assignment.conflict) conflictJobs.push(unit);
         if (p.assignment && p.assignment.preferredEquipmentUnmet) preferredEquipJobs.push(unit);
+        if (p.assignment && p.assignment.secondStaffUnmet) secondStaffUnmetJobs.push(unit);
       });
     } else {
       if (!j.assignment) unscheduledJobs.push(j);
       if (j.assignment && j.assignment.conflict) conflictJobs.push(j);
       if (j.assignment && j.assignment.preferredEquipmentUnmet) preferredEquipJobs.push(j);
+      if (j.assignment && j.assignment.secondStaffUnmet) secondStaffUnmetJobs.push(j);
     }
   });
 
@@ -2090,6 +2102,7 @@ export default function WeldingScheduler() {
             unscheduledJobs={unscheduledJobs}
             conflictJobs={conflictJobs}
             preferredEquipJobs={preferredEquipJobs}
+            secondStaffUnmetJobs={secondStaffUnmetJobs}
             onAddJob={() => setEditingJob('new')}
             zoom={zoom}
             setZoom={setZoom}
@@ -2526,7 +2539,7 @@ function buildJobSegments(job, visibleDays, colWidth, staffColor) {
 function ScheduleView({
   equipment, staff, jobs, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
-  onEditJob, unscheduledJobs, conflictJobs, preferredEquipJobs = [], onAddJob, zoom, setZoom, onToggleEquipDay,
+  onEditJob, unscheduledJobs, conflictJobs, preferredEquipJobs = [], secondStaffUnmetJobs = [], onAddJob, zoom, setZoom, onToggleEquipDay,
 }) {
   // Zoom scales both axes of the grid so more of it — including the next
   // piece of equipment — fits on screen at once. Without it, a fully-booked
@@ -2581,6 +2594,7 @@ function ScheduleView({
             // show the same "assigned manually"/lock marker on both parts'
             // tiles even after they'd been made genuinely independent.
             staffId: part.staffId || null,
+            secondStaffId: part.secondStaffId || null,
             lockedEquipmentId: part.lockedEquipmentId || null,
             hoursTotal: part.hoursTotal,
             percentComplete: part.percentComplete,
@@ -2803,7 +2817,17 @@ function ScheduleView({
                     {lanes.map((job) => {
                       const parent = job._parentJob || job;
                       const jobNo = parent.bcJobNo || '—';
-                      const staffIds = [...new Set((job.assignment.days || []).map((e) => e.staffId).filter(Boolean))];
+                      // Includes secondStaffId (a paired training partner —
+                      // see scheduler.js's attachSecondStaff) alongside the
+                      // primary on purpose: they're genuinely both working
+                      // it, so both get a colour dot and both show up in the
+                      // name list, same as any other two people who happened
+                      // to hand off the same job. When the pairing wasn't
+                      // met, nothing was ever stamped onto `e.secondStaffId`
+                      // (see the engine's all-or-nothing rule), so they
+                      // correctly don't appear here at all — that absence
+                      // plus the `secondUnmet` marker below IS the signal.
+                      const staffIds = [...new Set((job.assignment.days || []).flatMap((e) => [e.staffId, e.secondStaffId]).filter(Boolean))];
                       const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Unassigned';
                       const conflict = job.assignment.conflict;
                       const preferredMissed = job.assignment.preferredEquipmentUnmet;
@@ -2815,7 +2839,16 @@ function ScheduleView({
                       // identically to before in that case.
                       const manualStaff = job.staffId ? staff.find((s) => s.id === job.staffId) : null;
                       const lockedEquip = job.lockedEquipmentId;
-                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${lockedEquip ? ' · equipment locked' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}`;
+                      // A training pair that couldn't actually be honoured —
+                      // same "own unit, not parent" reasoning as
+                      // staffId/lockedEquipmentId above. When it WAS honoured
+                      // there's nothing extra to call out here: the second
+                      // person already got their own colour dot and their
+                      // name already appears in `staffNames` above, exactly
+                      // like any other two people who happened to hand off
+                      // the same job — this only needs to flag the miss.
+                      const secondUnmet = job.assignment.secondStaffUnmet;
+                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${lockedEquip ? ' · equipment locked' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}${secondUnmet ? ' · training partner not paired — review' : ''}`;
                       const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
                       // A job is being dragged over THIS row's name cell,
                       // about to take its slot on drop (#55) — distinct from
@@ -2883,6 +2916,7 @@ function ScheduleView({
                               {job.assignment.pinned && !conflict && <Pin size={9} className="text-amber-400 shrink-0" />}
                               {!job.assignment.pinned && lockedEquip && <Lock size={9} className="text-amber-400 shrink-0" />}
                               {preferredMissed && <Target size={9} className="text-amber-400 shrink-0" />}
+                              {secondUnmet && <Users size={9} className="text-amber-400 shrink-0" />}
                               {job.parallelProcessing && <Users size={9} className="text-sky-400 shrink-0" />}
                             </div>
                             <div className="flex items-center gap-1.5 min-w-0">
@@ -2967,6 +3001,23 @@ function ScheduleView({
                     {j.name}
                     <span className="block text-slate-500">
                       wanted {equipment.find((e) => e.id === j.preferredEquipmentId)?.name || 'equipment no longer available'}, placed elsewhere — not a conflict, just worth a look
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {secondStaffUnmetJobs.length > 0 && (
+            <div className="flex-1 min-w-0 border border-amber-900 bg-amber-950/20 rounded-lg p-3">
+              <h3 className="text-xs font-semibold text-amber-300 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                <Users size={13} /> Training partner not paired ({secondStaffUnmetJobs.length})
+              </h3>
+              <div className="space-y-1.5">
+                {secondStaffUnmetJobs.map((j) => (
+                  <button key={j.id} onClick={() => onEditJob(j._parentJob || j)} className="w-full text-left text-xs bg-slate-900/60 hover:bg-slate-900 rounded px-2 py-1.5 text-slate-300">
+                    {j.name}
+                    <span className="block text-slate-500">
+                      wanted {staff.find((s) => s.id === j.secondStaffId)?.name || 'a second person'} alongside them, not free for all of it — job is scheduled fine, just missing its second person
                     </span>
                   </button>
                 ))}
@@ -3650,6 +3701,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [parts, setParts] = useState(job?.parts ? job.parts.map((p) => ({
     ...p,
     staffId: p.staffId || '',
+    secondStaffId: p.secondStaffId || '',
     lockedEquipmentId: p.lockedEquipmentId || '',
     manualEquipId: p.assignment?.equipmentId || '',
     manualStartDate: p.assignment?.startDate || '',
@@ -3697,6 +3749,14 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
     return t ? (t.category || 'Uncategorised') : '';
   });
   const [staffId, setStaffId] = useState(job?.staffId || '');
+  // A second person riding along on the job above — most often a trainee
+  // shadowing whoever's actually doing the work. Only ever meaningful
+  // alongside a primary (staffId); clearing staffId clears this too, below.
+  // Deliberately lightweight — see "Two-person jobs" in scheduler/CLAUDE.md:
+  // it's a pure post-check on the placement the primary already gets, not a
+  // second slot the scheduler searches for, so it never needs its own sign-off
+  // or its own eligibility list.
+  const [secondStaffId, setSecondStaffId] = useState(job?.secondStaffId || '');
   const [tags, setTags] = useState(job?.tags || (job ? [] : (templates.find((t) => t.id === templateId) || {}).tags) || []);
   const [procedureId, setProcedureId] = useState(job?.procedureId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).procedureId) || '');
   // A soft nudge, not a pin — deliberately its own field, independent of
@@ -3851,6 +3911,13 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       tags,
       procedureId,
       staffId: staffId || null,
+      // Never saved without a primary to anchor it — the engine already
+      // guards this too (attachSecondStaff only runs when both are set), but
+      // clearing it here as well means a job that once had a training pair
+      // and then had its primary cleared doesn't keep a dangling, invisible
+      // secondStaffId that would silently reappear the moment someone new is
+      // assigned as primary.
+      secondStaffId: staffId && secondStaffId ? secondStaffId : null,
       preferredEquipmentId: preferredEquipmentId || null,
       lockedEquipmentId: lockedEquipmentId || null,
       actualHours: job?.actualHours,
@@ -3889,6 +3956,9 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
         percentComplete: p.percentComplete,
         status: p.status,
         staffId: p.staffId || null,
+        // Same guard as the whole-job field — never saved without that same
+        // part's own staffId to anchor it.
+        secondStaffId: p.staffId && p.secondStaffId ? p.secondStaffId : null,
         lockedEquipmentId: p.lockedEquipmentId || null,
         assignment: computePartAssignment(p),
       })) : null,
@@ -4189,6 +4259,28 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               </p>
             )}
 
+            {/* A second person on the job at the same time — most often a
+                trainee shadowing whoever's assigned above. Only offered once
+                a primary is named: a "second" person means nothing without a
+                first to be second TO. Deliberately every other staff member,
+                not just qualifiedStaff — this is exactly the case where the
+                person genuinely ISN'T signed off yet. Their time is still
+                blocked for the job's days (they can't be double-booked
+                elsewhere), it's only the sign-off check that's skipped. */}
+            {!parts && staffId && (
+              <Field label="Training partner (optional)">
+                <select className={inputCls} value={secondStaffId} onChange={(e) => setSecondStaffId(e.target.value)}>
+                  <option value="">No one else — just {staff.find((s) => s.id === staffId)?.name || 'this person'}</option>
+                  {staff.filter((s) => s.id !== staffId).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  {secondStaffId
+                    ? `${staff.find((s) => s.id === secondStaffId)?.name || 'This person'} is also blocked out for the job's days, alongside ${staff.find((s) => s.id === staffId)?.name || 'the assigned person'} — no sign-off on ${process || 'the process'} required.`
+                    : 'For training: a second person present the whole time, without needing to be signed off yet.'}
+                </p>
+              </Field>
+            )}
+
             {!parts && !isNew && (
               <Field label={`% complete — ${percentComplete}%`}>
                 <input type="range" min={0} max={100} step={5} value={percentComplete} onChange={(e) => setPercentComplete(e.target.value)} className="w-full accent-amber-500" />
@@ -4358,6 +4450,20 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                     </select>
                   </Field>
                 </div>
+                {/* Per-part training partner — same reasoning as the
+                    whole-job field above, scoped to just this part. Only
+                    offered once THIS part has its own primary. */}
+                {part.staffId && (
+                  <Field label="Training partner (optional)">
+                    <select
+                      className={inputCls} value={part.secondStaffId}
+                      onChange={(e) => setParts((ps) => ps.map((p, pi) => (pi === i ? { ...p, secondStaffId: e.target.value } : p)))}
+                    >
+                      <option value="">No one else</option>
+                      {staff.filter((s) => s.id !== part.staffId).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </Field>
+                )}
                 <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1.5">
                   <span>
                     {part.manualEquipId

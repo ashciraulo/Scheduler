@@ -434,7 +434,7 @@ export function consume(plan, equipId, jobId, days, caps, allowParallel = false)
     if (inSpan && d !== finalDate) equipDayLock[equipId][d] = jobId;
     if (d === finalDate) break;
   }
-  plan.forEach(({ date, shift, staffId, hours }) => {
+  plan.forEach(({ date, shift, staffId, secondStaffId, hours }) => {
     equipShiftUsed[equipId][date][shift] += hours;
     if (!staffId) return; // an overbooked pinned job's placeholder plan has no one on it
     // A parallel-processing job never actually claimed this person's time —
@@ -444,7 +444,52 @@ export function consume(plan, equipId, jobId, days, caps, allowParallel = false)
     if (allowParallel) return;
     staffDayRemain[staffId][date] -= hours;
     staffLoad[staffId] = (staffLoad[staffId] ?? 0) + hours;
+    // `secondStaffId` (see attachSecondStaff, "two-person jobs" below) is
+    // stamped onto an entry only once that person has actually been verified
+    // free for it, so deducting here unconditionally is safe — this is not a
+    // caller-supplied flag to check, it's the record of a check already done.
+    // Handled generically, right alongside the primary, rather than as a
+    // special case in whichever call site stamped it: that's what makes
+    // replaying a completed job's plan (which also calls consume — #49)
+    // correctly re-block the second person's historical time too, with no
+    // separate code path to keep in sync.
+    if (secondStaffId) {
+      staffDayRemain[secondStaffId][date] -= hours;
+      staffLoad[secondStaffId] = (staffLoad[secondStaffId] ?? 0) + hours;
+    }
   });
+}
+
+// A second person riding along on an already-locked job — most often a
+// trainee shadowing whoever's actually doing the work (`job.secondStaffId`,
+// alongside the existing hard lock `job.staffId`; see "Two-person jobs" in
+// scheduler/CLAUDE.md). Deliberately lightweight: unlike the primary, the
+// second person is never checked for process sign-off — that's the whole
+// point of training — so this has no effect on WHO gets picked
+// (`eligibleStaffIds` is untouched) or on the day-search itself. It only
+// ever narrows the RESULT: given a plan already built around the primary
+// exactly as it always was, this checks the second person is genuinely free
+// for every single day/shift already in it (rostered onto the same shift,
+// with enough hours left) and, if so, stamps their id onto each entry so
+// `consume` deducts their time too — their calendar is actually blocked, not
+// just displayed as if it were.
+//
+// All-or-nothing on purpose: training only makes sense if the second person
+// is there for the whole plan, not some days but not others, so a partial
+// match stamps nothing at all rather than covering only the days that
+// happened to line up (which would silently free them for other work on the
+// remaining days, contradicting what the job record claims). The caller
+// reads `unmet` to know which happened; an unmet second person is a soft
+// miss (its own flag, `assignment.secondStaffUnmet`), not a scheduling
+// failure — the job itself is still placed fine.
+function attachSecondStaff(plan, secondStaffId, caps) {
+  const { staffDayShift, staffDayRemain } = caps;
+  const covers = plan.every((entry) =>
+    entry.staffId // an overbooked pin's placeholder plan has no primary either — nothing to pair a second person with
+    && staffDayShift[secondStaffId]?.[entry.date] === entry.shift
+    && (staffDayRemain[secondStaffId]?.[entry.date] ?? 0) >= entry.hours - 0.001);
+  if (!covers) return { plan, unmet: true };
+  return { plan: plan.map((entry) => ({ ...entry, secondStaffId })), unmet: false };
 }
 
 // A batch (#47) is a set of otherwise-independent jobs the user wants run
@@ -652,6 +697,10 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
           // were. `part.staffId` is its own field a part carries by itself;
           // there is no cascade from the job level to fall back to.
           staffId: part.staffId || null,
+          // Same reasoning, for the second/training person alongside it —
+          // per part, no cascade, and only meaningful if that same part also
+          // has its own staffId (see attachSecondStaff's own guard).
+          secondStaffId: part.secondStaffId || null,
           // Preferred equipment DOES still cascade from the job level — it's
           // a soft nudge (unlike staffId/lockedEquipmentId below), it hasn't
           // caused the same reported problem, and every part of a split job
@@ -809,12 +858,24 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
     const notYetReady = job.readyDate && a.startDate < job.readyDate;
     let conflict = false;
     let plan = [];
+    let secondStaffUnmet = false;
     if (startIdx === -1 || notYetReady || !equipDayLock[a.equipmentId]) {
       conflict = true;
     } else {
       const fit = tryFit(days, startIdx, job.hoursTotal, a.equipmentId, compatibleStaffIds, caps, stickyStaff.get(job.id), !!job.parallelProcessing);
       if (fit) {
         plan = fit;
+        // A second person (job.secondStaffId) only ever means anything
+        // alongside a primary (job.staffId) — see attachSecondStaff. Not
+        // checked when the primary itself couldn't be placed (that's the
+        // `conflict` branch below): a red overbooked flag already demands
+        // attention, and an amber "second person missing" on top of it
+        // would just be noise on the same underlying problem.
+        if (job.staffId && job.secondStaffId && job.secondStaffId !== job.staffId) {
+          const attached = attachSecondStaff(plan, job.secondStaffId, caps);
+          plan = attached.plan;
+          secondStaffUnmet = attached.unmet;
+        }
         consume(plan, a.equipmentId, job.id, days, caps, !!job.parallelProcessing);
       } else {
         conflict = true;
@@ -840,6 +901,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
       endDate: plan[plan.length - 1]?.date || a.startDate,
       pinned: true,
       conflict,
+      secondStaffUnmet,
       days: plan,
       claimOrder: claimCounter++,
     };
@@ -1018,15 +1080,27 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
       }
     }
     if (best) {
-      consume(best.plan, best.equipId, job.id, days, caps, !!job.parallelProcessing);
+      let plan = best.plan;
+      let secondStaffUnmet = false;
+      // Same reasoning as the pinned path above: a second person only ever
+      // means anything alongside a hard-locked primary, and is a pure
+      // post-check on the placement the primary already got — it never
+      // influences which machine or day auto-placement picks.
+      if (job.staffId && job.secondStaffId && job.secondStaffId !== job.staffId) {
+        const attached = attachSecondStaff(plan, job.secondStaffId, caps);
+        plan = attached.plan;
+        secondStaffUnmet = attached.unmet;
+      }
+      consume(plan, best.equipId, job.id, days, caps, !!job.parallelProcessing);
       job.assignment = {
         equipmentId: best.equipId,
-        startDate: best.plan[0].date,
-        endDate: best.plan[best.plan.length - 1].date,
+        startDate: plan[0].date,
+        endDate: plan[plan.length - 1].date,
         pinned: false,
         conflict: false,
         preferredEquipmentUnmet: !!(job.preferredEquipmentId && best.equipId !== job.preferredEquipmentId),
-        days: best.plan,
+        secondStaffUnmet,
+        days: plan,
         claimOrder: claimCounter++,
       };
     } else {
@@ -1107,6 +1181,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
       // object never had a key for either — every part looked permanently
       // stuck on "Automatic" no matter what the modal sent.
       staffId: unit.staffId || null,
+      secondStaffId: unit.secondStaffId || null,
       lockedEquipmentId: unit.lockedEquipmentId || null,
       assignment: unit.assignment,
       unschedReason: unit.unschedReason,

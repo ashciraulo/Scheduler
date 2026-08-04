@@ -1419,6 +1419,71 @@ staff signed off on the job's process, plus, if the lock points at someone who
 no longer qualifies, that person as a visible bad option rather than silently
 reverting to automatic. Empty string in the UI, `null` on the job.
 
+### Two-person jobs — a second person riding along (training pairs)
+
+For the rare case where two people genuinely need to be on a job at the same
+time — most often a trainer showing a trainee. `job.secondStaffId` (optional,
+nullable) names them, offered in JobModal via a **Training partner** select
+that only appears once `staffId` (the primary) is already set — a "second"
+person means nothing without a first to be second to, and neither the UI nor
+the engine reads it otherwise. The select lists every OTHER staff member, not
+`qualifiedStaff` — deliberately: the second person is never checked for
+process sign-off. That's the whole point of training someone who isn't
+qualified yet, and it's what makes this genuinely different from a second,
+independent manual assignment.
+
+**Deliberately lightweight, and that's a real design choice, not a shortcut
+kept for later:** `attachSecondStaff` (`scheduler.js`) is a pure post-check on
+whatever placement the primary already gets via the existing `staffId` hard
+lock — it never influences which machine or day gets picked, and it isn't
+woven into `tryFit`'s day-search/pool logic at all. Once a plan exists, it
+checks the second person is free for **every** day/shift already in it (same
+shift, enough hours) and, if so, stamps their id onto each entry so `consume`
+deducts their time too — their calendar is genuinely blocked, not just
+displayed as if it were. All-or-nothing: a second person free for only part of
+the plan gets stamped onto **none** of it (training a partial day isn't what
+was asked for), and nothing about the primary's own placement changes either
+way. An unmet pairing is a soft miss (`assignment.secondStaffUnmet`), not a
+scheduling failure or an overbooking — the job itself is still placed exactly
+as it would be with no second person at all, so it gets its own amber
+"Training partner not paired" panel on the Schedule view (next to Overbooked
+and Not on preferred equipment) rather than joining `conflict`. Not reported
+at all when the primary's own pin is itself conflicted (`assignment.conflict`)
+— a red flag already demands attention; an amber one on top of the same
+underlying problem would just be noise.
+
+Naming the same person as both primary and second, or setting a second person
+with no primary at all, are both silent no-ops (guarded in both the engine
+and the JobModal save path) — there is deliberately no error state for either,
+since both are just "nothing to pair," the same as not setting a second person
+in the first place.
+
+A paired second person shows up exactly like any other two people who handed
+a job off to each other: their own colour dot, their own name in the tile's
+staff list (`jobsByEquip`'s `staffIds` extraction reads `secondStaffId` off
+each day entry alongside `staffId`) — there is no separate "(training)" badge
+to keep in sync, because an unmet pairing already reads differently on its
+own (no dot, no name, the amber `Users` marker instead).
+
+**Split jobs get the same field independently per part**
+(`part.secondStaffId`), following the exact pattern `staffId`/
+`lockedEquipmentId` already established for #68 — flatten reads it off the
+part, collapse writes it back, and it needs the same "survives a second
+recompute" test as those two, not just the one that set it. There is
+currently no equivalent for batches (a batched job's own `secondStaffId`, if
+it had one, is simply dropped when the pseudo-unit is built) — an explicit
+scope decision given how rare this pairing is expected to be, not an
+oversight; extend `groupBatches`'/the pseudo-unit's field list the same way
+`staffId`/`preferredEquipmentId` already are if it's ever needed.
+
+Deliberately **no** equivalent of `findManualAssignBlockers`/the "person
+already committed elsewhere" dialog for a second person — an unmet pairing
+can have many causes (not rostered that day, on leave, busy on another job,
+already fully consumed as someone else's primary or second) and the panel
+above surfaces all of them uniformly without needing job-specific "find what's
+holding them and offer to unpin it" tooling. Revisit if this actually gets
+used often enough that the extra guidance would earn its keep.
+
 ### Splitting a job
 
 For when a job has to come off equipment before it's done (an urgent job
@@ -1426,7 +1491,7 @@ pre-empts it) and the remainder needs to be rescheduled separately, possibly
 on different equipment or at a different time. From the job's edit modal,
 "Split job into two parts" divides `hoursTotal` into two hour amounts; the job
 gets `job.parts = [{ id, name, hoursTotal, percentComplete, status, staffId,
-lockedEquipmentId, assignment }, ...]` and its own top-level
+secondStaffId, lockedEquipmentId, assignment }, ...]` and its own top-level
 `hoursTotal`/`percentComplete`/`status`/`assignment` become **derived, not
 authoritative** — see below.
 

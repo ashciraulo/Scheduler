@@ -425,6 +425,186 @@ describe('manual staff assignment', () => {
   });
 });
 
+describe('two-person jobs — a second person riding along (training pairs)', () => {
+  test('a second person free for the whole plan is stamped onto every day and their time is actually deducted', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { staffId: 's1', secondStaffId: 's2', hoursTotal: 8 })],
+      [equip('e1')], [person('s1'), person('s2')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(a.secondStaffUnmet, false);
+    assert.ok(a.days.every((entry) => entry.secondStaffId === 's2'), JSON.stringify(a.days));
+
+    // Their calendar is genuinely blocked, not just displayed as if it were —
+    // a second, unrelated job also needing s2 must wait for the next day
+    // s2's actually free, exactly as it would if s2 were the PRIMARY on a
+    // job that Monday, rather than being free to double-book Monday too.
+    const out2 = runScheduler(
+      [job('j', { staffId: 's1', secondStaffId: 's2', hoursTotal: 8 }), job('other', { staffId: 's2', hoursTotal: 8 })],
+      [equip('e1'), equip('e2')], [person('s1'), person('s2')], d,
+    );
+    assert.notEqual(byId(out2, 'other').assignment.startDate, MONDAY,
+      's2 has no hours left Monday — they were genuinely consumed, not just recorded');
+  });
+
+  test('never affects who is ELIGIBLE — a second person needs no sign-off on the process at all', () => {
+    const d = days();
+    // s2 isn't even signed off on 'Weld' (job()'s default process) — the
+    // whole point of a training pair is a second person who ISN'T qualified
+    // yet. eligibleStaffIds must never have looked at them.
+    const out = runScheduler(
+      [job('j', { staffId: 's1', secondStaffId: 's2', hoursTotal: 8 })],
+      [equip('e1')], [person('s1'), person('s2', { processes: ['Spray'] })], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(a.secondStaffUnmet, false, 'sign-off is irrelevant to the second person');
+    assert.ok(a.days.every((entry) => entry.secondStaffId === 's2'));
+  });
+
+  test('a second person not rostered that day is a soft miss, not a scheduling failure — the job still places', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { staffId: 's1', secondStaffId: 's2', hoursTotal: 8 })],
+      [equip('e1')], [person('s1'), person('s2', { roster: rosterOn(['wed']) })], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.ok(a, 'the primary still gets placed fine — a missing trainee is not an overbooking');
+    assert.equal(a.conflict, false);
+    assert.equal(a.secondStaffUnmet, true);
+    assert.ok(a.days.every((entry) => !entry.secondStaffId), 'nothing stamped when the pairing could not be honoured');
+
+    // And s2's calendar was never touched — they're free for other work.
+    const out2 = runScheduler(
+      [job('j', { staffId: 's1', secondStaffId: 's2', hoursTotal: 8 }), job('other', { staffId: 's2', hoursTotal: 8, readyDate: '2026-03-04' })],
+      [equip('e1'), equip('e2')], [person('s1'), person('s2', { roster: rosterOn(['wed']) })], d,
+    );
+    assert.ok(byId(out2, 'other').assignment, 's2 must still be free to pick up other work on their own rostered day');
+  });
+
+  test('all-or-nothing: a second person busy on only ONE day of a multi-day plan gets stamped on NONE of it', () => {
+    const d = days();
+    // s2 is fully booked by an unrelated job on the SECOND day the primary
+    // would need them.
+    const blocker = job('blocker', {
+      staffId: 's2', hoursTotal: 8,
+      assignment: { equipmentId: 'e2', startDate: '2026-03-03', endDate: '2026-03-03', pinned: true, days: [] },
+    });
+    const out = runScheduler(
+      [blocker, job('j', { staffId: 's1', secondStaffId: 's2', hoursTotal: 16 })],
+      [equip('e1'), equip('e2')], [person('s1'), person('s2')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(a.secondStaffUnmet, true);
+    assert.ok(a.days.every((entry) => !entry.secondStaffId),
+      'day one must not be stamped just because day two failed — training a partial day is not what was asked for');
+  });
+
+  test('a second person with no primary staffId set is simply ignored — no unmet flag, nothing deducted', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { secondStaffId: 's2', hoursTotal: 8 })], // no staffId at all
+      [equip('e1')], [person('s1'), person('s2')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(a.secondStaffUnmet, false);
+    assert.ok(a.days.every((entry) => !entry.secondStaffId));
+
+    // s2's own calendar is genuinely untouched.
+    const out2 = runScheduler(
+      [job('j', { secondStaffId: 's2', hoursTotal: 8 }), job('other', { staffId: 's2', hoursTotal: 8 })],
+      [equip('e1'), equip('e2')], [person('s1'), person('s2')], d,
+    );
+    assert.ok(byId(out2, 'other').assignment, 's2 was never actually blocked by a pairing with no primary to anchor it');
+  });
+
+  test('naming the same person as both primary and second is a no-op, not a self-deduction glitch', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', { staffId: 's1', secondStaffId: 's1', hoursTotal: 8 })],
+      [equip('e1')], [person('s1')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(a.secondStaffUnmet, false);
+    assert.ok(a.days.every((entry) => !entry.secondStaffId));
+    assert.equal(hoursOn(a, MONDAY), 8, 's1 must not have their own hours double-deducted against themselves');
+  });
+
+  test('works on a PINNED job the same way it does on an auto-placed one', () => {
+    const d = days();
+    const out = runScheduler(
+      [job('j', {
+        staffId: 's1', secondStaffId: 's2', hoursTotal: 8,
+        assignment: { equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+      })],
+      [equip('e1')], [person('s1'), person('s2')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    assert.equal(a.pinned, true);
+    assert.equal(a.secondStaffUnmet, false);
+    assert.ok(a.days.every((entry) => entry.secondStaffId === 's2'));
+  });
+
+  test('an overbooked pin (primary has nowhere to go) does not also report a second-person miss on top', () => {
+    const d = days();
+    // s1 has no hours anywhere in the horizon for this pin to use — forces
+    // the placeholder/conflict path, which has no real staffId on its days.
+    const blocker = job('blocker', {
+      staffId: 's1', hoursTotal: 200,
+      assignment: { equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+    });
+    const out = runScheduler(
+      [blocker, job('j', {
+        staffId: 's1', secondStaffId: 's2', hoursTotal: 8,
+        assignment: { equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+      })],
+      [equip('e1')], [person('s1'), person('s2')], d,
+    );
+    const a = byId(out, 'j').assignment;
+    // Whichever of the two ends up the one that lost the day, a genuinely
+    // conflicted pin must read secondStaffUnmet:false — the red flag already
+    // says everything that needs saying.
+    const conflicted = a.conflict ? a : byId(out, 'blocker').assignment;
+    assert.equal(conflicted.conflict, true, 'sanity check: one of the two really is conflicted');
+    assert.equal(conflicted.secondStaffUnmet, false);
+  });
+
+  test("a split job's second-person pairing is per PART, independent of the other part's", () => {
+    const d = days();
+    const split = job('split', {
+      hoursTotal: 16,
+      parts: [
+        { id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null, staffId: 's1', secondStaffId: 's3' },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null, staffId: 's2', secondStaffId: null },
+      ],
+    });
+    const out = runScheduler(
+      [split], [equip('e1'), equip('e2')],
+      [person('s1'), person('s2'), person('s3')],
+      d,
+    );
+    const parts = byId(out, 'split').parts;
+    assert.equal(parts[0].secondStaffId, 's3');
+    assert.ok(parts[0].assignment.days.every((e) => e.secondStaffId === 's3'));
+    assert.equal(parts[1].secondStaffId, null);
+    assert.ok(parts[1].assignment.days.every((e) => !e.secondStaffId));
+  });
+
+  test("a part's secondStaffId survives repeated recomputes, same as staffId/lockedEquipmentId (#68's fix, same seam)", () => {
+    const d = days();
+    const split = job('split', {
+      hoursTotal: 8,
+      parts: [{ id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null, staffId: 's1', secondStaffId: 's2' }],
+    });
+    const equipment = [equip('e1')];
+    const staff = [person('s1'), person('s2')];
+    const out1 = runScheduler([split], equipment, staff, d);
+    const out2 = runScheduler(out1, equipment, staff, d);
+    assert.equal(byId(out2, 'split').parts[0].secondStaffId, 's2',
+      'must survive a second recompute, not just the one that set it — collapse needs a key for this too');
+  });
+});
+
 describe('hard equipment lock — like staffId, but for the machine', () => {
   test('a locked job waits for its machine rather than taking one that would finish sooner', () => {
     const d = days();
