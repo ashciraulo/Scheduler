@@ -1425,9 +1425,10 @@ For when a job has to come off equipment before it's done (an urgent job
 pre-empts it) and the remainder needs to be rescheduled separately, possibly
 on different equipment or at a different time. From the job's edit modal,
 "Split job into two parts" divides `hoursTotal` into two hour amounts; the job
-gets `job.parts = [{ id, name, hoursTotal, percentComplete, status,
-assignment }, ...]` and its own top-level `hoursTotal`/`percentComplete`/
-`status`/`assignment` become **derived, not authoritative** — see below.
+gets `job.parts = [{ id, name, hoursTotal, percentComplete, status, staffId,
+lockedEquipmentId, assignment }, ...]` and its own top-level
+`hoursTotal`/`percentComplete`/`status`/`assignment` become **derived, not
+authoritative** — see below.
 
 - A split job is still **one row** in the Backlog and **one entity** everywhere
   outside the scheduler — `id`, process, dates, notes, and $ values all stay at
@@ -1471,6 +1472,48 @@ assignment }, ...]` and its own top-level `hoursTotal`/`percentComplete`/
   it finds. Dragging a part pins *that part only* — the other part(s) of the
   same job are untouched. A pinned part can be released back to auto-schedule
   via the per-part "Unpin" control in the parts editor (`onUnpinPart`).
+- **Each part has its own manual staff assignment and equipment lock —
+  `part.staffId` / `part.lockedEquipmentId` (#68) — genuinely independent,
+  with no cascade from the job level.** These used to be read from the
+  *parent* (`j.staffId`/`j.lockedEquipmentId` in `runScheduler`'s flatten
+  step), applied identically to every part — so setting "Assigned to" on a
+  split job silently locked BOTH parts to the same person. On the shop floor
+  that read as "changing one part's person changes the other's": they were
+  never independent, just displayed as if they were, since the whole-job
+  modal offered only one "Assigned to" control and no equipment field at all
+  for a split job. `JobModal` now hides the whole-job "Assigned to" for a
+  split job (`{!parts && (...)}`, matching how Equipment/Preferred
+  equipment/Planned start date already were) and instead gives each part in
+  the Parts editor its own **Equipment + Planned start date** (a
+  `computePartAssignment`, the per-part equivalent of `computeAssignment` —
+  #28), **Assigned to**, and **Locked equipment** — the same three
+  mechanisms a whole job gets, scoped to that one part.
+
+  **`preferredEquipmentId` is the deliberate exception and still cascades
+  from the job level** — every part prefers the same machine the parent did,
+  unlike the two fields above. Not an inconsistency: it's a soft nudge, it
+  hasn't caused the reported problem, and every part of a split job is by
+  definition the same underlying work, so "prefers the same machine" is a
+  reasonable default in a way "locked to the same machine" or "assigned to
+  the same person" are not — see `test/scheduler.test.js`, "every part of a
+  split job inherits the parent's preference" (kept, unchanged) vs. "a split
+  job's hard equipment lock is per PART, not inherited from the job level"
+  (the #68 fix). There is currently no per-part UI for preferred equipment.
+
+  **The bug had two halves, and fixing only the first looks like it worked
+  right up until the next recompute.** Flatten reading `part.staffId`
+  instead of `j.staffId` is necessary but not sufficient: the **collapse**
+  step that reassembles `job.parts` after every scheduling pass rebuilds
+  each part from a fixed set of fields, and it had no key for
+  `staffId`/`lockedEquipmentId` at all — so a part's field could be set
+  correctly, survive the exact recompute that saved it, and then silently
+  vanish on the very next one (every save triggers a recompute, so this was
+  every save). The `name` round-trip note below already lives at exactly
+  this seam; add a new per-part field to `job.parts` and it needs a line in
+  **both** flatten *and* collapse, or it works once and evaporates. See
+  *"a part's staffId/lockedEquipmentId survive repeated recomputes, not just
+  the one that set them"* in `test/scheduler.test.js` — modelled directly on
+  the `name` test below, for exactly this reason.
 - `BacklogView` shows an aggregate "N/M parts scheduled" in place of a single
   equipment name, and hides the one-click "mark complete" toggle for split
   jobs (completion is per-part, via the modal) — same reasoning as hiding

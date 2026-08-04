@@ -2575,7 +2575,13 @@ function ScheduleView({
           pushUnit({
             id: part.id,
             name: part.name || (j.parts.length > 1 ? `${j.name} (Part ${i + 1})` : j.name),
-            staffId: j.staffId || null,
+            // Each part's own manual assignment / lock, not the parent's
+            // (#68) — see the matching comment in scheduler.js's flatten
+            // step. Reading `j.staffId`/`j.lockedEquipmentId` here would
+            // show the same "assigned manually"/lock marker on both parts'
+            // tiles even after they'd been made genuinely independent.
+            staffId: part.staffId || null,
+            lockedEquipmentId: part.lockedEquipmentId || null,
             hoursTotal: part.hoursTotal,
             percentComplete: part.percentComplete,
             status: part.status,
@@ -2801,8 +2807,14 @@ function ScheduleView({
                       const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Unassigned';
                       const conflict = job.assignment.conflict;
                       const preferredMissed = job.assignment.preferredEquipmentUnmet;
-                      const manualStaff = parent.staffId ? staff.find((s) => s.id === parent.staffId) : null;
-                      const lockedEquip = parent.lockedEquipmentId;
+                      // From the tile's OWN unit, not `parent` (#68): for a
+                      // split job's part, `job` here is the per-part object
+                      // jobsByEquip pushed (with its own staffId/
+                      // lockedEquipmentId — see that builder), which for a
+                      // non-split job is simply the job itself, so this reads
+                      // identically to before in that case.
+                      const manualStaff = job.staffId ? staff.find((s) => s.id === job.staffId) : null;
+                      const lockedEquip = job.lockedEquipmentId;
                       const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${lockedEquip ? ' · equipment locked' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}`;
                       const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
                       // A job is being dragged over THIS row's name cell,
@@ -3626,7 +3638,24 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
 
 function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costCentres = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart }) {
   const isNew = !job;
-  const [parts, setParts] = useState(job?.parts ? job.parts.map((p) => ({ ...p })) : null);
+  // Each part carries its own manual staff assignment and equipment lock,
+  // independent of the other part's and of the (now unused, for a split job)
+  // job-level fields below (#68) — see the matching comment in scheduler.js's
+  // flatten step. `_origEquipId`/`_origStartDate` are UI-only scratch, mirroring
+  // `origEquipId`/`origStartDate` below for the whole-job case: they're what
+  // `computePartAssignment` compares against to tell "the user actually
+  // touched this part's pin fields" from "this is just what was already
+  // there", so merely opening and saving the modal doesn't force-pin a part
+  // that was auto-placed. Stripped back out before saving — see handleSave.
+  const [parts, setParts] = useState(job?.parts ? job.parts.map((p) => ({
+    ...p,
+    staffId: p.staffId || '',
+    lockedEquipmentId: p.lockedEquipmentId || '',
+    manualEquipId: p.assignment?.equipmentId || '',
+    manualStartDate: p.assignment?.startDate || '',
+    _origEquipId: p.assignment?.equipmentId || '',
+    _origStartDate: p.assignment?.startDate || '',
+  })) : null);
   const [splitHoursA, setSplitHoursA] = useState(job ? Math.round((job.hoursTotal / 2) * 100) / 100 : 0);
   // A new job starts with NO template picked (#59) — it used to default to
   // templates[0], and the "custom job instead" toggle below only cleared
@@ -3780,6 +3809,29 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
     };
   }
 
+  // The per-part equivalent of computeAssignment above, same reasoning: the
+  // Equipment + Planned start date fields on a part ARE a manual placement,
+  // built the same shape a drag onto that part would (#68) — this is what
+  // finally gives the modal a way to pin a part's equipment at all, rather
+  // than only via dragging it on the Schedule view.
+  function computePartAssignment(part) {
+    if (!part.manualEquipId) {
+      return part.assignment?.pinned ? { ...part.assignment, pinned: false } : (part.assignment || null);
+    }
+    const startDate = part.manualStartDate || readyDate;
+    if (!startDate) return part.assignment || null;
+    if (part.manualEquipId === part._origEquipId && part.manualStartDate === part._origStartDate) return part.assignment || null;
+    return {
+      equipmentId: part.manualEquipId,
+      startDate,
+      endDate: startDate,
+      pinned: true,
+      conflict: false,
+      days: [],
+      seedStaffId: primaryStaffOf(part.assignment || null),
+    };
+  }
+
   function handleSave() {
     const hoursTotal = Math.round(quantity * hoursPerUnit * 100) / 100;
     const data = {
@@ -3822,7 +3874,24 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
         ? Math.round(parts.reduce((s, p) => s + (p.percentComplete || 0) * (p.hoursTotal || 0), 0) / Math.max(1, parts.reduce((s, p) => s + (p.hoursTotal || 0), 0)))
         : Math.max(0, Math.min(100, Number(percentComplete) || 0)),
       status: parts ? (parts.every((p) => p.status === 'complete') ? 'complete' : 'active') : (job?.status || 'active'),
-      parts: parts ? parts.map((p) => ({ ...p })) : null,
+      // Built explicitly, not a plain `{ ...p }` spread (#68): `p` here also
+      // carries the UI-only scratch fields the parts editor uses
+      // (manualEquipId/manualStartDate/_origEquipId/_origStartDate — see the
+      // `parts` state init above), which must not leak into the stored
+      // shape. `assignment` is computed fresh via computePartAssignment so a
+      // part's Equipment/Planned start date fields actually take effect,
+      // same as the whole-job Equipment fields already do via
+      // computeAssignment.
+      parts: parts ? parts.map((p) => ({
+        id: p.id,
+        name: p.name,
+        hoursTotal: p.hoursTotal,
+        percentComplete: p.percentComplete,
+        status: p.status,
+        staffId: p.staffId || null,
+        lockedEquipmentId: p.lockedEquipmentId || null,
+        assignment: computePartAssignment(p),
+      })) : null,
     };
     onSave(data);
   }
@@ -4088,28 +4157,37 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                 and signed off on the process; naming someone here overrides that for
                 this job — it waits for them rather than handing the work to anyone
                 else, and won't quietly swap them out when the schedule is recomputed
-                or the job is dragged onto other equipment. */}
-            <Field label="Assigned to">
-              <select className={inputCls} value={staffId} onChange={(e) => setStaffId(e.target.value)}>
-                <option value="">Automatic — whoever is free</option>
-                {qualifiedStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                {/* A lock on someone who has since lost the sign-off (or on a job whose
-                    process changed) stays selectable, so it's visible rather than
-                    silently reverting to automatic. */}
-                {staffId && !qualifiedStaff.some((s) => s.id === staffId) && (
-                  <option value={staffId}>
-                    {staff.find((s) => s.id === staffId)?.name || 'Former staff member'} — not signed off on {process || 'this process'}
-                  </option>
-                )}
-              </select>
-            </Field>
-            <p className="text-xs text-slate-500 -mt-2 mb-3">
-              {staffId
-                ? `Locked to ${staff.find((s) => s.id === staffId)?.name || 'this person'} — the job waits for them instead of going to whoever is free, and stays with them if you move it to other equipment.`
-                : currentlyOn.length
-                ? `Currently on it: ${currentlyOn.join(', ')}. Pick a name to keep the job with one person regardless of how the rest of the schedule reflows.`
-                : 'The scheduler will pick whoever is signed off on this process and has the hours free.'}
-            </p>
+                or the job is dragged onto other equipment. Not shown for a split job
+                (#68) — each part has its own "Assigned to" in the Parts section
+                below, since two parts of the same job can genuinely need two
+                different people. This field used to sit here unguarded and silently
+                lock BOTH parts to the same person, which is what read on the shop
+                floor as "changing one part's person changes the other's". */}
+            {!parts && (
+              <Field label="Assigned to">
+                <select className={inputCls} value={staffId} onChange={(e) => setStaffId(e.target.value)}>
+                  <option value="">Automatic — whoever is free</option>
+                  {qualifiedStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  {/* A lock on someone who has since lost the sign-off (or on a job whose
+                      process changed) stays selectable, so it's visible rather than
+                      silently reverting to automatic. */}
+                  {staffId && !qualifiedStaff.some((s) => s.id === staffId) && (
+                    <option value={staffId}>
+                      {staff.find((s) => s.id === staffId)?.name || 'Former staff member'} — not signed off on {process || 'this process'}
+                    </option>
+                  )}
+                </select>
+              </Field>
+            )}
+            {!parts && (
+              <p className="text-xs text-slate-500 -mt-2 mb-3">
+                {staffId
+                  ? `Locked to ${staff.find((s) => s.id === staffId)?.name || 'this person'} — the job waits for them instead of going to whoever is free, and stays with them if you move it to other equipment.`
+                  : currentlyOn.length
+                  ? `Currently on it: ${currentlyOn.join(', ')}. Pick a name to keep the job with one person regardless of how the rest of the schedule reflows.`
+                  : 'The scheduler will pick whoever is signed off on this process and has the hours free.'}
+              </p>
+            )}
 
             {!parts && !isNew && (
               <Field label={`% complete — ${percentComplete}%`}>
@@ -4211,13 +4289,88 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                     />
                   </div>
                 </div>
+                {/* Equipment + Planned start date, Assigned to, and Locked
+                    equipment — the per-part equivalents of the whole-job
+                    fields above (#68). Before this a split job's parts could
+                    only be pinned by dragging them on the Schedule view, and
+                    had no independent staff/lock controls at all — the
+                    single whole-job "Assigned to" silently applied to both
+                    parts identically. `qualifiedEquip`/`qualifiedStaff` are
+                    shared across parts on purpose: process and capability
+                    tags are properties of the WORK, same for every part of
+                    it (see scheduler.js), so the same two lists that gate
+                    the whole job's own fields are exactly right here too. */}
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <Field label="Equipment">
+                    <select
+                      className={inputCls} value={part.manualEquipId}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setParts((ps) => ps.map((p, pi) => (pi === i
+                          ? { ...p, manualEquipId: v, manualStartDate: v && !p.manualStartDate ? readyDate : p.manualStartDate }
+                          : p)));
+                      }}
+                    >
+                      <option value="">Automatic — best available</option>
+                      {qualifiedEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      {part.manualEquipId && !qualifiedEquip.some((e) => e.id === part.manualEquipId) && (
+                        <option value={part.manualEquipId}>
+                          {equipment.find((e) => e.id === part.manualEquipId)?.name || 'Former equipment'} — no longer compatible
+                        </option>
+                      )}
+                    </select>
+                  </Field>
+                  <Field label="Planned start date">
+                    <input
+                      type="date" className={inputCls} min={readyDate} disabled={!part.manualEquipId}
+                      value={part.manualStartDate}
+                      onChange={(e) => setParts((ps) => ps.map((p, pi) => (pi === i ? { ...p, manualStartDate: e.target.value } : p)))}
+                    />
+                  </Field>
+                </div>
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <Field label="Assigned to">
+                    <select
+                      className={inputCls} value={part.staffId}
+                      onChange={(e) => setParts((ps) => ps.map((p, pi) => (pi === i ? { ...p, staffId: e.target.value } : p)))}
+                    >
+                      <option value="">Automatic</option>
+                      {qualifiedStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      {part.staffId && !qualifiedStaff.some((s) => s.id === part.staffId) && (
+                        <option value={part.staffId}>
+                          {staff.find((s) => s.id === part.staffId)?.name || 'Former staff member'} — not signed off
+                        </option>
+                      )}
+                    </select>
+                  </Field>
+                  <Field label="Locked equipment">
+                    <select
+                      className={inputCls} value={part.lockedEquipmentId}
+                      onChange={(e) => setParts((ps) => ps.map((p, pi) => (pi === i ? { ...p, lockedEquipmentId: e.target.value } : p)))}
+                    >
+                      <option value="">Not locked</option>
+                      {qualifiedEquip.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      {part.lockedEquipmentId && !qualifiedEquip.some((e) => e.id === part.lockedEquipmentId) && (
+                        <option value={part.lockedEquipmentId}>
+                          {equipment.find((e) => e.id === part.lockedEquipmentId)?.name || 'Former equipment'} — no longer compatible
+                        </option>
+                      )}
+                    </select>
+                  </Field>
+                </div>
                 <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1.5">
                   <span>
-                    {part.assignment
+                    {part.manualEquipId
+                      ? `Pinned to ${equipment.find((e) => e.id === part.manualEquipId)?.name || 'this equipment'} starting ${fmtDate(part.manualStartDate || readyDate)} on Save.`
+                      : part.assignment
                       ? `Scheduled ${fmtDate(part.assignment.startDate)}–${fmtDate(part.assignment.endDate)}${part.assignment.conflict ? ' · Overbooked' : ''}`
                       : part.status === 'complete' ? 'Complete' : 'Not yet scheduled'}
                   </span>
                   {part.assignment?.pinned && onUnpinPart && (
+                    // Same as the equivalent whole-job button: unpins immediately
+                    // and closes the modal (see onUnpinPart wiring), rather than
+                    // waiting on Save — so there's no pending-pin-fields state in
+                    // this modal to reconcile against it.
                     <button type="button" className="text-amber-400 hover:underline flex items-center gap-0.5" onClick={() => onUnpinPart(i)}>
                       <PinOff size={11} /> Unpin
                     </button>

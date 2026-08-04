@@ -640,18 +640,33 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
           // and tagOk waved them onto any machine — a split job that needed a
           // 5T positioner could be placed on equipment that hasn't got one.
           tags: j.tags || [],
-          // A manual staff assignment sits on the job, so it applies to every
-          // part of it — the parts are separately *placed*, not separately
-          // staffed.
-          staffId: j.staffId || null,
-          // A preferred equipment (checkbox on the job, or inherited from its
-          // template) is a property of the work, same as tags — every part
-          // prefers the same machine the parent did.
+          // A manual staff assignment is read from the PART, not the parent
+          // (#68) — parts are placed independently and can end up on
+          // different equipment at different times, so the person working one
+          // part has no bearing on who works the other. This used to read
+          // `j.staffId`, applying one job-level lock to every part alike:
+          // setting "Assigned to" on a split job silently overrode BOTH
+          // parts' operators identically, which is what read on the shop
+          // floor as "changing one part's person changes the other's" — they
+          // were never independent to begin with, just displayed as if they
+          // were. `part.staffId` is its own field a part carries by itself;
+          // there is no cascade from the job level to fall back to.
+          staffId: part.staffId || null,
+          // Preferred equipment DOES still cascade from the job level — it's
+          // a soft nudge (unlike staffId/lockedEquipmentId below), it hasn't
+          // caused the same reported problem, and every part of a split job
+          // is, by definition, the same underlying work, so "prefers the same
+          // machine" is a reasonable default here in a way "assigned to the
+          // same person" or "locked to the same machine" are not. Deliberate
+          // asymmetry with the two fields below, not an oversight — see
+          // `test/scheduler.test.js`, "every part of a split job inherits the
+          // parent's preference".
           preferredEquipmentId: j.preferredEquipmentId || null,
-          // A hard equipment lock is a property of the work too, same as
-          // staffId above — every part is restricted to the same machine the
-          // parent was.
-          lockedEquipmentId: j.lockedEquipmentId || null,
+          // A hard equipment lock is read from the PART too, same reasoning
+          // as staffId above (#68): it names one specific machine that part
+          // must wait for, and two parts of the same split job may need to
+          // sit on two different machines. No cascade from the job level.
+          lockedEquipmentId: part.lockedEquipmentId || null,
           // Same reasoning as tags: parallel-processing is a property of the
           // work (the automation runs unattended either way), so every part
           // gets it too, not just whichever part happened to trigger it.
@@ -1081,6 +1096,18 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
       hoursTotal: unit.hoursTotal,
       percentComplete: unit.percentComplete,
       status: unit.status,
+      // Round-tripped from the flattened unit, not from
+      // `parent.parts[unit._partIndex]` like `name` above — these ARE the
+      // authoritative current value (flatten reads them straight off the
+      // part, see the split-job block above), not a fallback that would
+      // corrupt a user's real setting the way name's placeholder would.
+      // Omitting this entirely was the actual bug behind #68: a part's
+      // staffId/lockedEquipmentId could be set correctly on save, only to
+      // vanish on the very same recompute that save triggers, because this
+      // object never had a key for either — every part looked permanently
+      // stuck on "Automatic" no matter what the modal sent.
+      staffId: unit.staffId || null,
+      lockedEquipmentId: unit.lockedEquipmentId || null,
       assignment: unit.assignment,
       unschedReason: unit.unschedReason,
     };

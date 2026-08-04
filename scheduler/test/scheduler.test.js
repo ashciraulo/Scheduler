@@ -337,6 +337,92 @@ describe('manual staff assignment', () => {
     assert.deepEqual(eligibleStaffIds(job('j', { staffId: 's3' }), staff), [],
       'someone not signed off on the process is not eligible even if named');
   });
+
+  // #68: a split job's manual staff assignment used to be read from the
+  // PARENT (`j.staffId`) and applied to every part identically — setting
+  // "Assigned to" on the job silently locked both parts to the same person,
+  // which is what read on the shop floor as "changing one part's person
+  // changes the other's": they were never independent, just displayed as if
+  // they were. Each part now carries its own `staffId`.
+  test("a split job's manual staff assignment is per PART, not shared across parts", () => {
+    const d = days();
+    const split = job('split', {
+      hoursTotal: 16,
+      parts: [
+        { id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null, staffId: 's2' },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null, staffId: 's3' },
+      ],
+    });
+    const out = runScheduler(
+      [split], [equip('e1'), equip('e2')],
+      [person('s1'), person('s2', { roster: rosterOn(['wed']) }), person('s3')],
+      d,
+    );
+    const parts = byId(out, 'split').parts;
+    assert.deepEqual(staffOn(parts[0].assignment), ['s2'], "part 1 waits for the person locked to IT");
+    assert.deepEqual(staffOn(parts[1].assignment), ['s3'], "part 2 gets its own different locked person, unaffected by part 1's");
+  });
+
+  // The bug behind #68 had two halves, and this pins the second one, which is
+  // the one `staffOn(assignment)` above can't see: flatten reading the
+  // right field (part.staffId) is necessary but not sufficient if the
+  // COLLAPSE step that reassembles job.parts after scheduling never writes
+  // `staffId` back onto the part at all — which is exactly what was
+  // happening. A part's own field could be set correctly, survive the exact
+  // recompute that saved it, LOOK right in `assignment.days`... and then
+  // silently disappear from `part.staffId` itself on the very next
+  // recompute, because collapse's object literal simply had no key for it.
+  // Same shape of bug the "custom part name survives repeated recomputes"
+  // test above already guards for `name` — this is the equivalent for the
+  // two new per-part fields.
+  test("a part's staffId/lockedEquipmentId survive repeated recomputes, not just the one that set them", () => {
+    const d = days();
+    const split = job('split', {
+      hoursTotal: 16,
+      parts: [
+        { id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null, staffId: 's2', lockedEquipmentId: 'e1' },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+      ],
+    });
+    const equipment = [equip('e1'), equip('e2')];
+    const staff = [person('s1'), person('s2')];
+
+    const out1 = runScheduler([split], equipment, staff, d);
+    const p1 = byId(out1, 'split');
+    assert.equal(p1.parts[0].staffId, 's2');
+    assert.equal(p1.parts[0].lockedEquipmentId, 'e1');
+    assert.equal(p1.parts[1].staffId, null, 'a part with no lock of its own must read null, not undefined or inherited');
+
+    // A second pass — what every ordinary recompute after a save actually is
+    // — must not silently drop what the first pass just wrote.
+    const out2 = runScheduler(out1, equipment, staff, d);
+    const p2 = byId(out2, 'split');
+    assert.equal(p2.parts[0].staffId, 's2', 'must survive a second recompute, not just the one that set it');
+    assert.equal(p2.parts[0].lockedEquipmentId, 'e1', 'same for the equipment lock');
+  });
+
+  test('a manual assignment set at the JOB level on a split job is simply not read — parts are unrestricted unless they say so themselves', () => {
+    const d = days();
+    const split = job('split', {
+      staffId: 's2', // job-level; must not cascade to either part
+      hoursTotal: 16,
+      parts: [
+        { id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+      ],
+    });
+    const out = runScheduler(
+      [split], [equip('e1'), equip('e2')],
+      [person('s1'), person('s2', { roster: rosterOn(['wed']) })],
+      d,
+    );
+    const parts = byId(out, 'split').parts;
+    // Neither part named anyone, so the only actually-available operator (s1,
+    // rostered every weekday) covers both — the job-level staffId must not
+    // force either part to sit idle waiting for s2's one day (Wednesday).
+    assert.ok(parts.every((p) => staffOn(p.assignment).every((id) => id === 's1')),
+      "the job-level staffId must not leak onto parts that never named anyone themselves");
+  });
 });
 
 describe('hard equipment lock — like staffId, but for the machine', () => {
@@ -420,19 +506,36 @@ describe('hard equipment lock — like staffId, but for the machine', () => {
     assert.ok(byId(out, 'locked').assignment.startDate <= byId(out, 'auto').assignment.startDate);
   });
 
-  test('every part of a split job inherits the parent’s lock', () => {
+  // #68: unlike preferredEquipmentId (which deliberately still cascades — see
+  // scheduler.js), a hard lock is read per PART, not from the parent. Two
+  // parts of a split job can genuinely need two different machines (that's
+  // the whole reason to split a job in the first place — pulling one part off
+  // to make room for something urgent while the rest carries on), so forcing
+  // both onto one locked machine was never the right default the way a soft
+  // preference cascading is.
+  test("a split job's hard equipment lock is per PART, not inherited from the job level", () => {
     const d = days();
-    const split = job('split', {
-      lockedEquipmentId: 'e1',
+    // e1 is tied up for a while; e2 is free the whole time and would win
+    // ordinary "finishes soonest" placement.
+    const blocker = job('blocker', {
       hoursTotal: 16,
+      assignment: { equipmentId: 'e1', startDate: MONDAY, endDate: MONDAY, pinned: true, days: [] },
+    });
+    const split = job('split', {
+      lockedEquipmentId: 'e1', // job-level; must be ignored entirely
+      hoursTotal: 16,
+      dueDate: '2026-03-19',
       parts: [
         { id: 'p1', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
-        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null },
+        { id: 'p2', hoursTotal: 8, percentComplete: 0, status: 'active', assignment: null, lockedEquipmentId: 'e1' },
       ],
     });
-    const out = runScheduler([split], [equip('e1'), equip('e2')], [person('s1'), person('s2')], d);
+    const out = runScheduler([blocker, split], [equip('e1'), equip('e2')], [person('s1'), person('s2')], d);
     const parts = byId(out, 'split').parts;
-    assert.ok(parts.every((p) => p.assignment.equipmentId === 'e1'), 'both parts should be confined to the locked machine');
+    assert.equal(parts[0].assignment.equipmentId, 'e2',
+      'unlocked part follows ordinary placement — the job-level lock must not leak onto it');
+    assert.equal(parts[1].assignment.equipmentId, 'e1',
+      "this part's own lock is honoured independently, waiting for e1 rather than defaulting to e2");
   });
 
   test('a batch only carries the lock forward if every member agreed on the same machine', () => {
