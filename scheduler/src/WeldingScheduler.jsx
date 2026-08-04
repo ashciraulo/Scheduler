@@ -18,6 +18,7 @@ import {
   getStaffDayInfo, fmtDay, fmtDate, fmtDateRange,
   runScheduler, whyUnscheduled, primaryStaffOf, tagOk, findStaffConflictJobs, effectiveDueDate,
 } from './scheduler.js';
+import { buildOverrideRecord, appendOverride } from './overrides.js';
 
 /* ============================================================
    DATA MODEL REFERENCE (for future Business Central integration)
@@ -1072,6 +1073,9 @@ export default function WeldingScheduler() {
   // See PARKED_KEY for what is and isn't stored.
   const [parked, setParked] = useState([]);
   const [parkedOpen, setParkedOpen] = useState(false);
+  // Where the user has overruled the scheduler — see OVERRIDES_KEY and
+  // src/overrides.js. Recorded only; nothing reads it back into placement.
+  const [overrides, setOverrides] = useState([]);
 
   const [tab, setTab] = useState('schedule');
   const [readOnly, setReadOnly] = useState(false);
@@ -1110,6 +1114,32 @@ export default function WeldingScheduler() {
     [todayIso]
   );
   const todayIdx = useMemo(() => Math.max(0, workingDays.indexOf(todayIso)), [workingDays, todayIso]);
+
+  // The scheduler's own reasoning from the most recent run: for every
+  // auto-placed job, which machines could have taken it, what each measured,
+  // and which won. Pure observation — asking for it moves nothing (see the
+  // trace/weights split in scheduler.js), and the app is still on the default
+  // placement path.
+  //
+  // A ref, not state: nothing renders from it, and an override handler has to
+  // read it SYNCHRONOUSLY mid-event, before its own recompute replaces it.
+  // That ordering is the whole trick — once a dragged job is pinned it stops
+  // generating candidates, so the only run that knows what the automatic
+  // choice would have been is the one that already happened.
+  const lastTraceRef = useRef([]);
+
+  // EVERY runScheduler call in this component goes through here. An earlier
+  // version traced only inside `recompute`, which silently missed the initial
+  // load and reloadFromStore — so on a freshly opened page the ref was empty
+  // and the very first correction of a session, the one most worth having,
+  // recorded nothing at all.
+  const runSchedulerTraced = useCallback((jobsList, eqList, stList) => {
+    const trace = [];
+    const result = runScheduler(jobsList, eqList, stList, workingDays, todayIdx, { trace });
+    lastTraceRef.current = trace;
+    return result;
+  }, [workingDays, todayIdx]);
+
   const [rangeStart, setRangeStart] = useState(HISTORY_DAYS); // index into workingDays; opens on today
   const [rangeLength, setRangeLength] = useState(30); // days shown at once — see RANGE_PRESETS
   // Lives here, not in ScheduleView itself, for the same reason rangeStart/
@@ -1125,7 +1155,7 @@ export default function WeldingScheduler() {
   // ---------- initial load ----------
   useEffect(() => {
     (async () => {
-      const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl] = await Promise.all([
+      const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov] = await Promise.all([
         loadKey('wf_equipment', null),
         loadKey('wf_staff', null),
         loadKey('wf_templates', null),
@@ -1136,9 +1166,11 @@ export default function WeldingScheduler() {
         loadKey(PARKED_KEY, null),
         loadKey('wf_categories', null),
         loadKey(TIMELOG_KEY, null),
+        loadKey(OVERRIDES_KEY, null),
       ]);
       if (pk) setParked(pk);
       if (tl) setTimeLog(tl);
+      if (ov) setOverrides(ov);
       const finalEq = eq || seedEquipment();
       const finalSt = (st || seedStaff()).map(normalizeStaff);
       const finalTp = tp || seedTemplates();
@@ -1159,7 +1191,7 @@ export default function WeldingScheduler() {
       const finalCt = ct || [...new Set(finalTp.map((t) => t.category).filter(Boolean))].sort();
       setCategories(finalCt);
 
-      const scheduled = runScheduler(finalJb, finalEq, finalSt, workingDays, todayIdx);
+      const scheduled = runSchedulerTraced(finalJb, finalEq, finalSt);
       setJobs(scheduled);
 
       if (!eq) saveKey('wf_equipment', finalEq);
@@ -1185,7 +1217,7 @@ export default function WeldingScheduler() {
   // write anything back: a save would bump the server's version and every
   // other screen would see *that* as a change, and so on around the loop.
   const reloadFromStore = useCallback(async () => {
-    const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl] = await Promise.all([
+    const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov] = await Promise.all([
       loadKey('wf_equipment', null),
       loadKey('wf_staff', null),
       loadKey('wf_templates', null),
@@ -1196,9 +1228,11 @@ export default function WeldingScheduler() {
       loadKey(PARKED_KEY, null),
       loadKey('wf_categories', null),
       loadKey(TIMELOG_KEY, null),
+      loadKey(OVERRIDES_KEY, null),
     ]);
     if (ct) setCategories(ct);
     if (tl) setTimeLog(tl);
+    if (ov) setOverrides(ov);
     const nextEq = eq || latest.current.equipment;
     const nextSt = st ? st.map(normalizeStaff) : latest.current.staff;
     if (eq) setEquipment(nextEq);
@@ -1207,9 +1241,9 @@ export default function WeldingScheduler() {
     if (pr) setProcesses(pr);
     if (cc) setCostCentres(cc);
     if (pc) setProcedures(pc);
-    if (jb) setJobs(runScheduler(jb, nextEq, nextSt, workingDays, todayIdx));
+    if (jb) setJobs(runSchedulerTraced(jb, nextEq, nextSt));
     if (pk) setParked(pk);
-  }, [workingDays, todayIdx]);
+  }, [runSchedulerTraced]);
 
   const [remoteChange, setRemoteChange] = useState(false);
   useEffect(() => startLiveSync(() => setRemoteChange(true)), []);
@@ -1229,11 +1263,39 @@ export default function WeldingScheduler() {
   }, [remoteChange, loaded, busyEditing, reloadFromStore]);
 
   const recompute = useCallback((jobsList, eqList, stList) => {
-    const result = runScheduler(jobsList, eqList, stList, workingDays, todayIdx);
+    const result = runSchedulerTraced(jobsList, eqList, stList);
     setJobs(result);
     saveKey('wf_jobs', result);
     return result;
-  }, [workingDays, todayIdx]);
+  }, [runSchedulerTraced]);
+
+  // Records that the user placed a job somewhere other than where the
+  // scheduler had put it. Called BEFORE the recompute that applies the
+  // override, so `lastTraceRef` still holds the run in which this job was
+  // auto-placed. Returns nothing and affects nothing — if any part of this
+  // fails the placement still goes ahead exactly as it would have.
+  const recordOverride = useCallback((job, userChoice, source) => {
+    try {
+      const traceEntry = lastTraceRef.current.find((t) => t.jobId === job.id);
+      const record = buildOverrideRecord({
+        job,
+        traceEntry,
+        userChoice,
+        source,
+        at: new Date().toISOString(),
+        id: uid('ovr'),
+      });
+      if (!record) return; // agreement, or the job wasn't auto-placed to begin with
+      setOverrides((prev) => {
+        const next = appendOverride(prev, record);
+        saveKey(OVERRIDES_KEY, next);
+        return next;
+      });
+    } catch {
+      // Capture is strictly a side observation. It must never be able to take
+      // down a placement the user just asked for.
+    }
+  }, []);
 
   // A manual placement (drag-drop or the job modal's Equipment field) that
   // lands a job on an operator someone else already has used to just leave
@@ -1402,6 +1464,30 @@ export default function WeldingScheduler() {
       newJobs = [...jobs, stamped];
     } else {
       newJobs = jobs.map((j) => (j.id === stamped.id ? stamped : j));
+    }
+    // Two different corrections can come out of this modal, and only for a job
+    // that already existed — a brand-new job was never auto-placed, so there
+    // is no automatic choice to have disagreed with.
+    //   - a fresh PIN via the Equipment + Planned start date fields
+    //   - a fresh LOCK via Locked equipment
+    // Both say "not where you put it". They're recorded under separate
+    // sources because they aren't equally strong evidence: a pin is about this
+    // job on this day, a lock is a standing statement about where the work
+    // belongs. Compared against the PREVIOUS stored job so merely opening and
+    // saving the modal — which changes neither field — records nothing.
+    if (!isNew) {
+      const prev = jobs.find((j) => j.id === stamped.id);
+      const a = stamped.assignment;
+      const newlyPinned = a?.pinned && a.equipmentId
+        && !(prev?.assignment?.pinned && prev.assignment.equipmentId === a.equipmentId
+             && prev.assignment.startDate === a.startDate);
+      if (newlyPinned) {
+        recordOverride(stamped, { equipmentId: a.equipmentId, startDate: a.startDate }, 'modal-pin');
+      } else if (stamped.lockedEquipmentId && stamped.lockedEquipmentId !== prev?.lockedEquipmentId) {
+        // A lock names a machine but no day — the scheduler still picks that,
+        // so there is no timing disagreement to record, only an equipment one.
+        recordOverride(stamped, { equipmentId: stamped.lockedEquipmentId, startDate: prev?.assignment?.startDate || null }, 'lock');
+      }
     }
     const result = recompute(newJobs, equipment, staff);
     checkParallelConflict(result, stamped.id);
@@ -1594,6 +1680,12 @@ export default function WeldingScheduler() {
     const updated = partIndex === null
       ? { ...job, updatedAt: new Date().toISOString(), assignment: newAssignment }
       : { ...job, updatedAt: new Date().toISOString(), parts: job.parts.map((p, i) => (i === partIndex ? { ...p, assignment: newAssignment } : p)) };
+    // Before the recompute, not after: once this job is pinned it stops
+    // generating candidates, so the run that knows what the scheduler would
+    // have done on its own is the one already in lastTraceRef. Only whole-job
+    // drops are recorded — a part's own placement is traced under the part's
+    // id, not the job's, and pairing those up isn't worth guessing at here.
+    if (partIndex === null) recordOverride(job, { equipmentId: equipId, startDate: date }, 'drag');
     const result = recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
     // Split-job parts aren't covered by the parallel-processing prompt yet —
     // each part's own conflict is one entry in a shared jobId's day-plan, and
@@ -4209,6 +4301,21 @@ const PARKED_KEY = 'wf_wipparked';
 // than by assignment, so a day's work still records against the right job when
 // the plan it was entered against later moves.
 const TIMELOG_KEY = 'wf_timelog';
+
+// Where the user overruled the scheduler: one record per manual placement that
+// landed a job somewhere other than where it had been auto-placed, pairing the
+// scheduler's choice with the user's, both described by the same weight-free
+// feature vector. See src/overrides.js for the shape and why it's kept.
+//
+// Recorded ONLY. Nothing reads this back into scheduling, and nothing should
+// until the data has actually been looked at — a pattern being detectable is
+// not the same as the scheduler being right to act on it.
+//
+// Job names are denormalised into each record so it still reads after the job
+// is deleted. That is the only content here beyond ids and dates: no costs, no
+// values, no WIP. Capped (MAX_OVERRIDES) because in shared mode this lands in
+// scheduler-data.json on the host PC like everything else.
+const OVERRIDES_KEY = 'wf_overrides';
 
 // Hours logged against a job so far, across every day.
 function loggedHours(timeLog, jobId) {

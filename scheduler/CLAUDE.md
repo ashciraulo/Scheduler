@@ -34,6 +34,7 @@ src/
   wipImport.js        # BC .xlsx reader + keyword/dupe analysis (see below)
   storage.js          # window.storage: shared /api store, else localStorage
   placementScore.js   # weighted candidate scoring (OPT-IN; see its own section)
+  overrides.js        # records where the user overruled the scheduler (record only)
   liveSync.js         # polls for other people's changes (shared mode)
   index.css           # Tailwind directives + light company theme
 deploy/               # hand-written pieces of the deployable (SOURCE)
@@ -43,6 +44,7 @@ deploy/               # hand-written pieces of the deployable (SOURCE)
 test/                 # node:test unit tests for scheduler.js (npm test)
 scripts/package.mjs   # assembles ../offline-package from dist/ + deploy/
 scripts/compare-scoring.mjs # read-only diff of the two placement paths
+scripts/show-overrides.mjs  # read-only dump of the captured override history
 tailwind.config.js
 postcss.config.js
 vite.config.js
@@ -911,6 +913,75 @@ The *job ordering* sort (`unpinned.sort` — manual/locked first, then
 the same shape and is **not** touched by any of this. It could get the same
 treatment later if it starts feeling the same pressure.
 
+### Override capture (`src/overrides.js`, `wf_overrides`) — record only
+
+Every drag, modal pin, or lock is the user correcting the scheduler. That
+correction used to be applied and forgotten. `wf_overrides` now keeps one
+record per correction, pairing **what the scheduler chose** with **what the
+user chose**, both described by the same weight-free feature vector, so
+`featureDelta` over a pile of them says which terms are systematically
+mis-weighted and in which direction.
+
+**Nothing reads this back into scheduling, and nothing should** until the data
+has actually been looked at. A pattern being detectable is not the same as the
+scheduler being right to act on it.
+
+**`trace` is orthogonal to `weights`, and that is load-bearing.** Tracing is
+observation; scoring is behaviour. `runScheduler` emits a trace on the
+**default** path too — otherwise capture would have required opting into the
+scoring path's behaviour change first, which is exactly backwards. Asking for
+a trace never moves a job (pinned by *"the trace works on the DEFAULT path
+too, without changing what it picks"*).
+
+**The ordering trick.** Once a job is pinned it stops generating candidates, so
+the only run that knows what the automatic choice *would* have been is the one
+that already happened. `lastTraceRef` holds it; `recordOverride` is called
+**before** the recompute that applies the override. A ref, not state: nothing
+renders from it and it must be readable synchronously mid-event.
+
+**Every `runScheduler` call site in the component must go through
+`runSchedulerTraced`.** The first version traced only inside `recompute`,
+silently missing the initial load and `reloadFromStore` — so on a freshly
+opened page the ref was empty and the first correction of a session, the one
+most worth having, recorded nothing. Unit tests cannot see that; it took the
+browser. If another call site is ever added, route it through the helper.
+
+**Not recording is the common, correct outcome.** Pinning a job exactly where
+it already sat is a confirmation, not a correction — `buildOverrideRecord`
+returns `null`. Logging those would flood the history with zero-signal records
+that drag every average toward "no disagreement".
+
+**A delta is refused unless the two placements are genuinely comparable.**
+`runScheduler` evaluates exactly one placement per machine — its earliest
+feasible slot — so a job moved to a *different day* has no feature vector for
+where it actually landed. Rather than difference against the wrong row,
+`comparable` is false and `delta` is null; the record is still kept in full,
+because a timing correction is real evidence, just not of the same kind, and
+reading it needs a different method than differencing feature vectors. A wrong
+delta doesn't announce itself — it quietly drags learned weights sideways.
+`summariseOverrides` reports `notComparable` broken down by cause, so
+"everything is `movedToUnevaluatedDay`" is legible as "the disagreement is
+about timing" rather than an unexplained gap.
+
+**Direction matters.** `featureDelta(user, scheduler)` is user-minus-scheduler:
+positive means the user's pick had *more* of that term, so its weight should
+rise. Backwards, and a future learning pass trains away from the user — a bug
+that looks like the tool slowly getting worse with nothing obviously broken.
+
+`source` (`drag` / `modal-pin` / `lock`) is kept because these are not equal
+evidence: a drag is about one job on one day, a lock is a standing statement
+about where that work belongs. Job names are denormalised so a record outlives
+its job. Capped at `MAX_OVERRIDES` (500, oldest dropped) since shared mode
+writes this to the host PC; a year-old correction describes a department that
+no longer exists. Content is ids, dates and job names only — no costs, values
+or WIP.
+
+**`npm run show-overrides -- path/to/scheduler-data.json`** prints what has
+accumulated: counts by source, which machines work is moved off and onto, and
+the mean feature delta. Step 1 deliberately ships no UI, so this is the only
+way to look — and data being collected that nobody has eyeballed is precisely
+how a learning system ends up confidently trained on a bug.
+
 ### Parallel processing (#30)
 
 By default the scheduler never double-books an operator — `tryFit` requires
@@ -1421,7 +1492,8 @@ start.
 
 Data keys: `wf_equipment`, `wf_staff`, `wf_templates`, `wf_processes`,
 `wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`,
-`wf_wipparked`, `wf_categories`, `wf_timelog` (each a JSON blob).
+`wf_wipparked`, `wf_categories`, `wf_timelog`, `wf_overrides` (each a JSON
+blob).
 
 ### Live sync (shared mode)
 

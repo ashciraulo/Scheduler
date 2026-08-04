@@ -594,9 +594,12 @@ export function whyUnscheduled(job, equipment, staff, days) {
 //                tuning, or a modified copy. Absent → the original
 //                lexicographic comparator, unchanged.
 //   { trace }    an array to push a per-job record of every candidate
-//                considered and its score onto. Only populated when scoring
-//                is on. This is what a later pass will compare a user's
-//                manual override against.
+//                considered onto — its dates, its features, and its score.
+//                Pure observation: it works on BOTH paths and never affects
+//                a placement, which is what lets the app record what the
+//                scheduler was thinking without first opting into a
+//                behaviour change. This is what a user's manual override
+//                gets compared against (see src/overrides.js).
 export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, options = {}) {
   const { weights = null, trace = null } = options;
   const order = jobsIn.map((j) => j.id);
@@ -901,6 +904,25 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
       // the job out over many sparse days while an equally-capable machine sat
       // completely free — which is exactly what was piling every job onto one
       // robot and pushing due dates out.
+
+      // Scoring the candidates and USING that score to choose are deliberately
+      // independent. `trace` is pure observation — it describes the options
+      // that existed and what each one measured, which is exactly what an
+      // override later needs to be compared against, and it has to work on
+      // the DEFAULT (legacy) path or the app could never record anything
+      // without first opting into a behaviour change. `weights` is the only
+      // thing that changes which candidate wins. When only tracing, the score
+      // is computed against DEFAULT_WEIGHTS purely as a reference reading —
+      // `scored: false` on the record says it didn't drive the decision.
+      const ranked = (candidates.length && (weights || trace))
+        ? rankCandidates(job, candidates, {
+          exclusiveDemand,
+          seedStaffId,
+          floorDate: days[Math.min(floorIdx, days.length - 1)],
+          dueDate: effectiveDueDate(job),
+        }, weights || DEFAULT_WEIGHTS)
+        : null;
+
       if (candidates.length && weights) {
         // ---- Weighted scoring path (opt-in; see placementScore.js) ----
         // Every signal the cascade below expresses as a strict priority level
@@ -916,26 +938,7 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
         // every hard constraint (process, tags, lockedEquipmentId, staffId,
         // readyDate, day locks) before anything here runs, and scoring can
         // only ever reorder that list, never extend it.
-        const ranked = rankCandidates(job, candidates, {
-          exclusiveDemand,
-          seedStaffId,
-          floorDate: days[Math.min(floorIdx, days.length - 1)],
-          dueDate: effectiveDueDate(job),
-        }, weights);
         best = ranked[0];
-        if (trace) {
-          trace.push({
-            jobId: job.id,
-            chosenEquipId: best.equipId,
-            candidates: ranked.map((c) => ({
-              equipId: c.equipId,
-              startDate: c.startDate,
-              endDate: c.endDate,
-              score: c.score,
-              features: c.features,
-            })),
-          });
-        }
       } else if (candidates.length) {
         // ---- Original lexicographic path (the default) ----
         // Preferred equipment (job.preferredEquipmentId — a soft nudge, set
@@ -978,6 +981,25 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, op
           });
           best = candidates[0];
         }
+      }
+
+      // Emitted after `best` is settled, so `chosen` always reflects whichever
+      // path actually decided — on the legacy path that is NOT necessarily
+      // `candidates[0]` of the score-ranked list, and the difference between
+      // the two is itself worth being able to see.
+      if (trace && ranked) {
+        trace.push({
+          jobId: job.id,
+          scored: !!weights, // did the score drive this, or is it just a reading?
+          chosen: best ? { equipId: best.equipId, startDate: best.startDate, endDate: best.endDate } : null,
+          candidates: ranked.map((c) => ({
+            equipId: c.equipId,
+            startDate: c.startDate,
+            endDate: c.endDate,
+            score: c.score,
+            features: c.features,
+          })),
+        });
       }
     }
     if (best) {

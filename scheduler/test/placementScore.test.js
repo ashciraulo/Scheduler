@@ -279,14 +279,38 @@ describe('runScheduler: the scoring path is opt-in and changes nothing by defaul
     assert.equal(trace[0].jobId, 'j');
     assert.equal(trace[0].candidates.length, 2, 'both machines were feasible and both must be recorded');
     assert.ok(trace[0].candidates.every((c) => c.features && typeof c.score === 'number'));
-    assert.equal(trace[0].chosenEquipId, trace[0].candidates[0].equipId, 'the trace is stored best-first');
+    assert.equal(trace[0].chosen.equipId, trace[0].candidates[0].equipId,
+      'under scoring the winner is the top-ranked candidate');
+    assert.equal(trace[0].scored, true);
   });
 
-  test('no trace is produced on the default path, and passing none costs nothing', () => {
+  // Tracing is OBSERVATION and scoring is BEHAVIOUR; keeping them independent
+  // is what lets the app record what the scheduler was thinking without first
+  // opting into a different placement. Without this the capture work of step 1
+  // would have forced the behaviour change of the scoring path along with it.
+  test('the trace works on the DEFAULT path too, without changing what it picks', () => {
     const d = days();
+    const args = () => [[job('j', { hoursTotal: 8 })], [equip('e1'), equip('e2')], [person('s1')], d];
+
+    const untraced = runScheduler(...args(), 0);
     const trace = [];
-    runScheduler([job('j')], [equip('e1')], [person('s1')], d, 0, { trace });
-    assert.equal(trace.length, 0, 'the legacy path must not silently start emitting traces');
+    const traced = runScheduler(...args(), 0, { trace });
+
+    assert.deepEqual(
+      traced.map((j) => j.assignment), untraced.map((j) => j.assignment),
+      'asking for a trace must not move a single job',
+    );
+    assert.equal(trace.length, 1, 'the legacy path must still report what it considered');
+    assert.equal(trace[0].scored, false, 'the recorded score is a reading, not what drove the choice');
+    assert.ok(trace[0].candidates.every((c) => c.features), 'features are what an override is compared against');
+    assert.equal(trace[0].chosen.equipId, byId(traced, 'j').assignment.equipmentId,
+      'the trace must name the machine actually placed on, not the top-scoring one');
+  });
+
+  test('no trace array means no tracing work is recorded at all', () => {
+    const d = days();
+    const out = runScheduler([job('j')], [equip('e1')], [person('s1')], d, 0, {});
+    assert.ok(byId(out, 'j').assignment, 'and the schedule is unaffected either way');
   });
 });
 
