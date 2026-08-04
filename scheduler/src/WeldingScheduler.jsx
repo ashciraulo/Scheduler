@@ -65,6 +65,11 @@ import {
                                     too.
    bcJobNo                      →  Job No. (the BC key to link back to) — optional, blank until linked
    bcJobTaskNo                  →  Job Task No. — optional, blank until linked
+   isRework / reworkOfJobId     →  no BC equivalent — internal-only. A rework job is an ordinary
+                                    job in every other respect (scheduled, staffed, completed the
+                                    same way) created via "Mark for rework" on a completed job;
+                                    reworkOfJobId links back to that original, whose own record is
+                                    never touched. See "Rework" in scheduler/CLAUDE.md.
    updatedAt                    →  used to drive delta/incremental sync (only push what changed)
 
    EQUIPMENT / STAFF (this app) →  BUSINESS CENTRAL (Resources module)
@@ -757,6 +762,60 @@ function ActualHoursModal({ job, logged = 0, onCancel, onConfirm }) {
 }
 
 /* ============================================================
+   REWORK
+   Collects just enough to schedule the rework as its own job — see
+   createRework() for how this becomes a full job record, and "Rework"
+   in scheduler/CLAUDE.md for why it's a linked record rather than
+   reopening the original. ============================================ */
+function ReworkModal({ job, onCancel, onConfirm }) {
+  const [hoursTotal, setHoursTotal] = useState(job.hoursTotal || '');
+  const [readyDate, setReadyDate] = useState('');
+  const [dueDate, setDueDate] = useState(addDays(isoDate(new Date()), 14));
+  const [reason, setReason] = useState('');
+  const canCreate = Number(hoursTotal) > 0;
+  return (
+    <Modal title="Mark for rework" onClose={onCancel}>
+      <p className="text-sm text-slate-300 mb-3">
+        Creates a new job, linked back to <span className="font-semibold text-slate-100">{job.name}</span> — its
+        own record, completion date and actual hours stay exactly as they are. The rework gets its own hours,
+        its own schedule, and its own cost.
+      </p>
+      <Field label="What needs reworking (optional)">
+        <textarea className={inputCls} rows={2} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label={`Estimated hours — original was ${job.hoursTotal}h`}>
+          <input type="number" min={0} step={0.25} className={inputCls} value={hoursTotal} onChange={(e) => setHoursTotal(e.target.value)} />
+        </Field>
+        <Field label="Due date">
+          <input type="date" className={inputCls} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Ready for processing">
+        <input type="date" className={inputCls} value={readyDate} onChange={(e) => setReadyDate(e.target.value)} />
+      </Field>
+      <p className="text-xs text-slate-500 -mt-2 mb-3">
+        {readyDate
+          ? 'The rework will be scheduled like any other job once this date arrives.'
+          : "Leave blank until the part is actually back and ready — same rule as any other job, it just won't be auto-scheduled until then."}
+      </p>
+      {job.procedureId
+        ? <p className="text-xs text-slate-500 mb-3">This job has a procedure assigned, so the rework's cost will be calculated from it automatically — see the Quality tab.</p>
+        : <p className="text-xs text-slate-500 mb-3">This job has no procedure assigned, so the Quality tab will show hours logged but no cost for this rework.</p>}
+      <div className="flex items-center justify-end gap-2">
+        <button className={btnGhost} onClick={onCancel}>Cancel</button>
+        <button
+          className={btnPrimary} disabled={!canCreate}
+          onClick={() => onConfirm({ hoursTotal, readyDate, dueDate, reason })}
+        >
+          <Wrench size={14} /> Create rework job
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================
    DAILY HOURS LOG
    Records what was actually worked, day by day, instead of asking
    someone to reconstruct a total weeks later at completion time.
@@ -1097,6 +1156,11 @@ export default function WeldingScheduler() {
   const [manualAssignConflict, setManualAssignConflict] = useState(null); // {job, person, blockers}
   const [equipmentLockConflict, setEquipmentLockConflict] = useState(null); // {job, machine, blockers}
   const [confirmClearPatterns, setConfirmClearPatterns] = useState(false);
+  // The COMPLETED job "Mark for rework" was clicked on — holds it open only
+  // long enough to collect the rework's own scheduling info (see
+  // ReworkModal). Not the rework job itself, which doesn't exist until
+  // createRework builds it.
+  const [reworkOf, setReworkOf] = useState(null);
 
   const [dragJobId, setDragJobId] = useState(null);
   const [dropHint, setDropHint] = useState(null); // {equipId, date}
@@ -1259,7 +1323,7 @@ export default function WeldingScheduler() {
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
     || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
-    || confirmClearPatterns
+    || confirmClearPatterns || reworkOf
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1582,6 +1646,78 @@ export default function WeldingScheduler() {
       reaverageTemplate(job.templateId, arr);
     })();
     showToast(`${job.name} marked complete — ${hours}h recorded.`);
+  }
+  // A rework is a genuinely NEW, linked job (see "Rework" in
+  // scheduler/CLAUDE.md), not the original reopened. Its own record and
+  // history — completedDate, actualHours, its wf_actuals entry — stay
+  // exactly as they were; nothing here touches `original`. The new job
+  // schedules, gets staffed, logs hours and completes exactly like any other
+  // job, which is what lets everywhere else in the app (TimeLogModal,
+  // ActualHoursModal, the Schedule view, ReportsView) handle it with no
+  // special-casing at all — the only things that treat it differently are a
+  // Backlog badge and the Quality tab's own filter on `isRework`.
+  function createRework(original, { hoursTotal, readyDate, dueDate, reason }) {
+    const rework = {
+      id: uid('job'),
+      name: `${original.name} — Rework`,
+      process: original.process,
+      quantity: 1,
+      hoursTotal: Math.max(0, Math.round((Number(hoursTotal) || 0) * 100) / 100),
+      // Blank unless the user actually set it (#59) — the rework being
+      // created right now doesn't make the part any more physically ready
+      // than a brand new job would be.
+      readyDate: readyDate || '',
+      dueDate,
+      departmentDueDate: null,
+      templateId: null,
+      notes: reason || '',
+      totalValue: 0,
+      departmentValue: 0,
+      percentComplete: 0,
+      needsFurtherProcessing: false,
+      parallelProcessing: false,
+      status: 'active',
+      completedDate: null,
+      batchId: null,
+      batchOrder: null,
+      // Same kind of work as the original, so the same capability
+      // requirements, procedure (for the cost calc below) and preferred
+      // machine apply — but never a hard lock inherited from it; the
+      // original's staffId/lockedEquipmentId were about ITS placement, not a
+      // standing claim on a job that doesn't exist yet.
+      tags: original.tags || [],
+      procedureId: original.procedureId || '',
+      staffId: null,
+      secondStaffId: null,
+      preferredEquipmentId: original.preferredEquipmentId || null,
+      lockedEquipmentId: null,
+      // Kept for traceability back to the same BC job even though this
+      // department's record of it is a new, separate line.
+      bcJobNo: original.bcJobNo || '',
+      bcJobTaskNo: original.bcJobTaskNo || '',
+      isRework: true,
+      reworkOfJobId: original.id,
+      updatedAt: new Date().toISOString(),
+      assignment: null,
+    };
+    recompute([...jobs, rework], equipment, staff);
+    setReworkOf(null);
+    showToast(`${rework.name} created — schedule it like any other job.`);
+  }
+  // Safely switches JobModal from showing one job to another (used by the
+  // "rework of" / "reworks of this job" links inside it). Naively calling
+  // setEditingJob(target) while the modal is already open would NOT remount
+  // it — React sees the same <JobModal> element either way, so every one of
+  // its useState(job?.field) initialisers (which only ever run once, on
+  // mount) would keep showing the PREVIOUS job's data under the new job's
+  // id. Going through `null` first — in its own tick, not batched together
+  // with the second update — actually unmounts it in between, so the second
+  // update mounts a genuinely fresh instance.
+  function openRelatedJob(jobId) {
+    const target = jobs.find((j) => j.id === jobId);
+    if (!target) return;
+    setEditingJob(null);
+    setTimeout(() => setEditingJob(target), 0);
   }
   function unpinJob(job) {
     const updated = { ...job, assignment: job.assignment ? { ...job.assignment, pinned: false } : null, updatedAt: new Date().toISOString() };
@@ -2036,6 +2172,7 @@ export default function WeldingScheduler() {
                 { id: 'templates', label: 'Templates', icon: Calendar },
                 { id: 'costing', label: 'Costing', icon: DollarSign },
                 { id: 'reports', label: 'Value Reports', icon: DollarSign },
+                { id: 'quality', label: 'Quality', icon: Wrench },
                 { id: 'patterns', label: 'Patterns', icon: Target },
               ].map((t) => (
                 <button
@@ -2178,6 +2315,15 @@ export default function WeldingScheduler() {
         {tab === 'reports' && !displayMode && (
           <ReportsView jobs={jobs} equipment={equipment} staff={staff} procedures={procedures} costCentres={costCentres} />
         )}
+        {tab === 'quality' && !displayMode && (
+          <QualityView
+            jobs={jobs}
+            procedures={procedures}
+            costCentres={costCentres}
+            timeLog={timeLog}
+            onEditJob={(j) => !readOnly && setEditingJob(j)}
+          />
+        )}
         {tab === 'patterns' && !displayMode && (
           <PatternsView
             overrides={overrides}
@@ -2204,6 +2350,8 @@ export default function WeldingScheduler() {
           equipment={equipment}
           procedures={procedures}
           costCentres={costCentres}
+          jobs={jobs}
+          timeLog={timeLog}
           onClose={() => setEditingJob(null)}
           onSave={(data) => addOrUpdateJob(data, editingJob === 'new')}
           onDelete={editingJob !== 'new' ? () => setConfirmDelete({ type: 'job', id: editingJob.id, name: editingJob.name }) : null}
@@ -2212,6 +2360,17 @@ export default function WeldingScheduler() {
           onSplit={editingJob !== 'new' && !editingJob.parts ? (hoursA) => splitJob(editingJob, hoursA) : null}
           onMerge={editingJob !== 'new' && editingJob.parts ? () => mergeJobParts(editingJob) : null}
           onUnpinPart={editingJob !== 'new' && editingJob.parts ? (partIndex) => { unpinPart(editingJob, partIndex); setEditingJob(null); } : null}
+          onMarkForRework={editingJob !== 'new' && editingJob.status === 'complete' && !editingJob.parts
+            ? () => { setReworkOf(editingJob); setEditingJob(null); } : null}
+          onOpenRelatedJob={editingJob !== 'new' ? openRelatedJob : null}
+        />
+      )}
+
+      {reworkOf && (
+        <ReworkModal
+          job={reworkOf}
+          onCancel={() => setReworkOf(null)}
+          onConfirm={(data) => createRework(reworkOf, data)}
         />
       )}
 
@@ -3167,6 +3326,7 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
                     <span className="flex items-center gap-1.5">
                       {j.name}
                       {isSplit && <span title="Split into two parts" className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400">split</span>}
+                      {j.isRework && <span title="Rework job — see the Quality tab" className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-900 text-amber-300">rework</span>}
                       {j.batchId && (
                         <span
                           title={`Batched — runs back to back on the same equipment as the rest of this batch (position ${(j.batchOrder ?? 0) + 1})`}
@@ -3258,6 +3418,92 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
             })}
             {sorted.length === 0 && (
               <tr><td colSpan={13} className="px-3 py-8 text-center text-slate-600 text-sm">No jobs in this view.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   QUALITY VIEW
+   Every rework job in the system, in one place. A rework job is an
+   ordinary job (isRework/reworkOfJobId, created by "Mark for rework" on
+   a completed job — see createRework in the main component) so hours
+   logged and cost are computed with the exact same helpers as any other
+   job (loggedHours, jobCost) — nothing rework-specific to keep in sync.
+   ============================================================ */
+function QualityView({ jobs, procedures = [], costCentres = [], timeLog = [], onEditJob }) {
+  const reworks = useMemo(
+    () => jobs.filter((j) => j.isRework).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
+    [jobs]
+  );
+  const totalHoursLogged = reworks.reduce((s, j) => s + loggedHours(timeLog, j.id), 0);
+  const totalCost = reworks.reduce((s, j) => s + (jobCost(j, procedures, costCentres) || 0), 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+          <div className="text-xs text-slate-500 uppercase tracking-wide mb-1">Rework jobs</div>
+          <div className="text-xl font-bold text-slate-100">{reworks.length}</div>
+        </div>
+        <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+          <div className="text-xs text-slate-500 uppercase tracking-wide mb-1">Hours logged</div>
+          <div className="text-xl font-bold text-slate-100">{Math.round(totalHoursLogged * 100) / 100}h</div>
+        </div>
+        <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+          <div className="text-xs text-slate-500 uppercase tracking-wide mb-1">Total rework cost</div>
+          <div className="text-xl font-bold text-amber-300">{fmtMoney(totalCost)}</div>
+        </div>
+      </div>
+
+      <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase tracking-wide">
+            <tr>
+              <th className="px-3 py-2 text-left">Rework job</th>
+              <th className="px-3 py-2 text-left">Rework of</th>
+              <th className="px-3 py-2 text-left">Process</th>
+              <th className="px-3 py-2 text-left">Status</th>
+              <th className="px-3 py-2 text-right">Est. hours</th>
+              <th className="px-3 py-2 text-right">Hours logged</th>
+              <th className="px-3 py-2 text-right">Cost</th>
+              <th className="px-3 py-2 text-left">Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {reworks.map((j) => {
+              const original = jobs.find((o) => o.id === j.reworkOfJobId);
+              const hours = loggedHours(timeLog, j.id);
+              const cost = jobCost(j, procedures, costCentres);
+              const status = j.status === 'complete' ? 'Complete' : j.assignment ? 'Scheduled' : 'Unscheduled';
+              return (
+                <tr key={j.id} className="border-b border-slate-800/60 hover:bg-slate-800/40">
+                  <td className="px-3 py-2 font-medium text-slate-200 cursor-pointer" onClick={() => onEditJob?.(j)}>{j.name}</td>
+                  <td className="px-3 py-2 text-slate-400">
+                    {original
+                      ? <button type="button" className="hover:underline hover:text-slate-200" onClick={() => onEditJob?.(original)}>{original.name}</button>
+                      : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-slate-400">{j.process}</td>
+                  <td className="px-3 py-2">
+                    <span className={
+                      status === 'Complete' ? 'text-emerald-400' : status === 'Scheduled' ? 'text-slate-300' : 'text-amber-400'
+                    }>{status}</span>
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-xs text-slate-400">{j.hoursTotal}h</td>
+                  <td className="px-3 py-2 text-right font-mono text-xs text-slate-300">{hours}h</td>
+                  <td className="px-3 py-2 text-right font-mono text-xs text-amber-300">{cost != null ? fmtMoney(cost) : '—'}</td>
+                  <td className="px-3 py-2 text-slate-500 text-xs max-w-xs truncate" title={j.notes}>{j.notes || '—'}</td>
+                </tr>
+              );
+            })}
+            {reworks.length === 0 && (
+              <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-600 text-sm">
+                No rework recorded — reworks created from a completed job's "Mark for rework" button will show up here.
+              </td></tr>
             )}
           </tbody>
         </table>
@@ -3687,7 +3933,7 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
    JOB MODAL
    ============================================================ */
 
-function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costCentres = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart }) {
+function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costCentres = [], jobs = [], timeLog = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart, onMarkForRework, onOpenRelatedJob }) {
   const isNew = !job;
   // Each part carries its own manual staff assignment and equipment lock,
   // independent of the other part's and of the (now unused, for a split job)
@@ -3709,6 +3955,12 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
     _origStartDate: p.assignment?.startDate || '',
   })) : null);
   const [splitHoursA, setSplitHoursA] = useState(job ? Math.round((job.hoursTotal / 2) * 100) / 100 : 0);
+  // Rework linkage, both directions: if this job WAS a rework, who it's a
+  // rework of; if this job HAS reworks, which ones. Purely informational —
+  // see createRework() for how the link is made and "Rework" in
+  // scheduler/CLAUDE.md for why the original is never edited from here.
+  const reworkOfJob = job?.reworkOfJobId ? jobs.find((j) => j.id === job.reworkOfJobId) : null;
+  const linkedReworks = useMemo(() => (job ? jobs.filter((j) => j.reworkOfJobId === job.id) : []), [jobs, job]);
   // A new job starts with NO template picked (#59) — it used to default to
   // templates[0], and the "custom job instead" toggle below only cleared
   // templateId itself, not the name/process/hours it had already copied in,
@@ -4552,6 +4804,32 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
         </div>
       )}
 
+      {(reworkOfJob || linkedReworks.length > 0) && (
+        <div className="text-xs text-slate-400 bg-slate-800/60 rounded-md p-2.5 mb-3 space-y-1">
+          {reworkOfJob && (
+            <div className="flex items-center gap-1.5">
+              <Wrench size={12} className="text-amber-400 shrink-0" />
+              <span>Rework of{' '}
+                <button type="button" className="text-amber-300 hover:underline" onClick={() => onOpenRelatedJob?.(reworkOfJob.id)}>
+                  {reworkOfJob.name}
+                </button>
+              </span>
+            </div>
+          )}
+          {linkedReworks.map((rw) => (
+            <div key={rw.id} className="flex items-center gap-1.5">
+              <Wrench size={12} className="text-amber-400 shrink-0" />
+              <span>Rework logged against this job:{' '}
+                <button type="button" className="text-amber-300 hover:underline" onClick={() => onOpenRelatedJob?.(rw.id)}>
+                  {rw.name}
+                </button>
+                {' '}({rw.status === 'complete' ? 'complete' : 'scheduled'})
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Sticky rather than just the last thing in the form — this modal has
           grown long enough (#33) that the footer used to need scrolling past
           everything else to reach. `-mx-5 px-5`/`-mb-5 pb-5` counteract the
@@ -4561,6 +4839,9 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
         <div className="flex gap-2">
           {onDelete && <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button>}
           {onUnpin && <button className={btnGhost} onClick={onUnpin}><PinOff size={14} /> Unpin</button>}
+          {onMarkForRework && (
+            <button className={btnGhost} onClick={onMarkForRework}><Wrench size={14} /> Mark for rework</button>
+          )}
         </div>
         <div className="flex gap-2">
           {onToggleComplete && !parts && (

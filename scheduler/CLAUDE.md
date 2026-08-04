@@ -1484,6 +1484,54 @@ above surfaces all of them uniformly without needing job-specific "find what's
 holding them and offer to unpin it" tooling. Revisit if this actually gets
 used often enough that the extra guidance would earn its keep.
 
+### Rework — a linked follow-up job (Quality tab)
+
+For a completed job that comes back with a problem. **Mark for rework**
+(JobModal footer, offered only on a completed, non-split job) opens
+`ReworkModal`, which collects just enough to schedule the rework —
+estimated hours, ready date, due date, an optional reason — and
+`createRework` (main component) turns that into a brand new, ordinary job:
+`isRework: true`, `reworkOfJobId` pointing back at the original, its own
+`id`/schedule/staffing, inheriting the original's `process`, `procedureId`,
+`preferredEquipmentId`, tags and BC references as sensible starting points.
+
+**Deliberately a linked record, not reopening the original** — the
+original's own `status`/`completedDate`/`actualHours` are never touched by
+creating a rework; its history stays exactly what it was when it was
+completed. This was a real design choice (asked of the user, not assumed):
+reopening in place would mean a job's "actual hours" and completion date
+stop meaning what they say the moment something needs rework, which is
+worse than the mild indirection of a linked record.
+
+**Nothing rework-specific in the engine, the daily hours log, or costing** —
+a rework job is scheduled, staffed, logged against (`wf_timelog`, same
+`TimeLogModal`/`loggedHours`) and completed (`toggleComplete`/
+`completeWithHours`) through exactly the same code paths as any other job.
+Its cost is `jobCost(rework, procedures, costCentres)` — the same helper
+every other job's cost goes through — so it's simply `$0`/`—` when the
+rework has no `procedureId`, no special-casing required. This mirrors the
+two-person-job decision just above: reuse the general machinery instead of
+building a parallel rework-only version of it.
+
+**The Quality tab** (`QualityView`) is a read-only rollup: every
+`job.isRework` job, its linked original (clickable), status, estimated vs.
+logged hours, and cost — nothing stored here that isn't already derivable
+from `jobs`/`wf_timelog`/`procedures`, so there's no separate rework store
+to keep in sync. JobModal shows the link in both directions when relevant
+— "Rework of: X" on the rework itself, "Rework logged against this job: Y"
+on the original for each of its reworks — both navigable via
+`onOpenRelatedJob`, which reuses the same close-then-reopen-on-a-tick
+pattern as everywhere else in this file that jumps the same modal to a
+different job (`setEditingJob(null)` then `setTimeout(() => setEditingJob
+(target), 0)` — see the JobModal-remount note above) rather than mutating
+`editingJob` in place, which wouldn't reset the modal's `useState` fields.
+
+No equivalent yet for split jobs (`onMarkForRework` is withheld when
+`job.parts` is set) or batched jobs — an explicit scope decision, not an
+oversight: what "rework of one part" or "rework of one batch member" should
+even create wasn't asked for, and guessing at it risked building the wrong
+shape. Revisit if that need actually comes up.
+
 ### Splitting a job
 
 For when a job has to come off equipment before it's done (an urgent job
