@@ -98,6 +98,35 @@ export function buildOverrideRecord({ job, traceEntry, userChoice, source, at, i
     // Denormalised so a record still reads after the job is deleted or
     // renamed. This history is about the DECISION, not about a live job.
     jobName: job.name,
+    // WHAT KIND OF WORK this was. Without these, the history can only support
+    // ONE kind of learning — tuning the global weights, which apply equally to
+    // every job. These are what make the other kind possible: "jobs from
+    // template X keep ending up on machine Y", which is a different and often
+    // more actionable finding, because its output is a concrete value for an
+    // existing field (`template.preferredEquipmentId`) rather than a learned
+    // number nobody can sanity-check.
+    //
+    // They MUST be captured at correction time. The feature vectors are a
+    // snapshot of a capacity state that is gone, and a job's template or
+    // process can be edited afterwards, so none of this can be backfilled onto
+    // an old record with any confidence about what the job looked like then.
+    job: {
+      templateId: job.templateId || null,
+      process: job.process || null,
+      procedureId: job.procedureId || null,
+      tags: job.tags || [],
+      // The job's own soft preference AT THE TIME, which is what separates
+      // "the user is establishing a new preference" from "the user is
+      // enforcing one the scheduler failed to honour". Those look identical
+      // in the equipment ids alone and mean opposite things: the first is a
+      // suggestion to record a preference, the second is evidence that
+      // preferences are being outvoted too easily (a weights problem).
+      preferredEquipmentId: job.preferredEquipmentId || null,
+      // Note for `source: 'lock'` this is the lock as just saved, since the
+      // record is built from the job being written. For a drag it's whatever
+      // lock the job already carried.
+      lockedEquipmentId: job.lockedEquipmentId || null,
+    },
     changed,
     scheduler: {
       equipmentId: schedulerPick.equipId,
@@ -186,6 +215,59 @@ export function summariseOverrides(list) {
     bySource,
     byChange,
   };
+}
+
+// Which machine the user keeps moving a PARTICULAR KIND of work onto.
+//
+// This is the second, quite different kind of learning the history supports,
+// and in practice the more useful one to reach first. Weight tuning produces
+// one global number per term and asks to be trusted; this produces a concrete,
+// checkable claim — "7 of the 9 times you moved a Bracket Weld job, it went to
+// Robot 2" — whose output is a value for a field the scheduler ALREADY honours
+// (`template.preferredEquipmentId`, see the preferred-equipment section in
+// CLAUDE.md). Acting on it is just filling in something you'd otherwise type by
+// hand, which is a far lower bar for trust than accepting a learned weight.
+//
+// `key` is one of the fields captured in `record.job`: 'templateId',
+// 'process', 'procedureId', or 'tags' (an array, so a job counts once under
+// each of its tags).
+//
+// Only corrections that actually CHANGED EQUIPMENT are counted. A timing-only
+// move says nothing about which machine the work belongs on, and including it
+// would dilute every share toward meaninglessness.
+export function attributeAffinity(list, key) {
+  const groups = {};
+  (list || []).forEach((r) => {
+    if (!(r.changed || []).includes('equipment')) return;
+    const raw = r.job?.[key];
+    if (raw === null || raw === undefined || raw === '') return;
+    const values = Array.isArray(raw) ? raw : [raw];
+    values.forEach((value) => {
+      const g = groups[value] || (groups[value] = {
+        n: 0, movedTo: {}, movedFrom: {}, existingPreferences: {},
+      });
+      g.n += 1;
+      const to = r.user?.equipmentId;
+      const from = r.scheduler?.equipmentId;
+      if (to) g.movedTo[to] = (g.movedTo[to] || 0) + 1;
+      if (from) g.movedFrom[from] = (g.movedFrom[from] || 0) + 1;
+      // What this kind of work already claimed to prefer, if anything.
+      const pref = r.job?.preferredEquipmentId;
+      if (pref) g.existingPreferences[pref] = (g.existingPreferences[pref] || 0) + 1;
+    });
+  });
+
+  // `share` is over equipment-changing corrections IN THIS GROUP — not over
+  // all jobs of that kind, which isn't knowable from the history alone. A
+  // consumer wanting "7 of 9 Bracket Weld jobs" has to bring its own
+  // denominator; conflating the two would overstate every finding.
+  Object.values(groups).forEach((g) => {
+    const ranked = Object.entries(g.movedTo).sort((a, b) => b[1] - a[1]);
+    g.top = ranked.length
+      ? { equipmentId: ranked[0][0], count: ranked[0][1], share: ranked[0][1] / g.n }
+      : null;
+  });
+  return groups;
 }
 
 // The machines the user keeps moving work AWAY from and TOWARD. Blunter than

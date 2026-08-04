@@ -20,7 +20,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  buildOverrideRecord, appendOverride, summariseOverrides, equipmentFlow, MAX_OVERRIDES,
+  buildOverrideRecord, appendOverride, summariseOverrides, equipmentFlow,
+  attributeAffinity, MAX_OVERRIDES,
 } from '../src/overrides.js';
 import { runScheduler } from '../src/scheduler.js';
 import { MONDAY, days, equip, person, job } from './helpers.js';
@@ -119,6 +120,143 @@ describe('a correction is only recorded when there was actually a disagreement',
     });
     assert.equal(rec.jobName, 'Impeller Coat');
     assert.equal(rec.jobId, 'j1');
+  });
+});
+
+describe('what kind of work it was — captured at correction time or lost forever', () => {
+  const rich = job('j1', {
+    name: 'Impeller Coat',
+    templateId: 'tp_hvof',
+    process: 'Thermal Spray - HVOF',
+    procedureId: 'proc_9',
+    tags: ['5T Positioner'],
+    preferredEquipmentId: 'cell_a',
+    lockedEquipmentId: null,
+  });
+
+  test('the job’s descriptors travel with the record', () => {
+    const t = traceEntry('e1', [cand('e1', MONDAY, MONDAY), cand('e2', MONDAY, MONDAY)]);
+    const rec = buildOverrideRecord({
+      job: rich, traceEntry: t, userChoice: { equipmentId: 'e2', startDate: MONDAY }, source: 'drag',
+    });
+    // Without these the history can only ever tune global weights; these are
+    // what make "this KIND of work belongs on that machine" answerable at all.
+    assert.equal(rec.job.templateId, 'tp_hvof');
+    assert.equal(rec.job.process, 'Thermal Spray - HVOF');
+    assert.equal(rec.job.procedureId, 'proc_9');
+    assert.deepEqual(rec.job.tags, ['5T Positioner']);
+  });
+
+  test('the job’s existing preference is captured, separating "establishing" from "enforcing"', () => {
+    const t = traceEntry('e1', [cand('e1', MONDAY, MONDAY), cand('cell_a', MONDAY, MONDAY)]);
+    // Moving it ONTO the machine it already preferred: not a new preference,
+    // but evidence the scheduler keeps failing to honour an existing one.
+    const enforcing = buildOverrideRecord({
+      job: rich, traceEntry: t, userChoice: { equipmentId: 'cell_a', startDate: MONDAY }, source: 'drag',
+    });
+    assert.equal(enforcing.job.preferredEquipmentId, 'cell_a');
+    assert.equal(enforcing.user.equipmentId, 'cell_a',
+      'same machine as the stated preference — these two facts together are the whole distinction');
+
+    const noPref = buildOverrideRecord({
+      job: { ...rich, preferredEquipmentId: null },
+      traceEntry: t, userChoice: { equipmentId: 'cell_a', startDate: MONDAY }, source: 'drag',
+    });
+    assert.equal(noPref.job.preferredEquipmentId, null, 'nothing claimed yet — this one IS a new suggestion');
+  });
+
+  test('a job missing these fields records nulls rather than throwing', () => {
+    const t = traceEntry('e1', [cand('e1', MONDAY, MONDAY), cand('e2', MONDAY, MONDAY)]);
+    const bare = { id: 'j2', name: 'Bare' };
+    const rec = buildOverrideRecord({
+      job: bare, traceEntry: t, userChoice: { equipmentId: 'e2', startDate: MONDAY }, source: 'drag',
+    });
+    assert.equal(rec.job.templateId, null);
+    assert.deepEqual(rec.job.tags, []);
+  });
+});
+
+describe('attributeAffinity — "this kind of work belongs on that machine"', () => {
+  const mkRec = (jobFields, from, to, changed = ['equipment']) => ({
+    changed,
+    scheduler: { equipmentId: from },
+    user: { equipmentId: to },
+    job: { templateId: null, process: null, procedureId: null, tags: [], preferredEquipmentId: null, ...jobFields },
+  });
+
+  test('it groups corrections by template and names the machine work keeps landing on', () => {
+    const flow = attributeAffinity([
+      mkRec({ templateId: 'tp_bracket' }, 'eq_1', 'eq_2'),
+      mkRec({ templateId: 'tp_bracket' }, 'eq_1', 'eq_2'),
+      mkRec({ templateId: 'tp_bracket' }, 'eq_3', 'eq_2'),
+      mkRec({ templateId: 'tp_bracket' }, 'eq_1', 'eq_4'),
+      mkRec({ templateId: 'tp_shaft' }, 'eq_2', 'eq_1'),
+    ], 'templateId');
+
+    assert.equal(flow.tp_bracket.n, 4);
+    assert.equal(flow.tp_bracket.top.equipmentId, 'eq_2');
+    assert.equal(flow.tp_bracket.top.count, 3);
+    assert.equal(flow.tp_bracket.top.share, 0.75, '3 of the 4 equipment moves for this template');
+    assert.equal(flow.tp_shaft.n, 1, 'and one correction is an anecdote, which the count makes obvious');
+  });
+
+  test('it works the same over process and procedure', () => {
+    const list = [
+      mkRec({ process: 'Weld', procedureId: 'p1' }, 'eq_1', 'eq_2'),
+      mkRec({ process: 'Weld', procedureId: 'p1' }, 'eq_3', 'eq_2'),
+    ];
+    assert.equal(attributeAffinity(list, 'process').Weld.top.equipmentId, 'eq_2');
+    assert.equal(attributeAffinity(list, 'procedureId').p1.top.equipmentId, 'eq_2');
+  });
+
+  test('a job counts once under each of its tags', () => {
+    const flow = attributeAffinity([
+      mkRec({ tags: ['5T Positioner', 'Cleanroom'] }, 'eq_1', 'eq_2'),
+    ], 'tags');
+    assert.equal(flow['5T Positioner'].n, 1);
+    assert.equal(flow.Cleanroom.n, 1);
+  });
+
+  test('timing-only corrections are excluded — they say nothing about which machine', () => {
+    const flow = attributeAffinity([
+      mkRec({ templateId: 'tp_a' }, 'eq_1', 'eq_2'),
+      mkRec({ templateId: 'tp_a' }, 'eq_1', 'eq_1', ['startDate']),
+      mkRec({ templateId: 'tp_a' }, 'eq_1', 'eq_1', ['startDate']),
+    ], 'templateId');
+    assert.equal(flow.tp_a.n, 1,
+      'including day-moves would dilute every share toward meaninglessness');
+    assert.equal(flow.tp_a.top.share, 1);
+  });
+
+  test('jobs with the attribute unset are skipped, not bucketed under a blank key', () => {
+    const flow = attributeAffinity([
+      mkRec({ templateId: null }, 'eq_1', 'eq_2'),
+      mkRec({ templateId: '' }, 'eq_1', 'eq_2'),
+      mkRec({ templateId: 'tp_a' }, 'eq_1', 'eq_2'),
+    ], 'templateId');
+    assert.deepEqual(Object.keys(flow), ['tp_a'], 'a custom one-off job belongs to no template group');
+  });
+
+  test('an existing preference is reported alongside, so "enforcing" is distinguishable from "establishing"', () => {
+    const enforcing = attributeAffinity([
+      mkRec({ templateId: 'tp_a', preferredEquipmentId: 'eq_2' }, 'eq_1', 'eq_2'),
+      mkRec({ templateId: 'tp_a', preferredEquipmentId: 'eq_2' }, 'eq_1', 'eq_2'),
+    ], 'templateId');
+    assert.equal(enforcing.tp_a.top.equipmentId, 'eq_2');
+    assert.equal(enforcing.tp_a.existingPreferences.eq_2, 2,
+      'the preference was already set — this is the scheduler failing to honour it, NOT a new suggestion');
+
+    const establishing = attributeAffinity([
+      mkRec({ templateId: 'tp_b' }, 'eq_1', 'eq_2'),
+      mkRec({ templateId: 'tp_b' }, 'eq_1', 'eq_2'),
+    ], 'templateId');
+    assert.deepEqual(establishing.tp_b.existingPreferences, {},
+      'nothing claimed yet — this one genuinely is a suggestion to record a preference');
+  });
+
+  test('an empty history gives an empty grouping rather than throwing', () => {
+    assert.deepEqual(attributeAffinity([], 'templateId'), {});
+    assert.deepEqual(attributeAffinity(null, 'templateId'), {});
   });
 });
 

@@ -973,14 +973,58 @@ evidence: a drag is about one job on one day, a lock is a standing statement
 about where that work belongs. Job names are denormalised so a record outlives
 its job. Capped at `MAX_OVERRIDES` (500, oldest dropped) since shared mode
 writes this to the host PC; a year-old correction describes a department that
-no longer exists. Content is ids, dates and job names only — no costs, values
-or WIP.
+no longer exists. Content is ids, dates, job names and the job descriptors
+below — no costs, values or WIP.
+
+#### Two different kinds of learning, and `record.job` is what enables the second
+
+The feature deltas above support exactly ONE kind: tuning the **global**
+weights, which apply equally to every job. They cannot express "jobs of *this
+kind* belong on *that* machine", because nothing in a feature vector says what
+kind of work it was.
+
+`record.job` — `templateId`, `process`, `procedureId`, `tags`, plus the job's
+own `preferredEquipmentId`/`lockedEquipmentId` at the time — is what makes the
+second kind possible. `attributeAffinity(list, key)` groups equipment-changing
+corrections by any of those and reports which machine the work keeps landing
+on. In practice this is the more useful one to reach first: its output is a
+concrete value for a field the scheduler **already honours**
+(`template.preferredEquipmentId`), so acting on it is filling in something you
+would otherwise type by hand — a far lower bar for trust than accepting a
+learned number. "7 of 9 Bracket Weld moves went to Robot 2" is also a claim a
+person can check against memory; a weight is not.
+
+**These MUST be captured at correction time.** The feature vectors are a
+snapshot of a capacity state that's gone, and a job's template or process can
+be edited afterwards, so none of it can be backfilled onto old records with
+any confidence about what the job looked like then. Any future attribute worth
+learning from has to be added to `record.job` *before* the data accumulates,
+not after.
+
+Two derived rules that matter when reading the output:
+
+- **Only equipment-changing corrections count.** A timing-only move says
+  nothing about which machine the work belongs on, and including it dilutes
+  every share toward meaninglessness.
+- **An existing preference inverts the conclusion.** `existingPreferences`
+  reports what the jobs in a group already preferred. If the group's top
+  machine is one they *already* prefer, that is NOT a suggestion to record a
+  preference — it is evidence the scheduler keeps failing to honour one, which
+  is a weights problem. Identical-looking counts, opposite fixes;
+  `show-overrides` prints them differently for that reason.
+
+`share`'s denominator is equipment-changing corrections *in that group*, not
+all jobs of that kind — the history alone can't know the latter. A consumer
+wanting "7 of 9 Bracket Weld **jobs**" has to bring its own denominator;
+conflating the two would overstate every finding.
 
 **`npm run show-overrides -- path/to/scheduler-data.json`** prints what has
-accumulated: counts by source, which machines work is moved off and onto, and
-the mean feature delta. Step 1 deliberately ships no UI, so this is the only
-way to look — and data being collected that nobody has eyeballed is precisely
-how a learning system ends up confidently trained on a bug.
+accumulated: counts by source, which machines work is moved off and onto, the
+per-template/process/procedure/tag affinities (with the
+"already prefers" vs "consider setting" distinction above), and the mean
+feature delta. Step 1 deliberately ships no UI, so this is the only way to
+look — and data being collected that nobody has eyeballed is precisely how a
+learning system ends up confidently trained on a bug.
 
 ### Parallel processing (#30)
 

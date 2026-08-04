@@ -70,6 +70,21 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('both picks were evaluated, so a comparable delta is stored',
         rec.comparable === true && !!rec.delta, JSON.stringify({ comparable: rec.comparable, delta: rec.delta }));
 
+  // Without these the history can only tune the global weights. They're what
+  // make "jobs of this KIND belong on that machine" answerable — and they
+  // cannot be backfilled, so a wiring break here loses the data permanently
+  // rather than merely degrading a report.
+  const liveJob = await page.evaluate((n) => JSON.parse(localStorage.getItem('wf::wf_jobs') || '[]')
+    .find((j) => j.name === n), target.name);
+  check('the job’s template is captured', rec.job?.templateId === liveJob.templateId,
+        `${rec.job?.templateId} vs ${liveJob.templateId}`);
+  check('the job’s process is captured', rec.job?.process === liveJob.process,
+        `${rec.job?.process} vs ${liveJob.process}`);
+  check('the job’s capability tags are captured', Array.isArray(rec.job?.tags),
+        JSON.stringify(rec.job?.tags));
+  check('the job’s own preference at the time is captured, separating "establishing" from "enforcing"',
+        'preferredEquipmentId' in (rec.job || {}), JSON.stringify(rec.job));
+
   // The whole point of capture is that it observes without interfering.
   const landed = await page.evaluate((n) => JSON.parse(localStorage.getItem('wf::wf_jobs') || '[]')
     .find((j) => j.name === n)?.assignment, target.name);

@@ -18,7 +18,7 @@
    ============================================================================ */
 
 import { readFileSync } from 'node:fs';
-import { summariseOverrides, equipmentFlow } from '../src/overrides.js';
+import { summariseOverrides, equipmentFlow, attributeAffinity } from '../src/overrides.js';
 
 const unwrap = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
 
@@ -28,6 +28,8 @@ function load(path) {
   return {
     overrides: unwrap(entries.wf_overrides) || [],
     equipment: unwrap(entries.wf_equipment) || [],
+    templates: unwrap(entries.wf_templates) || [],
+    procedures: unwrap(entries.wf_procedures) || [],
   };
 }
 
@@ -37,8 +39,14 @@ function main() {
     console.error('Usage: npm run show-overrides -- path/to/scheduler-data.json');
     process.exit(1);
   }
-  const { overrides, equipment } = load(path);
+  const { overrides, equipment, templates, procedures } = load(path);
   const name = (id) => equipment.find((e) => e.id === id)?.name || id || '—';
+  const labels = {
+    templateId: (id) => templates.find((t) => t.id === id)?.name || id,
+    procedureId: (id) => procedures.find((p) => p.id === id)?.name || id,
+    process: (v) => v,
+    tags: (v) => v,
+  };
 
   if (!overrides.length) {
     console.log('\nNo overrides recorded yet.');
@@ -58,6 +66,31 @@ function main() {
   ids.forEach((id) => {
     console.log(`  ${name(id).padEnd(22)} moved OFF ${String(flow[id].movedFrom).padStart(3)}   moved ONTO ${String(flow[id].movedTo).padStart(3)}`);
   });
+
+  // The findings most likely to read as immediately true, and whose output is
+  // a value for a field the scheduler already honours rather than a learned
+  // number. Printed before the weight evidence for that reason.
+  for (const key of ['templateId', 'process', 'procedureId', 'tags']) {
+    const groups = attributeAffinity(overrides, key);
+    const notable = Object.entries(groups)
+      .filter(([, g]) => g.n >= 2 && g.top && g.top.share >= 0.6)
+      .sort((a, b) => b[1].n - a[1].n);
+    if (!notable.length) continue;
+    console.log(`\nBy ${key}:`);
+    notable.forEach(([value, g]) => {
+      const already = g.existingPreferences[g.top.equipmentId];
+      // These two cases mean opposite things and must not be printed alike:
+      // one asks you to record a preference, the other says a preference you
+      // already recorded keeps losing — which is a weights problem, not a
+      // missing-preference problem.
+      const note = already
+        ? `already prefers ${name(g.top.equipmentId)} — the scheduler keeps not honouring it`
+        : `consider setting preferred equipment = ${name(g.top.equipmentId)}`;
+      console.log(`  ${labels[key](value)}`);
+      console.log(`    ${g.top.count} of ${g.n} equipment moves → ${name(g.top.equipmentId)} (${Math.round(g.top.share * 100)}%)`);
+      console.log(`    ${note}`);
+    });
+  }
 
   console.log('\nMean feature delta (user’s pick minus the scheduler’s):');
   if (!s.nComparable) {
