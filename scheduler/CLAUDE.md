@@ -1737,16 +1737,31 @@ maintenance task on a piece of equipment has nothing to align to, and
 forcing a project on it would just push people back to the old workaround —
 marking the staff member AND the equipment unavailable for the day by hand).
 
-**Tasks are always created already pinned.** Equipment and Planned start
-date are both required fields in TaskModal — there is no "automatic, find
-it a slot" mode the way a job has, so a task's `assignment` is built exactly
-like a job's own Equipment/Planned start date pin (#28): `{ equipmentId,
-startDate, pinned: true, days: [] }`, filled in by the same pinned-placement
-path in `scheduler.js` on the very next recompute. There is currently no
-drag-and-drop for a task on the Schedule view and no unpin — deliberately
-out of scope for v1 (a task is meant to be simple to set up and rare to
-need moved); reassigning one means reopening TaskModal and changing
-Equipment/Planned start date, the same as any other pin edit.
+**Tasks are always created already pinned, and always stay pinned.**
+Equipment and Planned start date are both required fields in TaskModal —
+there is no "automatic, find it a slot" mode the way a job has, so a task's
+`assignment` is built exactly like a job's own Equipment/Planned start date
+pin (#28): `{ equipmentId, startDate, pinned: true, days: [] }`, filled in
+by the same pinned-placement path in `scheduler.js` on the very next
+recompute. Reassigning one is either dragging it (see below) or reopening
+TaskModal and changing Equipment/Planned start date, the same as any other
+pin edit — there is deliberately **no unpin**, unlike a job: a task has
+nowhere to fall back to once unpinned (no "automatic" mode to release it
+into), so the only two states are "pinned here" and "doesn't exist yet".
+
+**Drag-and-drop works the same as a job's**, via a second, independent id —
+`dragTaskId`/`setDragTaskId`, not `dragJobId` — because jobs and tasks are
+different arrays with different drop handlers (`handleDrop` vs.
+`handleTaskDrop`) and keeping the two id-spaces apart means neither path
+has to know the other exists. They share one `dropHint` (only one drag ever
+happens at a time) and the same day-cell drop target, which just checks
+`dragTaskId` first: task drag wins if one is in progress, otherwise it's a
+job drop, same as always. `handleTaskDrop` mirrors `handleDrop`'s
+validation (process match, ready date, blocked day) and its `seedStaffId`
+carry-forward (so the person on a task doesn't change for no reason just
+because it moved machines) — it's simpler only because there's no split-
+parts/batch/parallel-processing-prompt branching to handle, none of which a
+task has.
 
 **Tasks share the scheduling engine with jobs, but never the `jobs` array.**
 Keeping them out of `jobs` was the point of "not a job" — Job Backlog,
@@ -1805,16 +1820,18 @@ shape that:
   deliberately reuses the exact field names it reads
   (`procedureId`/`status`/`actualHours`/`hoursTotal`).
 
-**Schedule view rendering is additive, not integrated into the job drag-drop
-system.** `tasksByEquip` is a second, much simpler map alongside
-`jobsByEquip`; each equipment group renders its task lanes right after its
-job lanes, reusing `buildJobSegments` (generic over anything with
+**Schedule view rendering runs alongside the job drag-drop system on its
+own id-space, not inside it.** `tasksByEquip` is a second, much simpler map
+alongside `jobsByEquip`; each equipment group renders its task lanes right
+after its job lanes, reusing `buildJobSegments` (generic over anything with
 `.assignment.days`/`.status`/`.percentComplete`) for the coloured-by-staff
-segments, but with **no `draggable`, no `onDragStart`/`onDrop`** — click
-only, opening `TaskModal`. A dashed border and a small `FlaskConical` icon
-in the name cell are the only visual distinction from a job tile; there was
-no reason to invent a whole second colour language when "which staff member,
-which day" should read exactly the same way a job's does.
+segments, and IS draggable — see `dragTaskId`/`handleTaskDrop` above — using
+the same `draggable`/`onDragStart`/`onDragEnd` wiring a job tile's name cell
+and segments already use, just pointed at `setDragTaskId` instead of
+`setDragJobId`. A dashed border and a small `FlaskConical` icon in the name
+cell are the only visual distinction from a job tile; there was no reason
+to invent a whole second colour language when "which staff member, which
+day" should read exactly the same way a job's does.
 
 ## Persistence — IMPORTANT
 

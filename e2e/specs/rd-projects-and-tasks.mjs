@@ -11,6 +11,8 @@
    - it genuinely competes for capacity: a job that also needs the one
      qualified person gets pushed off the day the task occupies
    - it renders on the Schedule view as its own, non-job-styled tile
+   - it's draggable onto other equipment, same mechanism as a job
+     (dragTaskId/handleTaskDrop) — the only way to move one once created
    - the daily hours log lists it exactly like a job (same wf_timelog)
    - completing it with actual hours costs correctly off its procedure
      (jobCost, unmodified — task field names deliberately match)
@@ -42,7 +44,10 @@ export default async function run({ page, check, errors, baseUrl }) {
       },
       leavePeriods: [], color: null,
     }];
-    const equipment = [{ id: 'eq_1', name: 'Cell 1', type: 'Welding Robot', tags: [], processes: ['Robotic MIG Welding'], unavailableDates: [] }];
+    const equipment = [
+      { id: 'eq_1', name: 'Cell 1', type: 'Welding Robot', tags: [], processes: ['Robotic MIG Welding'], unavailableDates: [] },
+      { id: 'eq_2', name: 'Cell 2', type: 'Welding Robot', tags: [], processes: ['Robotic MIG Welding'], unavailableDates: [] },
+    ];
     const procedures = [{
       id: 'proc_1', name: 'R&D trial procedure', process: 'Robotic MIG Welding', costCentreId: '', substrate: '', notes: '',
       powder: {}, gases: [], electricity: {}, spares: [], maintenance: [], consumables: [],
@@ -92,6 +97,26 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.waitForTimeout(700);
   check('the task tile is visible on the Schedule view', (await page.locator('span.text-violet-200', { hasText: 'Trial spray run' }).count()) === 1);
 
+  // ---- drag-and-drop: dragging the task's name cell onto another piece of
+  // equipment reassigns it, same mechanism as a job (dragTaskId/
+  // handleTaskDrop) — the ONLY way to move a task once created, since it has
+  // no auto-schedule mode to unpin into. ----
+  {
+    const taskNameCell = page.locator('span.text-violet-200', { hasText: 'Trial spray run' });
+    const cell2Header = page.locator('span.font-semibold', { hasText: 'Cell 2' });
+    await cell2Header.scrollIntoViewIfNeeded();
+    const eqBox = await cell2Header.boundingBox();
+    await taskNameCell.hover();
+    await page.mouse.down();
+    await page.mouse.move(eqBox.x + 400, eqBox.y + 40, { steps: 10 });
+    await page.mouse.move(eqBox.x + 400, eqBox.y + 40, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(700);
+    const dragged = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_tasks') || '[]').find((t) => t.id === 'task_1'));
+    check('dragging a task tile onto different equipment reassigns it', dragged.assignment.equipmentId === 'eq_2', JSON.stringify(dragged.assignment));
+    check('the reassigned task is still pinned, not left floating', dragged.assignment.pinned === true);
+  }
+
   // ---- "New task" straight from the Schedule view, no project ----
   await page.click('button:has-text("New task")');
   await page.waitForSelector(modalSel);
@@ -109,7 +134,7 @@ export default async function run({ page, check, errors, baseUrl }) {
   await dateInputs.nth(2).fill(iso(today)); // planned start date
   const equipSel = modal().locator('select').nth(2);
   const equipOpts = await equipSel.locator('option').evaluateAll((os) => os.map((o) => o.value).filter(Boolean));
-  check('Equipment offers the one process-qualified machine', equipOpts.length === 1 && equipOpts[0] === 'eq_1');
+  check('Equipment offers both process-qualified machines', equipOpts.length === 2 && equipOpts.includes('eq_1') && equipOpts.includes('eq_2'));
   await equipSel.selectOption(equipOpts[0]);
   await modal().getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForTimeout(700);
@@ -132,14 +157,29 @@ export default async function run({ page, check, errors, baseUrl }) {
 
   // ---- the daily hours log lists tasks exactly like jobs (same merge into
   // TimeLogModal's `jobs` prop, zero changes to TimeLogModal itself) ----
-  await page.click('button:has-text("Log hours")'); // opens on today, which is anchorIso in this environment
+  // "Trial spray run" may have landed a day off anchorIso — the earlier
+  // drag's drop coordinates aren't pixel-precise about which day column
+  // they land on, only which equipment (see the job-drag suite's own
+  // tolerance for the same reason) — so read its actual planned date back
+  // rather than assuming it's still "today", and check the standalone task
+  // (untouched by the drag, still planned for today) on its own date.
+  const draggedDate = (await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_tasks') || '[]').find((t) => t.id === 'task_1'))).assignment.startDate;
+  await page.click('button:has-text("Log hours")'); // opens on today by default
   await page.waitForSelector(modalSel);
   await page.waitForTimeout(300);
-  check('the daily hours log lists the project-linked task, planned for today',
+  await modal().locator('input[type=date]').fill(draggedDate);
+  await page.waitForTimeout(300);
+  check('the daily hours log lists the project-linked task, planned for its actual day',
         (await modal().locator('tr', { hasText: 'Trial spray run' }).count()) === 1);
-  check('...and the standalone task too, right alongside it',
+  await modal().locator('input[type=date]').fill(isoDate(new Date()));
+  await page.waitForTimeout(300);
+  check('...and the standalone task, planned for today, shows on its own day too',
         (await modal().locator('tr', { hasText: 'Robot calibration check' }).count()) === 1);
+  // Editing the date field left the modal "dirty" (any onChange does, per
+  // Modal's tracking — see the DirtyContext comment in WeldingScheduler.jsx),
+  // so its X now asks for confirmation rather than closing outright.
   await modal().locator('button').first().click();
+  await page.getByRole('button', { name: 'Discard changes' }).click();
   await page.waitForSelector(modalSel, { state: 'detached' });
   await page.waitForTimeout(300);
   check('no page errors so far', errors.length === 0, errors.slice(0, 3).join(' | '));

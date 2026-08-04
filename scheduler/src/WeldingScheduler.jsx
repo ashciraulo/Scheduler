@@ -1178,6 +1178,13 @@ export default function WeldingScheduler() {
   const [reworkOf, setReworkOf] = useState(null);
 
   const [dragJobId, setDragJobId] = useState(null);
+  // A task drag is tracked separately from a job drag rather than sharing
+  // dragJobId — jobs and tasks are different arrays with different drop
+  // handlers (handleDrop vs handleTaskDrop below), and keeping them apart
+  // means neither path needs to know the other's id-space exists. They
+  // share `dropHint` (only one drag ever happens at a time) and the same
+  // day-cell drop target, which just checks which one is set.
+  const [dragTaskId, setDragTaskId] = useState(null);
   const [dropHint, setDropHint] = useState(null); // {equipId, date}
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
@@ -1367,7 +1374,7 @@ export default function WeldingScheduler() {
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
     || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
-    || confirmClearPatterns || reworkOf || editingTask || editingProject || pendingTaskComplete
+    || confirmClearPatterns || reworkOf || editingTask || editingProject || pendingTaskComplete || dragTaskId
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1991,6 +1998,49 @@ export default function WeldingScheduler() {
     if (partIndex === null) checkParallelConflict(result, job.id);
   }
 
+  // The task equivalent of handleDrop, much simpler for the same reason
+  // TaskModal's own pin is simpler than JobModal's: no split parts, no
+  // batches, no parallel-processing prompt (that's specifically about a job
+  // sharing an operator with another JOB, and there's no equivalent review
+  // panel for a task yet — see "R&D projects and tasks" in
+  // scheduler/CLAUDE.md). A task drop rebuilds its pin exactly the way
+  // dragging a job does — same validation (process match, ready date,
+  // blocked day), same seedStaffId carry-forward so the person on it
+  // doesn't change for no reason.
+  function handleTaskDrop(equipId, date) {
+    if (readOnly || !dragTaskId) return;
+    const task = tasks.find((t) => t.id === dragTaskId);
+    setDragTaskId(null);
+    setDropHint(null);
+    if (!task) return;
+    const eq = equipment.find((e) => e.id === equipId);
+    if (!eq || !eq.processes.includes(task.process)) {
+      showToast(`${eq ? eq.name : 'That equipment'} can't run ${task.process} — drop rejected.`);
+      return;
+    }
+    if (!task.readyDate) {
+      showToast(`${task.name} has no ready-for-processing date set — set one on the task before scheduling it.`);
+      return;
+    }
+    if (date < task.readyDate) {
+      showToast(`${task.name} isn't ready for processing until ${fmtDate(task.readyDate)} — can't schedule it earlier.`);
+      return;
+    }
+    if ((eq.unavailableDates || []).includes(date)) {
+      showToast(`${eq.name} is blocked on ${fmtDate(date)} — drop rejected.`);
+      return;
+    }
+    const updated = {
+      ...task,
+      updatedAt: new Date().toISOString(),
+      assignment: {
+        equipmentId: equipId, startDate: date, endDate: date, pinned: true, conflict: false,
+        days: [], seedStaffId: primaryStaffOf(task.assignment),
+      },
+    };
+    recompute(jobs, equipment, staff, tasks.map((t) => (t.id === task.id ? updated : t)));
+  }
+
   // ---------- equipment / staff / template CRUD ----------
   function saveEquipment(item, isNew) {
     const list = isNew ? [...equipment, item] : equipment.map((e) => (e.id === item.id ? item : e));
@@ -2367,6 +2417,9 @@ export default function WeldingScheduler() {
             tasks={tasks}
             onEditTask={(t) => !readOnly && setEditingTask(t)}
             onAddTask={() => setEditingTask('new')}
+            dragTaskId={dragTaskId}
+            setDragTaskId={setDragTaskId}
+            onDropTask={handleTaskDrop}
             visibleDays={visibleDays}
             rangeStart={rangeStart}
             setRangeStart={setRangeStart}
@@ -2898,7 +2951,7 @@ function buildJobSegments(job, visibleDays, colWidth, staffColor) {
 }
 
 function ScheduleView({
-  equipment, staff, jobs, tasks = [], onEditTask, onAddTask, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
+  equipment, staff, jobs, tasks = [], onEditTask, onAddTask, dragTaskId, setDragTaskId, onDropTask, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
   onEditJob, unscheduledJobs, conflictJobs, preferredEquipJobs = [], secondStaffUnmetJobs = [], onAddJob, zoom, setZoom, onToggleEquipDay,
 }) {
@@ -3132,7 +3185,7 @@ function ScheduleView({
                           className={`h-full border-r border-slate-800/40 ${isHint ? 'bg-amber-500/20' : blocked ? 'bg-red-950/40' : past ? 'bg-slate-950/30' : weekend ? 'bg-slate-950/40' : ''}`}
                           onDragOver={(e) => { if (!readOnly) { e.preventDefault(); setDropHint({ equipId: eq.id, date: day }); } }}
                           onDragLeave={() => setDropHint(null)}
-                          onDrop={(e) => { e.preventDefault(); onDrop(eq.id, day); }}
+                          onDrop={(e) => { e.preventDefault(); if (dragTaskId) onDropTask(eq.id, day); else onDrop(eq.id, day); }}
                         />
                       );
                     })}
@@ -3346,10 +3399,12 @@ function ScheduleView({
                         their own lane, same colour-by-staff-per-day language
                         as a job tile (buildJobSegments is generic) but a
                         dashed border and a flask icon so the distinction
-                        reads at a glance — and no drag handles: a task is
-                        always exactly where its own modal pinned it (see
-                        taskToJobUnit's comment), there's no "automatic" mode
-                        to reassign it out of by dragging. */}
+                        reads at a glance. Draggable exactly like a job tile
+                        (name cell + each segment), onto onDropTask instead
+                        of onDrop — there's still no "automatic" placement
+                        mode for a task (see taskToJobUnit's comment), so a
+                        drag is the ONLY way to move one once created; it
+                        rebuilds the pin exactly the way handleTaskDrop does. */}
                     {equipTasks.map((task) => {
                       const person = task.staffId ? staff.find((s) => s.id === task.staffId) : null;
                       const conflict = task.assignment.conflict;
@@ -3360,6 +3415,9 @@ function ScheduleView({
                           <div
                             className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 bg-slate-900"
                             style={{ width: JOB_COL_WIDTH }}
+                            draggable={!readOnly}
+                            onDragStart={() => setDragTaskId(task.id)}
+                            onDragEnd={() => { setDragTaskId(null); setDropHint(null); }}
                             onClick={() => onEditTask(task)}
                             title={tip}
                           >
@@ -3377,6 +3435,9 @@ function ScheduleView({
                             {segs.map((sg, si) => (
                               <div
                                 key={si}
+                                draggable={!readOnly}
+                                onDragStart={() => setDragTaskId(task.id)}
+                                onDragEnd={() => { setDragTaskId(null); setDropHint(null); }}
                                 onClick={() => onEditTask(task)}
                                 title={tip}
                                 className="absolute cursor-pointer"
