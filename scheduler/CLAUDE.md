@@ -33,6 +33,7 @@ src/
   scheduler.js        # the scheduling engine + roster/date model (pure, no JSX)
   wipImport.js        # BC .xlsx reader + keyword/dupe analysis (see below)
   storage.js          # window.storage: shared /api store, else localStorage
+  placementScore.js   # weighted candidate scoring (OPT-IN; see its own section)
   liveSync.js         # polls for other people's changes (shared mode)
   index.css           # Tailwind directives + light company theme
 deploy/               # hand-written pieces of the deployable (SOURCE)
@@ -41,6 +42,7 @@ deploy/               # hand-written pieces of the deployable (SOURCE)
   README.txt          # end-user instructions, ships at the package root
 test/                 # node:test unit tests for scheduler.js (npm test)
 scripts/package.mjs   # assembles ../offline-package from dist/ + deploy/
+scripts/compare-scoring.mjs # read-only diff of the two placement paths
 tailwind.config.js
 postcss.config.js
 vite.config.js
@@ -56,6 +58,9 @@ vite.config.js
   that gets copied to the host PC)
 - `npm test` — unit tests for the scheduling engine (`node --test`, no
   framework and no build step)
+- `npm run compare-scoring [data.json]` — read-only side-by-side of the
+  current placement path against the opt-in weighted-scoring one (see
+  "Weighted placement scoring" below). Writes nothing.
 
 Browser end-to-end suites live in `../e2e` and run against a preview server —
 see `e2e/README.md`. CI (`.github/workflows/ci.yml`) runs the unit tests, the
@@ -95,14 +100,21 @@ Top-to-bottom, the single component file contains:
    person on a job for continuity where possible.
 
    It was pulled out of this file so it can be unit-tested: it is plain
-   JavaScript with no JSX and no imports, so `node --test` loads it directly
-   with no build step and no test framework. **Keep it that way** — a React or
-   DOM import here would cost the whole arrangement. It is pure in and out:
+   JavaScript with no JSX, so `node --test` loads it directly with no build
+   step and no test framework. Its **one** import is `./placementScore.js`,
+   which is plain ESM under the same rule. **Keep it that way** — a React or
+   DOM import into either file is what would cost the whole arrangement; a
+   pure sibling module is fine. It is pure in and out:
    plain data to `runScheduler`, plain data back, which is what makes the
    invariants below testable at all. The capacity maps are passed
    around as one `caps` object (`equipDayLock`, `equipShiftUsed`,
    `staffDayRemain`, `staffDayShift`, `staffLoad`) rather than five positional
    arguments.
+
+   `src/placementScore.js` holds the **opt-in** weighted alternative to the
+   best-candidate sort comparator — see "Weighted placement scoring" below.
+   The app does not use it; `runScheduler`'s behaviour with five arguments is
+   unchanged.
 5. **Storage helpers** — `loadKey` / `saveKey` wrap `window.storage`.
 6. **UI primitives** — small styled building blocks (Field, Modal, `Section`,
    MultiCheck, buttons).
@@ -814,6 +826,90 @@ A small `Lock` marker (amber, same treatment as the `UserCheck` staff-lock
 marker) shows on a locked job's Schedule-view tile and its Backlog row,
 suppressed whenever the job is actually pinned — a pin already implies a
 fixed machine, so showing both markers would be redundant.
+
+### Weighted placement scoring (`src/placementScore.js`) — OPT-IN, off by default
+
+**Status: the app does not use this.** All three `runScheduler` call sites in
+`WeldingScheduler.jsx` pass five arguments, which is the legacy path,
+unchanged. Nothing below affects the running tool until someone passes
+`{ weights }`. That is deliberate — the scheduler is in daily production use,
+so the new path was built alongside the old one rather than replacing it.
+
+**The problem it solves.** `runScheduler` decides two separate things about an
+unpinned job: which candidates are *eligible*, and which of those is *best*.
+Eligibility is a filter (process, `tagOk`, `lockedEquipmentId`, `staffId`,
+`readyDate`, `equipDayLock`) and stays exactly where it is — hard has to mean
+never, and a score can always be outvoted by a big enough number, so folding a
+hard constraint into a weight would silently downgrade a guarantee to a
+preference. **Never move an eligibility rule into the weights.**
+
+The *best-candidate* half was a strict lexicographic sort comparator: finishes
+soonest, then earliest start, then least exclusively-demanded machine, then
+staff continuity, then fewest handovers, then fewest chunks — where each
+signal only got a say if everything above it was *exactly* tied. That
+structure cannot express "prefer this, but not at any cost", which is why
+preferred equipment had to be bolted on as a `wins outright` branch *above*
+the whole cascade (a preferred machine booked solid for a fortnight still beat
+an identical machine free tomorrow). Every future soft nuance would have
+needed the same kind of carve-out, and those carve-outs are what eventually
+conflict with one another.
+
+`placementScore.js` replaces the comparator with one weighted sum:
+`score = Σ weights[term] × features[term]`, ranked best-first by
+`rankCandidates`. Signals now trade off instead of strictly overriding.
+
+**Features and weights are kept separate on purpose, and must stay that way.**
+`scoreCandidate` returns `features` (raw, opinion-free measurements — "this
+plan spans 3 days", "2 operator changes"), `contributions` (per-term
+`w × x`) and the summed `score`. The separation is the design, not
+bookkeeping: it makes a disagreement between the scheduler and the user
+*measurable*. When the user overrides a placement, both feature vectors are
+known and `featureDelta(userPick, schedulerPick)` gives exactly which terms
+were mis-weighted and in which direction — the gradient of a standard
+structured-prediction update, and the intended substrate for learning from
+corrections. **Don't collapse features and weights into a single number**;
+doing so removes the only hook a learning pass has.
+
+`runScheduler`'s optional sixth argument carries both switches, each off by
+default: `{ weights }` opts into scoring, `{ trace }` collects a per-job
+record of *every* candidate considered with its score and features (not just
+the winner — the rejected ones are what an override gets compared against).
+
+**Two behavioural changes the scoring path deliberately makes**, both
+impossible to express in the cascade:
+- Preferred equipment stops winning outright and competes on its weight
+  (`+60` ≈ worth about six days of delay, since `finishDelay` is `-10/day`),
+  so a preferred machine booked solid now loses to one free tomorrow.
+- A `lateness` term (`-25`/day past `effectiveDueDate`) exists at all. The
+  cascade ranked purely on finishing soonest, which is only a proxy for being
+  on time.
+
+**`npm run compare-scoring`** runs both paths over the same input and prints
+only what differs, with a term-by-term "because" line. It is read-only and
+takes an optional path to a real `scheduler-data.json` (shared-mode host file,
+`{version, entries}` with JSON-string values) or a plain `{wf_jobs,
+wf_equipment, wf_staff}` object; with no argument it uses a built-in demo
+workload. This is the safety mechanism that replaces "prove parity" — exact
+parity with the cascade is *not* achievable or desirable, since reproducing a
+lexicographic order requires place-value-separated weights (1000×, 100×, 10×…)
+which would make every term un-tradeable and defeat the point.
+
+**That script has already caught one real defect, which is why it exists.**
+`exclusiveDemand` (how many *other* pending jobs have no alternative to this
+machine) only ever broke exact ties under the cascade, so its magnitude had
+never been under any pressure at all. Scored at a token `-5` it promptly lost
+to a two-day saving and parked a general job on the only tagged cell — exactly
+what the signal was introduced to prevent. Corrected to `-25` (≈ the delay it
+imposes on the job being displaced). Pinned by *"a flexible job does not camp
+on the one machine an inflexible job needs"* in `test/placementScore.test.js`.
+Expect other weights to need the same treatment when the path is first run
+against real data: a signal that has only ever been a tie-break has never had
+to justify its magnitude.
+
+The *job ordering* sort (`unpinned.sort` — manual/locked first, then
+`effectiveDueDate`, then `needsFurtherProcessing`) is a separate cascade of
+the same shape and is **not** touched by any of this. It could get the same
+treatment later if it starts feeling the same pressure.
 
 ### Parallel processing (#30)
 

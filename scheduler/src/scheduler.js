@@ -2,8 +2,10 @@
    SCHEDULING ENGINE + the roster/date model it runs on.
    ----------------------------------------------------------------------------
    Extracted from WeldingScheduler.jsx so it can be unit-tested directly: this
-   file is plain JavaScript with no JSX and no imports, so `node --test` loads
-   it with no build step and no test framework.
+   file is plain JavaScript with no JSX, so `node --test` loads it with no
+   build step and no test framework. Its ONE import is ./placementScore.js,
+   which is plain ESM under the same rule — a React or DOM import into either
+   file is what would cost the arrangement, not a pure sibling module.
 
    It is pure — no React, no storage, no DOM. `runScheduler(jobs, equipment,
    staff, days, earliestIdx)` takes plain data and returns plain data, which is
@@ -12,6 +14,8 @@
    The rules commented through here each fixed a real scheduling bug. The tests
    in test/scheduler.test.js pin them down; don't regress either.
    ============================================================================ */
+
+import { rankCandidates, DEFAULT_WEIGHTS } from './placementScore.js';
 
 /* ============================================================
    SHIFTS & ROSTER CONSTANTS
@@ -581,7 +585,20 @@ export function whyUnscheduled(job, equipment, staff, days) {
 // the floor below which nothing may be auto-placed. Pinned jobs are exempt: a
 // job the user dropped on a past date is a record of what actually happened,
 // and it keeps that slot.
-export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
+//
+// `options` is entirely optional and every field is off by default — calling
+// runScheduler with five arguments, as the app does, behaves exactly as it
+// always has:
+//   { weights }  opt into the weighted-scoring placement path (see
+//                placementScore.js). Pass DEFAULT_WEIGHTS for the stock
+//                tuning, or a modified copy. Absent → the original
+//                lexicographic comparator, unchanged.
+//   { trace }    an array to push a per-job record of every candidate
+//                considered and its score onto. Only populated when scoring
+//                is on. This is what a later pass will compare a user's
+//                manual override against.
+export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0, options = {}) {
+  const { weights = null, trace = null } = options;
   const order = jobsIn.map((j) => j.id);
 
   // Batches (#47) combine first: a qualifying group of jobs is replaced by
@@ -884,7 +901,43 @@ export function runScheduler(jobsIn, equipment, staff, days, earliestIdx = 0) {
       // the job out over many sparse days while an equally-capable machine sat
       // completely free — which is exactly what was piling every job onto one
       // robot and pushing due dates out.
-      if (candidates.length) {
+      if (candidates.length && weights) {
+        // ---- Weighted scoring path (opt-in; see placementScore.js) ----
+        // Every signal the cascade below expresses as a strict priority level
+        // becomes a term in one weighted sum here, so they can genuinely trade
+        // off. Note this deliberately CHANGES one behaviour relative to the
+        // cascade: preferred equipment stops winning outright regardless of
+        // cost and instead competes on its weight, so a preferred machine
+        // booked solid for weeks now loses to one free tomorrow. That is the
+        // point of the path, not an oversight — the flag exists so the change
+        // is opted into rather than inflicted.
+        //
+        // Eligibility is untouched: `candidates` has already been filtered by
+        // every hard constraint (process, tags, lockedEquipmentId, staffId,
+        // readyDate, day locks) before anything here runs, and scoring can
+        // only ever reorder that list, never extend it.
+        const ranked = rankCandidates(job, candidates, {
+          exclusiveDemand,
+          seedStaffId,
+          floorDate: days[Math.min(floorIdx, days.length - 1)],
+          dueDate: effectiveDueDate(job),
+        }, weights);
+        best = ranked[0];
+        if (trace) {
+          trace.push({
+            jobId: job.id,
+            chosenEquipId: best.equipId,
+            candidates: ranked.map((c) => ({
+              equipId: c.equipId,
+              startDate: c.startDate,
+              endDate: c.endDate,
+              score: c.score,
+              features: c.features,
+            })),
+          });
+        }
+      } else if (candidates.length) {
+        // ---- Original lexicographic path (the default) ----
         // Preferred equipment (job.preferredEquipmentId — a soft nudge, set
         // by hand on the job or inherited from its template) wins outright
         // over "finishes soonest" whenever it's actually among the feasible

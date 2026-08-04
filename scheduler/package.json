@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "package": "vite build && node scripts/package.mjs",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "compare-scoring": "node scripts/compare-scoring.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.383.0",
