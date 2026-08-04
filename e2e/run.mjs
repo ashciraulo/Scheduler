@@ -32,6 +32,7 @@ import patternsView from './specs/patterns-view.mjs';
 import trainingPartner from './specs/training-partner.mjs';
 import reworkQuality from './specs/rework-quality.mjs';
 import rdProjectsAndTasks from './specs/rd-projects-and-tasks.mjs';
+import reportsAndBackfill from './specs/reports-and-backfill.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -63,6 +64,7 @@ const SUITES = [
   ['training partner — a second person riding along on a job', trainingPartner],
   ['rework + quality — linked rework jobs and the Quality tab', reworkQuality],
   ['R&D projects and tasks — non-job schedulable items sharing the engine', rdProjectsAndTasks],
+  ['reports and backfill — Quality/R&D exports and logging past work directly', reportsAndBackfill],
 ];
 
 const only = process.argv[2]; // optional substring filter

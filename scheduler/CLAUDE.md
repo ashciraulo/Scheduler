@@ -1833,6 +1833,70 @@ cell are the only visual distinction from a job tile; there was no reason
 to invent a whole second colour language when "which staff member, which
 day" should read exactly the same way a job's does.
 
+**"Log past work" (`BackfillTaskModal`)** is the answer to "I want to
+back-fill it with work done in the recent past": TaskModal can't represent
+that, because Equipment and Planned start date are both required there — a
+task is always pinned onto the timeline, and there's nothing to pin work
+that already happened onto. This is a genuinely different modal, not a mode
+of TaskModal: date worked + hours instead of equipment + a planned start
+date. Saving produces a task that's already `status: 'complete'` with
+`assignment: null` — plainly skipped by every pass in `runScheduler` (a
+complete unit with no `assignment.days` is simply not replayed — see the
+"complete" replay note in scheduler.js), so it never touches placement and
+never renders a Schedule view tile — plus ONE matching `wf_timelog` entry
+(see `replaceTaskLogEntry`), which is what lets it flow through the R&D
+report exactly like a normally-logged task rather than needing its own
+special case there. `isBackfilled: true` is purely a UI marker (the
+"logged" pill in ProjectsView's task table, and what routes a click on that
+row back into `BackfillTaskModal` instead of `TaskModal` — reopening the
+normal one on a task with no assignment would show empty, required
+Equipment/Planned start date fields and block Save). Editing one replaces
+its single log entry regardless of what date it was on before
+(`replaceTaskLogEntry` filters by item id, not `(id, date)` the way
+`saveTimeLog`'s whole-day-form semantics do) — a backfilled task is
+expected to carry exactly one entry, built by this modal and never touched
+by the ordinary daily log (TimeLogModal's `activeJobs` excludes anything
+already `status: 'complete'`).
+
+## Reports
+
+Quality and R&D each get a **Report** button opening `ReportModal` — pick a
+date range, see every entry logged in it, export to CSV. Both tabs share
+one shell; only two things differ per tab (`buildRows(dateFrom, dateTo)`
+and `columns`, each call site's own — see QualityView's
+`buildQualityRows`/`qualityColumns` and ProjectsView's
+`buildRdRows`/`rdColumns`), so `ReportModal` itself carries no domain
+knowledge of jobs vs. tasks.
+
+**One row per unit of logged work, not one row per job/task** —
+`reportEntries(items, timeLog, dateFrom, dateTo)` is the shared core. For
+each item (rework job or task) in range it prefers real `wf_timelog`
+entries (exactly what was logged, by whom, that day) and falls back to ONE
+synthesised row from the item's own completion record
+(`completedDate`/`actualHours`) only when it has no day-by-day entries at
+all — which is what makes a backfilled entry (see above) show up in a
+report despite never having been logged day by day. Never both for the
+same item, so nothing is double-counted. Cost is priced **per row**, not
+per item: `hourlyRate(item, procedures, costCentres)` is `jobCost()`'s own
+rate calculation with the hours term stripped back out, so each row's cost
+is `rate × that row's hours` — correct even when only part of an item's
+total hours fall inside the chosen range, which `jobCost()`'s own
+whole-item total isn't set up to answer.
+
+**Export is client-side CSV, same "no network" rule as everything else that
+touches WIP/cost data** (see the top-level CLAUDE.md) — `downloadCsv`
+builds the file in memory (`csvEscape` per field) and hands it to the
+browser's own download mechanism via a throwaway `Blob`/`<a download>`,
+never a server request. `columns[i].value(row)` is the one function each
+report's column both renders in the table AND writes to the CSV — there
+was no reason to keep a separate JSX renderer and CSV serialiser in sync
+by hand when every column here is plain text or a number.
+
+Both report modals are read-only and self-contained — nothing they show is
+ever saved — so unlike `BackfillTaskModal`, neither needs to be lifted into
+the main component's `busyEditing`: there's no in-progress edit a remote
+sync could clobber by reloading state underneath one.
+
 ## Persistence — IMPORTANT
 
 The app calls `window.storage.get/set/delete/list` (async). That global only

@@ -3,7 +3,8 @@ import {
   Plus, X, Settings2, Calendar, Users, Wrench, Check, AlertTriangle,
   Monitor, ChevronLeft, ChevronRight, ChevronDown, Trash2, Pencil, Pin, PinOff,
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
-  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut, Target, Lock, FlaskConical
+  Upload, FileWarning, UserCheck, ZoomIn, ZoomOut, Target, Lock, FlaskConical,
+  Download, FileClock
 } from 'lucide-react';
 import {
   parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
@@ -1164,6 +1165,10 @@ export default function WeldingScheduler() {
   const [editingCentre, setEditingCentre] = useState(null);       // cost-centre object or 'new' or null
   const [editingTask, setEditingTask] = useState(null);           // task object or 'new' or null
   const [editingProject, setEditingProject] = useState(null);     // project object or 'new' or null
+  // A task backfilled via "Log past work" (BackfillTaskModal) — a task
+  // object (routed here instead of editingTask when it's already complete
+  // with no assignment, i.e. was never scheduled), 'new', or null.
+  const [backfillTask, setBackfillTask] = useState(null);
   const [pendingComplete, setPendingComplete] = useState(null);   // job awaiting actual-hours entry
   const [pendingTaskComplete, setPendingTaskComplete] = useState(null); // task awaiting actual-hours entry
   const [confirmDelete, setConfirmDelete] = useState(null); // {type, id, name}
@@ -1375,6 +1380,7 @@ export default function WeldingScheduler() {
     || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
     || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
     || confirmClearPatterns || reworkOf || editingTask || editingProject || pendingTaskComplete || dragTaskId
+    || backfillTask
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -1839,6 +1845,7 @@ export default function WeldingScheduler() {
     recompute(jobs, equipment, staff, tasks.filter((t) => t.id !== id));
     setConfirmDelete(null);
     setEditingTask(null);
+    setBackfillTask(null);
   }
   function toggleTaskComplete(task) {
     if (task.status !== 'complete') {
@@ -1874,6 +1881,43 @@ export default function WeldingScheduler() {
     if (!target) return;
     setEditingTask(null);
     setTimeout(() => setEditingTask(target), 0);
+  }
+  // A backfilled task carries exactly one wf_timelog entry, by construction
+  // (see BackfillTaskModal) — so unlike saveTimeLog (which replaces every
+  // entry for one DATE, the whole-day-form semantics TimeLogModal needs),
+  // this replaces every entry for one ITEM, regardless of what date it was
+  // on before. That's what lets editing a logged entry's date/hours behave
+  // like editing a single record instead of leaving the old date's entry
+  // behind as an orphan.
+  function replaceTaskLogEntry(taskId, date, hours, staffId) {
+    const rest = timeLog.filter((e) => e.jobId !== taskId);
+    const next = hours > 0 ? [...rest, { id: uid('tl'), jobId: taskId, date, hours, staffId: staffId || '', note: '' }] : rest;
+    setTimeLog(next);
+    saveKey(TIMELOG_KEY, next);
+  }
+  // "Log past work" (BackfillTaskModal) — see its own comment for why this
+  // produces a task shaped differently from addOrUpdateTask's: already
+  // complete, assignment: null, never touching the scheduler's placement
+  // search at all (a complete task with no assignment is simply skipped by
+  // every pass in runScheduler — see the "complete" replay note in
+  // scheduler.js — so recompute here is just the normal save+persist path,
+  // not a scheduling decision).
+  function addOrUpdateBackfillTask(data, isNew, entry) {
+    const stamped = {
+      id: data.id || uid('task'),
+      name: data.name, process: data.process, procedureId: data.procedureId || '',
+      hoursTotal: entry.hours, readyDate: entry.date, dueDate: entry.date,
+      projectId: data.projectId || null, staffId: data.staffId || null, notes: data.notes || '',
+      status: 'complete', completedDate: entry.date, actualHours: entry.hours,
+      isBackfilled: true,
+      updatedAt: new Date().toISOString(),
+      assignment: null,
+    };
+    const nextTasks = isNew ? [...tasks, stamped] : tasks.map((t) => (t.id === stamped.id ? stamped : t));
+    recompute(jobs, equipment, staff, nextTasks);
+    replaceTaskLogEntry(stamped.id, entry.date, entry.hours, entry.staffId);
+    setBackfillTask(null);
+    showToast(`${stamped.name} logged for ${fmtDate(entry.date)}.`);
   }
 
   // Resolves a dragged id back to either a whole job, or a specific part
@@ -2535,7 +2579,13 @@ export default function WeldingScheduler() {
             onAddProject={() => setEditingProject('new')}
             onEditProject={(p) => !readOnly && setEditingProject(p)}
             onAddTask={() => setEditingTask('new')}
-            onEditTask={(t) => !readOnly && setEditingTask(t)}
+            // A backfilled entry (see BackfillTaskModal) opens back into that
+            // same, simpler modal, not the normal TaskModal — which would
+            // show empty, required Equipment/Planned start date fields for
+            // something that was never scheduled and block Save until they
+            // were filled in.
+            onEditTask={(t) => !readOnly && (t.isBackfilled ? setBackfillTask(t) : setEditingTask(t))}
+            onAddBackfillTask={() => setBackfillTask('new')}
           />
         )}
         {tab === 'patterns' && !displayMode && (
@@ -2600,6 +2650,19 @@ export default function WeldingScheduler() {
           onSave={(data, isNew) => addOrUpdateTask(data, isNew)}
           onDelete={editingTask !== 'new' ? () => setConfirmDelete({ type: 'task', id: editingTask.id, name: editingTask.name }) : null}
           onToggleComplete={editingTask !== 'new' ? () => { toggleTaskComplete(editingTask); setEditingTask(null); } : null}
+        />
+      )}
+
+      {backfillTask && (
+        <BackfillTaskModal
+          task={backfillTask === 'new' ? null : backfillTask}
+          processes={processes}
+          staff={staff}
+          procedures={procedures}
+          projects={projects}
+          onClose={() => setBackfillTask(null)}
+          onSave={(data, isNew, entry) => addOrUpdateBackfillTask(data, isNew, entry)}
+          onDelete={backfillTask !== 'new' ? () => setConfirmDelete({ type: 'task', id: backfillTask.id, name: backfillTask.name }) : null}
         />
       )}
 
@@ -3780,6 +3843,28 @@ function QualityView({ jobs, procedures = [], costCentres = [], timeLog = [], on
   );
   const totalHoursLogged = reworks.reduce((s, j) => s + loggedHours(timeLog, j.id), 0);
   const totalCost = reworks.reduce((s, j) => s + (jobCost(j, procedures, costCentres) || 0), 0);
+  const [reportOpen, setReportOpen] = useState(false);
+
+  // Read-only and self-contained (nothing here is saved), so — unlike
+  // BackfillTaskModal below — this doesn't need to be lifted into the main
+  // component's busyEditing: there's no in-progress edit a remote sync
+  // could clobber by reloading state underneath it.
+  const buildQualityRows = useCallback((dateFrom, dateTo) => reportEntries(reworks, timeLog, dateFrom, dateTo).map((e) => ({
+    date: e.date,
+    job: e.item.bcJobNo || (jobs.find((o) => o.id === e.item.reworkOfJobId)?.name) || '—',
+    name: e.item.name,
+    reason: e.item.notes || '—',
+    hours: e.hours,
+    cost: hourlyRate(e.item, procedures, costCentres) * e.hours,
+  })), [reworks, timeLog, jobs, procedures, costCentres]);
+  const qualityColumns = [
+    { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
+    { key: 'job', label: 'Job', value: (r) => r.job },
+    { key: 'name', label: 'Job description/name', value: (r) => r.name },
+    { key: 'hours', label: 'Hours logged', value: (r) => r.hours },
+    { key: 'reason', label: 'Reason for rework', value: (r) => r.reason },
+    { key: 'cost', label: 'Cost', value: (r) => fmtMoney(r.cost) },
+  ];
 
   return (
     <div className="space-y-4">
@@ -3797,6 +3882,21 @@ function QualityView({ jobs, procedures = [], costCentres = [], timeLog = [], on
           <div className="text-xl font-bold text-amber-300">{fmtMoney(totalCost)}</div>
         </div>
       </div>
+
+      <div className="flex justify-end">
+        <button className={btnGhost} onClick={() => setReportOpen(true)}><FileClock size={14} /> Report</button>
+      </div>
+
+      {reportOpen && (
+        <ReportModal
+          title="Quality report"
+          description="Every rework entry logged in the chosen range — one row per day worked, or one row from the job's own completion record if it was never logged day by day (e.g. backfilled)."
+          buildRows={buildQualityRows}
+          columns={qualityColumns}
+          filenamePrefix="quality-report"
+          onClose={() => setReportOpen(false)}
+        />
+      )}
 
       <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
         <table className="w-full text-sm">
@@ -4044,6 +4144,109 @@ function TaskModal({ task, processes, staff, equipment = [], procedures = [], pr
   );
 }
 
+// "I would also like the option of adding entries directly to the R&D
+// list, mainly so I can back-fill it with work done in the recent past" —
+// TaskModal above can't do this: Equipment and Planned start date are both
+// required there because a task is always pinned onto the timeline, and
+// there's nothing to pin work that already happened onto. This is the
+// alternative entry point: date worked + hours instead of equipment + a
+// planned start date, producing a task that's already `status: 'complete'`
+// with `assignment: null` — it was never scheduled, so it never appears on
+// the Schedule view, but it's otherwise an ordinary completed task
+// (isBackfilled: true is purely a UI badge — see the "logged" pill in
+// ProjectsView's task table — nothing reads it for scheduling or costing).
+//
+// Saving also writes a matching wf_timelog entry directly (see
+// addOrUpdateBackfillTask), which is what lets reportEntries() pick this up
+// through the exact same day-by-day path a normally-logged task uses,
+// rather than needing its own special case in the report.
+function BackfillTaskModal({ task, processes, staff, procedures = [], projects = [], onClose, onSave, onDelete }) {
+  const isNew = !task;
+  const [name, setName] = useState(task?.name || '');
+  const [process, setProcess] = useState(task?.process || '');
+  const [procedureId, setProcedureId] = useState(task?.procedureId || '');
+  const [date, setDate] = useState(task?.completedDate || isoDate(new Date()));
+  const [hours, setHours] = useState(task?.actualHours ?? '');
+  const [staffId, setStaffId] = useState(task?.staffId || '');
+  const [projectId, setProjectId] = useState(task?.projectId || '');
+  const [notes, setNotes] = useState(task?.notes || '');
+
+  const relevantProcedures = process ? procedures.filter((p) => p.process === process) : [];
+  const qualifiedStaff = process ? staff.filter((s) => s.processes.includes(process)) : [];
+  const canSave = name.trim() && process && Number(hours) > 0 && date;
+
+  function handleSave() {
+    onSave(
+      { id: task?.id, name: name.trim(), process, procedureId: procedureId || '', projectId: projectId || null, staffId: staffId || null, notes },
+      isNew,
+      { date, hours: Math.max(0, Math.round((Number(hours) || 0) * 100) / 100), staffId: staffId || null },
+    );
+  }
+
+  return (
+    <Modal title={isNew ? 'Log past work' : 'Edit logged entry'} onClose={onClose}>
+      <p className="text-sm text-slate-300 mb-3">
+        For work that's already done and was never put on the schedule — fills in the R&D list and report directly,
+        with no equipment or start date to pin.
+      </p>
+      <Field label="Task description">
+        <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Process">
+          <select
+            className={inputCls} value={process}
+            onChange={(e) => { setProcess(e.target.value); setProcedureId(''); setStaffId(''); }}
+          >
+            <option value="">Select…</option>
+            {processes.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </Field>
+        <Field label="Procedure — for cost (optional)">
+          <select className={inputCls} value={procedureId} onChange={(e) => setProcedureId(e.target.value)} disabled={!process}>
+            <option value="">None</option>
+            {relevantProcedures.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date worked">
+          <input type="date" className={inputCls} max={isoDate(new Date())} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="Hours">
+          <input type="number" min={0} step={0.25} className={inputCls} value={hours} onChange={(e) => setHours(e.target.value)} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Who (optional)">
+          <select className={inputCls} value={staffId} onChange={(e) => setStaffId(e.target.value)} disabled={!process}>
+            <option value="">Unspecified</option>
+            {qualifiedStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Project (optional)">
+          <select className={inputCls} value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+            <option value="">No project — standalone</option>
+            {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Notes (optional)">
+        <textarea className={inputCls} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </Field>
+      <div className="flex items-center justify-between pt-2 border-t border-slate-800 mt-2">
+        <div className="flex gap-2">
+          {onDelete && <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button>}
+        </div>
+        <div className="flex gap-2">
+          <button className={btnGhost} onClick={onClose}>Cancel</button>
+          <button className={btnPrimary} disabled={!canSave} onClick={handleSave}><Check size={14} /> Save</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // Every task that names this project, for the rollup below — hours from the
 // same loggedHours() any job uses, cost from the same jobCost() (task field
 // names deliberately match: procedureId/status/actualHours/hoursTotal), so
@@ -4055,18 +4258,45 @@ function projectRollup(project, tasks, timeLog, procedures, costCentres) {
   return { taskCount: own.length, hours: Math.round(hours * 100) / 100, cost };
 }
 
-function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff, readOnly, onAddProject, onEditProject, onAddTask, onEditTask }) {
+function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff, readOnly, onAddProject, onEditProject, onAddTask, onEditTask, onAddBackfillTask }) {
   const [projectFilter, setProjectFilter] = useState('all');
+  const [reportOpen, setReportOpen] = useState(false);
   const sortedProjects = [...projects].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   const visibleTasks = (projectFilter === 'all' ? tasks : tasks.filter((t) => t.projectId === projectFilter))
     .slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+
+  // Read-only and self-contained, same reasoning as QualityView's own
+  // report — no busyEditing involvement needed.
+  const buildRdRows = useCallback((dateFrom, dateTo) => reportEntries(tasks, timeLog, dateFrom, dateTo).map((e) => {
+    const project = projects.find((p) => p.id === e.item.projectId);
+    const person = staff.find((s) => s.id === e.staffId);
+    return {
+      date: e.date,
+      person: person ? person.name : '—',
+      project: project ? project.name : '—',
+      task: e.item.name,
+      hours: e.hours,
+      cost: hourlyRate(e.item, procedures, costCentres) * e.hours,
+    };
+  }), [tasks, timeLog, projects, staff, procedures, costCentres]);
+  const rdColumns = [
+    { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
+    { key: 'person', label: 'Person', value: (r) => r.person },
+    { key: 'project', label: 'Project', value: (r) => r.project },
+    { key: 'task', label: 'Task', value: (r) => r.task },
+    { key: 'hours', label: 'Hours logged', value: (r) => r.hours },
+    { key: 'cost', label: 'Cost', value: (r) => fmtMoney(r.cost) },
+  ];
 
   return (
     <div className="space-y-5">
       <div>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">Projects</h2>
-          {!readOnly && <button className={btnPrimary} onClick={onAddProject}><Plus size={15} /> New project</button>}
+          <div className="flex items-center gap-2">
+            <button className={btnGhost} onClick={() => setReportOpen(true)}><FileClock size={14} /> Report</button>
+            {!readOnly && <button className={btnPrimary} onClick={onAddProject}><Plus size={15} /> New project</button>}
+          </div>
         </div>
         {sortedProjects.length === 0 ? (
           <div className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-8 text-center text-slate-600 text-sm">
@@ -4103,6 +4333,17 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff
         )}
       </div>
 
+      {reportOpen && (
+        <ReportModal
+          title="R&D report"
+          description="Every task entry logged in the chosen range — one row per day worked, or one row from the task's own completion record if it was never logged day by day (e.g. backfilled with Log past work)."
+          buildRows={buildRdRows}
+          columns={rdColumns}
+          filenamePrefix="rd-report"
+          onClose={() => setReportOpen(false)}
+        />
+      )}
+
       <div>
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">Tasks</h2>
@@ -4115,6 +4356,7 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff
               <option value="">No project (standalone)</option>
               {sortedProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
+            {!readOnly && <button className={btnGhost} onClick={onAddBackfillTask} title="Add a record for work that's already done, without scheduling it"><FileClock size={15} /> Log past work</button>}
             {!readOnly && <button className={btnPrimary} onClick={onAddTask}><Plus size={15} /> New task</button>}
           </div>
         </div>
@@ -4141,7 +4383,14 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff
                 const status = t.status === 'complete' ? 'Complete' : t.assignment?.conflict ? 'Over capacity' : 'Scheduled';
                 return (
                   <tr key={t.id} className="border-b border-slate-800/60 hover:bg-slate-800/40 cursor-pointer" onClick={() => onEditTask(t)}>
-                    <td className="px-3 py-2 font-medium text-slate-200">{t.name}</td>
+                    <td className="px-3 py-2 font-medium text-slate-200">
+                      <span className="flex items-center gap-1.5">
+                        {t.name}
+                        {t.isBackfilled && (
+                          <span title="Logged directly — never scheduled on the timeline" className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-950/60 border border-violet-900 text-violet-300">logged</span>
+                        )}
+                      </span>
+                    </td>
                     <td className="px-3 py-2 text-slate-400">{project ? project.name : '—'}</td>
                     <td className="px-3 py-2 text-slate-400">{t.process}</td>
                     <td className="px-3 py-2 text-slate-400">{person ? person.name : 'Anyone qualified'}</td>
@@ -5584,6 +5833,134 @@ function loggedHours(timeLog, jobId) {
   return Math.round(
     (timeLog || []).filter((e) => e.jobId === jobId).reduce((s, e) => s + (Number(e.hours) || 0), 0) * 100
   ) / 100;
+}
+
+/* ============================================================
+   REPORTS — Quality (rework) and R&D (task) exports over a chosen
+   timeframe. See "Reports" in scheduler/CLAUDE.md.
+   ============================================================ */
+
+// $/hr for whatever procedure an item (job/task/rework) carries — the same
+// rate jobCost() uses, but exposed on its own so a report can price EACH
+// logged entry individually (entry.hours × rate) instead of only the
+// item's lifetime total. Returns 0, not null, so a report row's cost
+// column is always summable — no procedure just means no cost, not
+// missing data.
+function hourlyRate(item, procedures, costCentres) {
+  if (!item || !item.procedureId) return 0;
+  const p = (procedures || []).find((x) => x.id === item.procedureId);
+  return p ? procedureCost(p, costCentres) : 0;
+}
+
+// One row per unit of logged work, for a report over [dateFrom, dateTo].
+// Two sources, never both for the same item:
+//  - day-by-day wf_timelog entries, if the item has any in range — exactly
+//    what was actually logged, by whom, that day. The normal case for
+//    anything worked while it was open on the schedule.
+//  - otherwise, ONE synthesised row from the item's own completion record
+//    (completedDate/actualHours) if that falls in range. This is what
+//    makes a backfilled entry — created already complete, with no
+//    day-by-day log of its own (see BackfillTaskModal) — show up at all.
+function reportEntries(items, timeLog, dateFrom, dateTo) {
+  const rows = [];
+  (items || []).forEach((item) => {
+    const entries = (timeLog || []).filter((e) => e.jobId === item.id && e.date >= dateFrom && e.date <= dateTo);
+    if (entries.length) {
+      entries.forEach((e) => rows.push({ item, date: e.date, staffId: e.staffId || null, hours: Number(e.hours) || 0 }));
+    } else if (item.status === 'complete' && item.completedDate && item.completedDate >= dateFrom && item.completedDate <= dateTo) {
+      rows.push({ item, date: item.completedDate, staffId: item.staffId || null, hours: Number(item.actualHours) || 0 });
+    }
+  });
+  return rows.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// Quote/escape one CSV field — only wraps in quotes (doubling any inner
+// quotes) when the value actually needs it, so a plain number or short
+// word stays readable in the raw file.
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+// Client-side only, same as everything else in this app that touches WIP or
+// cost data (see the "no network" rule in the top-level CLAUDE.md) — builds
+// the file in memory and hands it straight to the browser's own download
+// mechanism. Nothing leaves the machine.
+function downloadCsv(filename, rows, columns) {
+  const header = columns.map((c) => csvEscape(c.label)).join(',');
+  const lines = rows.map((r) => columns.map((c) => csvEscape(c.value(r))).join(','));
+  const csv = [header, ...lines].join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Shared shell for both reports: a date range, a running total, an export
+// button, and a table — `columns` (each `{ key, label, value(row) }`) and
+// `buildRows(dateFrom, dateTo)` are the only things that differ between
+// the Quality and R&D versions (see their call sites), so the shell itself
+// carries no domain knowledge of jobs vs. tasks.
+function ReportModal({ title, description, buildRows, columns, filenamePrefix, onClose }) {
+  const todayIso = isoDate(new Date());
+  const [dateFrom, setDateFrom] = useState(addDays(todayIso, -30));
+  const [dateTo, setDateTo] = useState(todayIso);
+  const rows = useMemo(() => buildRows(dateFrom, dateTo), [buildRows, dateFrom, dateTo]);
+  const totalHours = Math.round(rows.reduce((s, r) => s + (Number(r.hours) || 0), 0) * 100) / 100;
+  const totalCost = rows.reduce((s, r) => s + (Number(r.cost) || 0), 0);
+
+  return (
+    <Modal title={title} onClose={onClose} size="lg">
+      {description && <p className="text-sm text-slate-300 mb-3">{description}</p>}
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="From">
+          <input type="date" className={inputCls} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} max={dateTo} />
+        </Field>
+        <Field label="To">
+          <input type="date" className={inputCls} value={dateTo} onChange={(e) => setDateTo(e.target.value)} min={dateFrom} />
+        </Field>
+      </div>
+      <div className="flex items-center justify-between rounded-md bg-slate-800/60 border border-slate-700 px-3 py-2 mb-3">
+        <span className="text-xs text-slate-400">
+          {rows.length} entr{rows.length === 1 ? 'y' : 'ies'} · {totalHours}h · <span className="text-amber-300 font-mono">{fmtMoney(totalCost)}</span>
+        </span>
+        <button
+          className={btnPrimary}
+          disabled={rows.length === 0}
+          onClick={() => downloadCsv(`${filenamePrefix}-${dateFrom}-to-${dateTo}.csv`, rows, columns)}
+        >
+          <Download size={14} /> Export CSV
+        </button>
+      </div>
+      <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900 overflow-x-auto max-h-[50vh] overflow-y-auto">
+        <table className="w-full text-sm min-w-[600px]">
+          <thead className="sticky top-0 bg-slate-800/60 text-slate-400 text-xs uppercase tracking-wide">
+            <tr>
+              {columns.map((c) => <th key={c.key} className="px-3 py-2 text-left">{c.label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-slate-800/60">
+                {columns.map((c) => <td key={c.key} className="px-3 py-2 text-slate-300 whitespace-nowrap">{c.value(r)}</td>)}
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={columns.length} className="px-3 py-8 text-center text-slate-600 text-sm">
+                Nothing logged in this range.
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex justify-end pt-3">
+        <button className={btnGhost} onClick={onClose}>Close</button>
+      </div>
+    </Modal>
+  );
 }
 
 // A task, adapted into the job shape runScheduler expects, so it competes
