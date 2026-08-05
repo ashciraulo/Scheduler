@@ -1484,6 +1484,13 @@ above surfaces all of them uniformly without needing job-specific "find what's
 holding them and offer to unpin it" tooling. Revisit if this actually gets
 used often enough that the extra guidance would earn its keep.
 
+**Tasks (see "R&D projects and tasks" further down) get this same field —
+`task.secondStaffId` — for the same reason and via the same
+`attachSecondStaff`, just reached through `taskToJobUnit` instead of a job
+directly.** Everything above applies unchanged; the one place it doesn't
+extend is `BackfillTaskModal`, which has no `assignment` to pair a second
+person's calendar into at all.
+
 ### Rework — a linked follow-up job (Quality tab)
 
 For a completed job that comes back with a problem. **Mark for rework**
@@ -1821,17 +1828,47 @@ shape that:
   (`procedureId`/`status`/`actualHours`/`hoursTotal`).
 
 **Schedule view rendering runs alongside the job drag-drop system on its
-own id-space, not inside it.** `tasksByEquip` is a second, much simpler map
-alongside `jobsByEquip`; each equipment group renders its task lanes right
-after its job lanes, reusing `buildJobSegments` (generic over anything with
-`.assignment.days`/`.status`/`.percentComplete`) for the coloured-by-staff
-segments, and IS draggable — see `dragTaskId`/`handleTaskDrop` above — using
-the same `draggable`/`onDragStart`/`onDragEnd` wiring a job tile's name cell
-and segments already use, just pointed at `setDragTaskId` instead of
-`setDragJobId`. A dashed border and a small `FlaskConical` icon in the name
-cell are the only visual distinction from a job tile; there was no reason
-to invent a whole second colour language when "which staff member, which
-day" should read exactly the same way a job's does.
+own id-space, not inside it, but shares one lane order with it.**
+`tasksByEquip` is a second, much simpler map alongside `jobsByEquip`, but
+per equipment group `equipLanes` merges that period's jobs and tasks into
+ONE array — `{ kind: 'job' | 'task', job/task }` — sorted by
+`assignment.startDate` then `assignment.claimOrder` (tasks get a
+`claimOrder` from the exact same pinned-placement pass in scheduler.js a
+job does, since `taskToJobUnit` merges them into the same `runScheduler`
+call) and rendered with one `.map()`, branching per lane to
+`renderJobLane`/`renderTaskLane` (plain functions, not separate
+components, so both close over the equipment group's own `eq`/`cells`/etc.
+without prop-drilling them). **A task's lane genuinely sits where it's
+scheduled, interleaved with job lanes** — earlier fix: it used to always
+render in its own `equipTasks.map()` after every job lane regardless of
+date, which read as "new tasks get added to the bottom" rather than
+reflecting the timeline. `renderTaskLane` reuses `buildJobSegments`
+(generic over anything with `.assignment.days`/`.status`/
+`.percentComplete`) for the coloured-by-staff segments, and IS draggable —
+see `dragTaskId`/`handleTaskDrop` above — using the same `draggable`/
+`onDragStart`/`onDragEnd` wiring a job tile's name cell and segments
+already use, just pointed at `setDragTaskId` instead of `setDragJobId`. A
+dashed border and a small `FlaskConical` icon in the name cell are the
+only visual distinction from a job tile; there was no reason to invent a
+whole second colour language when "which staff member, which day" should
+read exactly the same way a job's does — including showing BOTH people
+when a task has a training partner (see below): `renderTaskLane`'s
+`staffIds` extraction is the same `[staffId, secondStaffId]`-per-day flatten
+`renderJobLane` uses.
+
+**Tasks get the same training-partner field jobs do** —
+`task.secondStaffId`, offered in TaskModal via a Training partner select
+that's gated on a primary (`staffId`) already being set, exactly mirroring
+JobModal's own field (see "Two-person jobs" below — this is the same field,
+same rule, same `attachSecondStaff` in scheduler.js, just read off a task
+instead of a job by `taskToJobUnit`). An unmet pairing gets the same amber
+"Training partner not paired" panel jobs' own unmet pairings do — one
+shared panel on the Schedule view, jobs and tasks both listed in it
+(`secondStaffUnmetJobs`/`secondStaffUnmetTasks`, computed the same way,
+merged only at render time). No equivalent on `BackfillTaskModal` — a
+backfilled entry has no `assignment` and no capacity claim to pair a second
+person into, so the whole mechanism (which is fundamentally about blocking
+two people's calendars for the same days) doesn't apply to it.
 
 **"Log past work" (`BackfillTaskModal`)** is the answer to "I want to
 back-fill it with work done in the recent past": TaskModal can't represent

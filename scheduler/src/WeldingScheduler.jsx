@@ -2373,6 +2373,9 @@ export default function WeldingScheduler() {
       if (j.assignment && j.assignment.secondStaffUnmet) secondStaffUnmetJobs.push(j);
     }
   });
+  // Same signal as secondStaffUnmetJobs, for tasks — no parts/batches to
+  // flatten through, so this is the whole thing.
+  const secondStaffUnmetTasks = tasks.filter((t) => t.status !== 'complete' && t.assignment && t.assignment.secondStaffUnmet);
 
   if (!loaded) {
     return (
@@ -2483,6 +2486,7 @@ export default function WeldingScheduler() {
             conflictJobs={conflictJobs}
             preferredEquipJobs={preferredEquipJobs}
             secondStaffUnmetJobs={secondStaffUnmetJobs}
+            secondStaffUnmetTasks={secondStaffUnmetTasks}
             onAddJob={() => setEditingJob('new')}
             zoom={zoom}
             setZoom={setZoom}
@@ -3016,7 +3020,7 @@ function buildJobSegments(job, visibleDays, colWidth, staffColor) {
 function ScheduleView({
   equipment, staff, jobs, tasks = [], onEditTask, onAddTask, dragTaskId, setDragTaskId, onDropTask, visibleDays, rangeStart, setRangeStart, rangeLength, setRangeLength, totalDays, todayIdx,
   readOnly, displayMode, dragJobId, setDragJobId, dropHint, setDropHint, onDrop,
-  onEditJob, unscheduledJobs, conflictJobs, preferredEquipJobs = [], secondStaffUnmetJobs = [], onAddJob, zoom, setZoom, onToggleEquipDay,
+  onEditJob, unscheduledJobs, conflictJobs, preferredEquipJobs = [], secondStaffUnmetJobs = [], secondStaffUnmetTasks = [], onAddJob, zoom, setZoom, onToggleEquipDay,
 }) {
   // Zoom scales both axes of the grid so more of it — including the next
   // piece of equipment — fits on screen at once. Without it, a fully-booked
@@ -3226,13 +3230,28 @@ function ScheduleView({
                   (j) => j.assignment.startDate <= d1 && j.assignment.endDate >= d0
                 );
                 const totalHrs = Math.round(equipJobs.reduce((t, j) => t + (j.assignment.days || []).reduce((b, e) => (e.date >= d0 && e.date <= d1 ? b + e.hours : b), 0), 0) * 10) / 10;
-                const lanes = [...equipJobs].sort((a, b) =>
-                  a.assignment.startDate < b.assignment.startDate ? -1
-                    : a.assignment.startDate > b.assignment.startDate ? 1
-                    : (a.assignment.claimOrder ?? 0) - (b.assignment.claimOrder ?? 0));
-                const equipTasks = (tasksByEquip[eq.id] || [])
-                  .filter((t) => t.assignment.startDate <= d1 && t.assignment.endDate >= d0)
-                  .sort((a, b) => (a.assignment.startDate < b.assignment.startDate ? -1 : a.assignment.startDate > b.assignment.startDate ? 1 : 0));
+                const equipTasks = (tasksByEquip[eq.id] || []).filter(
+                  (t) => t.assignment.startDate <= d1 && t.assignment.endDate >= d0
+                );
+                // Jobs and tasks share one lane list, in actual schedule
+                // order — start date, then claimOrder (tasks get one from
+                // the same pinned-placement pass in scheduler.js a job
+                // does, since taskToJobUnit merges them into the same
+                // runScheduler call). Previously a task's lane was always
+                // appended after every job lane regardless of date, which
+                // read as "added to the bottom" instead of sitting where
+                // it's actually scheduled.
+                const equipLanes = [
+                  ...equipJobs.map((job) => ({ kind: 'job', job })),
+                  ...equipTasks.map((task) => ({ kind: 'task', task })),
+                ].sort((a, b) => {
+                  const av = a.kind === 'job' ? a.job : a.task;
+                  const bv = b.kind === 'job' ? b.job : b.task;
+                  if (av.assignment.startDate !== bv.assignment.startDate) {
+                    return av.assignment.startDate < bv.assignment.startDate ? -1 : 1;
+                  }
+                  return (av.assignment.claimOrder ?? 0) - (bv.assignment.claimOrder ?? 0);
+                });
                 const cells = () => (
                   <div className="absolute inset-0 flex">
                     {visibleDays.map((day) => {
@@ -3254,6 +3273,239 @@ function ScheduleView({
                     })}
                   </div>
                 );
+                // Pulled out to plain functions (rather than inline
+                // .map() callbacks) so equipLanes can render jobs and
+                // tasks interleaved, in one combined, date-ordered pass —
+                // see the equipLanes comment above.
+                function renderJobLane(job) {
+                  const parent = job._parentJob || job;
+                  const jobNo = parent.bcJobNo || '—';
+                  // Includes secondStaffId (a paired training partner —
+                  // see scheduler.js's attachSecondStaff) alongside the
+                  // primary on purpose: they're genuinely both working
+                  // it, so both get a colour dot and both show up in the
+                  // name list, same as any other two people who happened
+                  // to hand off the same job. When the pairing wasn't
+                  // met, nothing was ever stamped onto `e.secondStaffId`
+                  // (see the engine's all-or-nothing rule), so they
+                  // correctly don't appear here at all — that absence
+                  // plus the `secondUnmet` marker below IS the signal.
+                  const staffIds = [...new Set((job.assignment.days || []).flatMap((e) => [e.staffId, e.secondStaffId]).filter(Boolean))];
+                  const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Unassigned';
+                  const conflict = job.assignment.conflict;
+                  const preferredMissed = job.assignment.preferredEquipmentUnmet;
+                  // From the tile's OWN unit, not `parent` (#68): for a
+                  // split job's part, `job` here is the per-part object
+                  // jobsByEquip pushed (with its own staffId/
+                  // lockedEquipmentId — see that builder), which for a
+                  // non-split job is simply the job itself, so this reads
+                  // identically to before in that case.
+                  const manualStaff = job.staffId ? staff.find((s) => s.id === job.staffId) : null;
+                  const lockedEquip = job.lockedEquipmentId;
+                  // A training pair that couldn't actually be honoured —
+                  // same "own unit, not parent" reasoning as
+                  // staffId/lockedEquipmentId above. When it WAS honoured
+                  // there's nothing extra to call out here: the second
+                  // person already got their own colour dot and their
+                  // name already appears in `staffNames` above, exactly
+                  // like any other two people who happened to hand off
+                  // the same job — this only needs to flag the miss.
+                  const secondUnmet = job.assignment.secondStaffUnmet;
+                  const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${lockedEquip ? ' · equipment locked' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}${secondUnmet ? ' · training partner not paired — review' : ''}`;
+                  const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
+                  // A job is being dragged over THIS row's name cell,
+                  // about to take its slot on drop (#55) — distinct from
+                  // dropHint's day-cell highlight, which this also sets,
+                  // so the row and the exact day it'll land on are both
+                  // visible at once.
+                  const isReorderTarget = !!(dragJobId && dragJobId !== job.id
+                    && dropHint && dropHint.equipId === job.assignment.equipmentId
+                    && dropHint.date === job.assignment.startDate);
+                  return (
+                    <div key={job.id} className="flex border-b border-slate-800/40">
+                      <div
+                        // A background tint, not a border, for the hint —
+                        // `border-r border-slate-800` on this element sets
+                        // `border-color` (all four sides) with `!important`
+                        // in index.css's light-theme remap, which would
+                        // silently steamroll any `border-t-*` colour class
+                        // added alongside it regardless of source order.
+                        // `bg-amber-500/20` is the same already-mapped hint
+                        // colour the day cells below already use.
+                        className={`shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 ${isReorderTarget ? 'bg-amber-500/20' : 'bg-slate-900'}`}
+                        style={{ width: JOB_COL_WIDTH }}
+                        // Same drag handle as the timeline bar itself
+                        // (#51) — reassigning equipment/day by dragging
+                        // was previously only grabbable from the coloured
+                        // segment, which can be a sliver too thin to grab
+                        // for a short job. The name column is a much
+                        // bigger, easier target for exactly the same drag.
+                        draggable={!readOnly}
+                        onDragStart={() => setDragJobId(job.id)}
+                        onDragEnd={() => { setDragJobId(null); setDropHint(null); }}
+                        // Treats the stack of job names for one piece of
+                        // equipment as a reorderable list (#55): dropping
+                        // one job's name onto another's takes that row's
+                        // exact (equipment, start date) slot — the same
+                        // `onDrop` a timeline-cell drop already calls, so
+                        // it inherits the existing "most recent drop wins,
+                        // the incumbent slides" behaviour for free. That's
+                        // what actually reorders the list — the dragged
+                        // job lands where the target was, and everything
+                        // from there on shuffles down exactly as it
+                        // already does for any other pin. Works across
+                        // equipment too: dropping onto a row in a
+                        // different piece of equipment's list reassigns
+                        // it there, same validation (process/tags/ready
+                        // date) as any other drop.
+                        onDragOver={(e) => {
+                          if (readOnly || !dragJobId || dragJobId === job.id) return;
+                          e.preventDefault();
+                          setDropHint({ equipId: job.assignment.equipmentId, date: job.assignment.startDate });
+                        }}
+                        onDragLeave={() => setDropHint(null)}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          if (!dragJobId || dragJobId === job.id) return;
+                          onDrop(job.assignment.equipmentId, job.assignment.startDate);
+                        }}
+                        onClick={() => onEditJob(job._parentJob || job)}
+                        title={tip}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="font-mono text-[10px] shrink-0" style={{ color: '#E0523C' }}>{jobNo}</span>
+                          <span className="text-[11px] font-semibold text-slate-200 truncate">{job.name}</span>
+                          {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
+                          {job.assignment.pinned && !conflict && <Pin size={9} className="text-amber-400 shrink-0" />}
+                          {!job.assignment.pinned && lockedEquip && <Lock size={9} className="text-amber-400 shrink-0" />}
+                          {preferredMissed && <Target size={9} className="text-amber-400 shrink-0" />}
+                          {secondUnmet && <Users size={9} className="text-amber-400 shrink-0" />}
+                          {job.parallelProcessing && <Users size={9} className="text-sky-400 shrink-0" />}
+                        </div>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          {staffIds.slice(0, 4).map((id) => (
+                            <span key={id} className="shrink-0" style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: staffColor(id), display: 'inline-block' }} />
+                          ))}
+                          {manualStaff && <UserCheck size={9} className="text-amber-400 shrink-0" />}
+                          <span className="text-[10px] text-slate-400 truncate">{staffNames} · {job.hoursTotal}h</span>
+                        </div>
+                        {job.percentComplete > 0 && (
+                          <div style={{ height: 2, background: '#D8DBE0', borderRadius: 1, overflow: 'hidden', marginTop: 2 }}>
+                            <div style={{ height: '100%', width: `${job.percentComplete}%`, background: '#E0523C' }} />
+                          </div>
+                        )}
+                      </div>
+                      <div className="relative" style={{ height: laneH, width: visibleDays.length * colWidth }}>
+                        {cells()}
+                        {segs.map((sg, si) => (
+                          <div
+                            key={si}
+                            draggable={!readOnly}
+                            onDragStart={() => setDragJobId(job.id)}
+                            onDragEnd={() => { setDragJobId(null); setDropHint(null); }}
+                            onClick={() => onEditJob(job._parentJob || job)}
+                            title={tip}
+                            className="absolute cursor-pointer"
+                            style={{
+                              left: sg.left + 1,
+                              width: Math.max(4, sg.width - 2),
+                              top: 7,
+                              height: laneH - 14,
+                              background: sg.grey >= 0.999
+                                ? COMPLETE_GREY
+                                : sg.grey > 0
+                                ? `linear-gradient(90deg, ${COMPLETE_GREY} ${(sg.grey * 100).toFixed(1)}%, ${sg.color} ${(sg.grey * 100).toFixed(1)}%)`
+                                : sg.color,
+                              borderRadius: 4,
+                              opacity: 0.92,
+                              border: conflict ? '1.5px solid #ef4444' : job.assignment.pinned ? '1.5px solid #E0523C' : '1px solid rgba(37,54,70,.35)',
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                }
+                // Tasks (R&D/maintenance/anything that isn't a job) get the
+                // same colour-by-staff-per-day language as a job tile
+                // (buildJobSegments is generic) but a dashed border and a
+                // flask icon so the distinction reads at a glance.
+                // Draggable exactly like a job tile (name cell + each
+                // segment), onto onDropTask instead of onDrop — there's
+                // still no "automatic" placement mode for a task (see
+                // taskToJobUnit's comment), so a drag is the ONLY way to
+                // move one once created; it rebuilds the pin exactly the
+                // way handleTaskDrop does.
+                function renderTaskLane(task) {
+                  // Same reasoning as renderJobLane's staffIds: includes
+                  // secondStaffId (a paired training partner — see
+                  // scheduler.js's attachSecondStaff) alongside the primary,
+                  // since they're genuinely both on it. An unmet pairing
+                  // never got stamped onto any day (the engine's all-or-
+                  // nothing rule), so it correctly doesn't appear here —
+                  // that absence plus the `secondUnmet` marker below is the
+                  // whole signal, exactly like a job's own tile.
+                  const staffIds = [...new Set((task.assignment.days || []).flatMap((e) => [e.staffId, e.secondStaffId]).filter(Boolean))];
+                  const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Anyone qualified';
+                  const conflict = task.assignment.conflict;
+                  const secondUnmet = task.assignment.secondStaffUnmet;
+                  const tip = `Task · ${task.name} · ${task.hoursTotal}h · ${staffNames}${conflict ? ' · OVER CAPACITY' : ''}${secondUnmet ? ' · training partner not paired — review' : ''}`;
+                  const segs = buildJobSegments(task, visibleDays, colWidth, staffColor);
+                  return (
+                    <div key={task.id} className="flex border-b border-slate-800/40">
+                      <div
+                        className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 bg-slate-900"
+                        style={{ width: JOB_COL_WIDTH }}
+                        draggable={!readOnly}
+                        onDragStart={() => setDragTaskId(task.id)}
+                        onDragEnd={() => { setDragTaskId(null); setDropHint(null); }}
+                        onClick={() => onEditTask(task)}
+                        title={tip}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <FlaskConical size={10} className="text-violet-400 shrink-0" />
+                          <span className="text-[11px] font-semibold text-violet-200 truncate">{task.name}</span>
+                          {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
+                          {secondUnmet && <Users size={9} className="text-amber-400 shrink-0" />}
+                        </div>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          {staffIds.slice(0, 4).map((id) => (
+                            <span key={id} className="shrink-0" style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: staffColor(id), display: 'inline-block' }} />
+                          ))}
+                          <span className="text-[10px] text-slate-400 truncate">{staffNames} · {task.hoursTotal}h</span>
+                        </div>
+                      </div>
+                      <div className="relative" style={{ height: laneH, width: visibleDays.length * colWidth }}>
+                        {cells()}
+                        {segs.map((sg, si) => (
+                          <div
+                            key={si}
+                            draggable={!readOnly}
+                            onDragStart={() => setDragTaskId(task.id)}
+                            onDragEnd={() => { setDragTaskId(null); setDropHint(null); }}
+                            onClick={() => onEditTask(task)}
+                            title={tip}
+                            className="absolute cursor-pointer"
+                            style={{
+                              left: sg.left + 1,
+                              width: Math.max(4, sg.width - 2),
+                              top: 7,
+                              height: laneH - 14,
+                              background: sg.grey >= 0.999
+                                ? COMPLETE_GREY
+                                : sg.grey > 0
+                                ? `linear-gradient(90deg, ${COMPLETE_GREY} ${(sg.grey * 100).toFixed(1)}%, ${sg.color} ${(sg.grey * 100).toFixed(1)}%)`
+                                : sg.color,
+                              borderRadius: 4,
+                              opacity: 0.85,
+                              border: conflict ? '1.5px solid #ef4444' : '1.5px dashed #a78bfa',
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                }
                 return (
                   <div key={eq.id} className={`border-b border-slate-800/70 border-l-[3px] ${color.border}`}>
                     <div className="border-b border-slate-800/60 bg-slate-950/70 flex">
@@ -3301,7 +3553,7 @@ function ScheduleView({
                         })}
                       </div>
                     </div>
-                    {lanes.length === 0 && equipTasks.length === 0 && (
+                    {equipLanes.length === 0 && (
                       <div className="flex">
                         <div className="shrink-0 px-3 border-r border-slate-800 flex items-center sticky left-0 bg-slate-900" style={{ width: JOB_COL_WIDTH }}>
                           <span className="text-[10px] text-slate-600">No jobs scheduled</span>
@@ -3309,221 +3561,7 @@ function ScheduleView({
                         <div className="relative" style={{ height: 30, width: visibleDays.length * colWidth }}>{cells()}</div>
                       </div>
                     )}
-                    {lanes.map((job) => {
-                      const parent = job._parentJob || job;
-                      const jobNo = parent.bcJobNo || '—';
-                      // Includes secondStaffId (a paired training partner —
-                      // see scheduler.js's attachSecondStaff) alongside the
-                      // primary on purpose: they're genuinely both working
-                      // it, so both get a colour dot and both show up in the
-                      // name list, same as any other two people who happened
-                      // to hand off the same job. When the pairing wasn't
-                      // met, nothing was ever stamped onto `e.secondStaffId`
-                      // (see the engine's all-or-nothing rule), so they
-                      // correctly don't appear here at all — that absence
-                      // plus the `secondUnmet` marker below IS the signal.
-                      const staffIds = [...new Set((job.assignment.days || []).flatMap((e) => [e.staffId, e.secondStaffId]).filter(Boolean))];
-                      const staffNames = staffIds.length ? (staffIds.map((id) => staff.find((s) => s.id === id)?.name).filter(Boolean).join(', ') || 'Unassigned') : 'Unassigned';
-                      const conflict = job.assignment.conflict;
-                      const preferredMissed = job.assignment.preferredEquipmentUnmet;
-                      // From the tile's OWN unit, not `parent` (#68): for a
-                      // split job's part, `job` here is the per-part object
-                      // jobsByEquip pushed (with its own staffId/
-                      // lockedEquipmentId — see that builder), which for a
-                      // non-split job is simply the job itself, so this reads
-                      // identically to before in that case.
-                      const manualStaff = job.staffId ? staff.find((s) => s.id === job.staffId) : null;
-                      const lockedEquip = job.lockedEquipmentId;
-                      // A training pair that couldn't actually be honoured —
-                      // same "own unit, not parent" reasoning as
-                      // staffId/lockedEquipmentId above. When it WAS honoured
-                      // there's nothing extra to call out here: the second
-                      // person already got their own colour dot and their
-                      // name already appears in `staffNames` above, exactly
-                      // like any other two people who happened to hand off
-                      // the same job — this only needs to flag the miss.
-                      const secondUnmet = job.assignment.secondStaffUnmet;
-                      const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${lockedEquip ? ' · equipment locked' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}${secondUnmet ? ' · training partner not paired — review' : ''}`;
-                      const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
-                      // A job is being dragged over THIS row's name cell,
-                      // about to take its slot on drop (#55) — distinct from
-                      // dropHint's day-cell highlight, which this also sets,
-                      // so the row and the exact day it'll land on are both
-                      // visible at once.
-                      const isReorderTarget = !!(dragJobId && dragJobId !== job.id
-                        && dropHint && dropHint.equipId === job.assignment.equipmentId
-                        && dropHint.date === job.assignment.startDate);
-                      return (
-                        <div key={job.id} className="flex border-b border-slate-800/40">
-                          <div
-                            // A background tint, not a border, for the hint —
-                            // `border-r border-slate-800` on this element sets
-                            // `border-color` (all four sides) with `!important`
-                            // in index.css's light-theme remap, which would
-                            // silently steamroll any `border-t-*` colour class
-                            // added alongside it regardless of source order.
-                            // `bg-amber-500/20` is the same already-mapped hint
-                            // colour the day cells below already use.
-                            className={`shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 ${isReorderTarget ? 'bg-amber-500/20' : 'bg-slate-900'}`}
-                            style={{ width: JOB_COL_WIDTH }}
-                            // Same drag handle as the timeline bar itself
-                            // (#51) — reassigning equipment/day by dragging
-                            // was previously only grabbable from the coloured
-                            // segment, which can be a sliver too thin to grab
-                            // for a short job. The name column is a much
-                            // bigger, easier target for exactly the same drag.
-                            draggable={!readOnly}
-                            onDragStart={() => setDragJobId(job.id)}
-                            onDragEnd={() => { setDragJobId(null); setDropHint(null); }}
-                            // Treats the stack of job names for one piece of
-                            // equipment as a reorderable list (#55): dropping
-                            // one job's name onto another's takes that row's
-                            // exact (equipment, start date) slot — the same
-                            // `onDrop` a timeline-cell drop already calls, so
-                            // it inherits the existing "most recent drop wins,
-                            // the incumbent slides" behaviour for free. That's
-                            // what actually reorders the list — the dragged
-                            // job lands where the target was, and everything
-                            // from there on shuffles down exactly as it
-                            // already does for any other pin. Works across
-                            // equipment too: dropping onto a row in a
-                            // different piece of equipment's list reassigns
-                            // it there, same validation (process/tags/ready
-                            // date) as any other drop.
-                            onDragOver={(e) => {
-                              if (readOnly || !dragJobId || dragJobId === job.id) return;
-                              e.preventDefault();
-                              setDropHint({ equipId: job.assignment.equipmentId, date: job.assignment.startDate });
-                            }}
-                            onDragLeave={() => setDropHint(null)}
-                            onDrop={(e) => {
-                              e.preventDefault();
-                              if (!dragJobId || dragJobId === job.id) return;
-                              onDrop(job.assignment.equipmentId, job.assignment.startDate);
-                            }}
-                            onClick={() => onEditJob(job._parentJob || job)}
-                            title={tip}
-                          >
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="font-mono text-[10px] shrink-0" style={{ color: '#E0523C' }}>{jobNo}</span>
-                              <span className="text-[11px] font-semibold text-slate-200 truncate">{job.name}</span>
-                              {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
-                              {job.assignment.pinned && !conflict && <Pin size={9} className="text-amber-400 shrink-0" />}
-                              {!job.assignment.pinned && lockedEquip && <Lock size={9} className="text-amber-400 shrink-0" />}
-                              {preferredMissed && <Target size={9} className="text-amber-400 shrink-0" />}
-                              {secondUnmet && <Users size={9} className="text-amber-400 shrink-0" />}
-                              {job.parallelProcessing && <Users size={9} className="text-sky-400 shrink-0" />}
-                            </div>
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              {staffIds.slice(0, 4).map((id) => (
-                                <span key={id} className="shrink-0" style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: staffColor(id), display: 'inline-block' }} />
-                              ))}
-                              {manualStaff && <UserCheck size={9} className="text-amber-400 shrink-0" />}
-                              <span className="text-[10px] text-slate-400 truncate">{staffNames} · {job.hoursTotal}h</span>
-                            </div>
-                            {job.percentComplete > 0 && (
-                              <div style={{ height: 2, background: '#D8DBE0', borderRadius: 1, overflow: 'hidden', marginTop: 2 }}>
-                                <div style={{ height: '100%', width: `${job.percentComplete}%`, background: '#E0523C' }} />
-                              </div>
-                            )}
-                          </div>
-                          <div className="relative" style={{ height: laneH, width: visibleDays.length * colWidth }}>
-                            {cells()}
-                            {segs.map((sg, si) => (
-                              <div
-                                key={si}
-                                draggable={!readOnly}
-                                onDragStart={() => setDragJobId(job.id)}
-                                onDragEnd={() => { setDragJobId(null); setDropHint(null); }}
-                                onClick={() => onEditJob(job._parentJob || job)}
-                                title={tip}
-                                className="absolute cursor-pointer"
-                                style={{
-                                  left: sg.left + 1,
-                                  width: Math.max(4, sg.width - 2),
-                                  top: 7,
-                                  height: laneH - 14,
-                                  background: sg.grey >= 0.999
-                                    ? COMPLETE_GREY
-                                    : sg.grey > 0
-                                    ? `linear-gradient(90deg, ${COMPLETE_GREY} ${(sg.grey * 100).toFixed(1)}%, ${sg.color} ${(sg.grey * 100).toFixed(1)}%)`
-                                    : sg.color,
-                                  borderRadius: 4,
-                                  opacity: 0.92,
-                                  border: conflict ? '1.5px solid #ef4444' : job.assignment.pinned ? '1.5px solid #E0523C' : '1px solid rgba(37,54,70,.35)',
-                                }}
-                              />
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {/* Tasks (R&D/maintenance/anything that isn't a job) get
-                        their own lane, same colour-by-staff-per-day language
-                        as a job tile (buildJobSegments is generic) but a
-                        dashed border and a flask icon so the distinction
-                        reads at a glance. Draggable exactly like a job tile
-                        (name cell + each segment), onto onDropTask instead
-                        of onDrop — there's still no "automatic" placement
-                        mode for a task (see taskToJobUnit's comment), so a
-                        drag is the ONLY way to move one once created; it
-                        rebuilds the pin exactly the way handleTaskDrop does. */}
-                    {equipTasks.map((task) => {
-                      const person = task.staffId ? staff.find((s) => s.id === task.staffId) : null;
-                      const conflict = task.assignment.conflict;
-                      const tip = `Task · ${task.name} · ${task.hoursTotal}h${person ? ` · ${person.name}` : ''}${conflict ? ' · OVER CAPACITY' : ''}`;
-                      const segs = buildJobSegments(task, visibleDays, colWidth, staffColor);
-                      return (
-                        <div key={task.id} className="flex border-b border-slate-800/40">
-                          <div
-                            className="shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 bg-slate-900"
-                            style={{ width: JOB_COL_WIDTH }}
-                            draggable={!readOnly}
-                            onDragStart={() => setDragTaskId(task.id)}
-                            onDragEnd={() => { setDragTaskId(null); setDropHint(null); }}
-                            onClick={() => onEditTask(task)}
-                            title={tip}
-                          >
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <FlaskConical size={10} className="text-violet-400 shrink-0" />
-                              <span className="text-[11px] font-semibold text-violet-200 truncate">{task.name}</span>
-                              {conflict && <AlertTriangle size={10} className="text-red-400 shrink-0" />}
-                            </div>
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="text-[10px] text-slate-400 truncate">{person ? person.name : 'Anyone qualified'} · {task.hoursTotal}h</span>
-                            </div>
-                          </div>
-                          <div className="relative" style={{ height: laneH, width: visibleDays.length * colWidth }}>
-                            {cells()}
-                            {segs.map((sg, si) => (
-                              <div
-                                key={si}
-                                draggable={!readOnly}
-                                onDragStart={() => setDragTaskId(task.id)}
-                                onDragEnd={() => { setDragTaskId(null); setDropHint(null); }}
-                                onClick={() => onEditTask(task)}
-                                title={tip}
-                                className="absolute cursor-pointer"
-                                style={{
-                                  left: sg.left + 1,
-                                  width: Math.max(4, sg.width - 2),
-                                  top: 7,
-                                  height: laneH - 14,
-                                  background: sg.grey >= 0.999
-                                    ? COMPLETE_GREY
-                                    : sg.grey > 0
-                                    ? `linear-gradient(90deg, ${COMPLETE_GREY} ${(sg.grey * 100).toFixed(1)}%, ${sg.color} ${(sg.grey * 100).toFixed(1)}%)`
-                                    : sg.color,
-                                  borderRadius: 4,
-                                  opacity: 0.85,
-                                  border: conflict ? '1.5px solid #ef4444' : '1.5px dashed #a78bfa',
-                                }}
-                              />
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
+                    {equipLanes.map((lane) => (lane.kind === 'job' ? renderJobLane(lane.job) : renderTaskLane(lane.task)))}
                   </div>
                 );
               })}
@@ -3568,10 +3606,10 @@ function ScheduleView({
               </div>
             </div>
           )}
-          {secondStaffUnmetJobs.length > 0 && (
+          {(secondStaffUnmetJobs.length > 0 || secondStaffUnmetTasks.length > 0) && (
             <div className="flex-1 min-w-0 border border-amber-900 bg-amber-950/20 rounded-lg p-3">
               <h3 className="text-xs font-semibold text-amber-300 uppercase tracking-wide mb-2 flex items-center gap-1.5">
-                <Users size={13} /> Training partner not paired ({secondStaffUnmetJobs.length})
+                <Users size={13} /> Training partner not paired ({secondStaffUnmetJobs.length + secondStaffUnmetTasks.length})
               </h3>
               <div className="space-y-1.5">
                 {secondStaffUnmetJobs.map((j) => (
@@ -3579,6 +3617,16 @@ function ScheduleView({
                     {j.name}
                     <span className="block text-slate-500">
                       wanted {staff.find((s) => s.id === j.secondStaffId)?.name || 'a second person'} alongside them, not free for all of it — job is scheduled fine, just missing its second person
+                    </span>
+                  </button>
+                ))}
+                {/* Same signal, for tasks — see secondStaffUnmetTasks in the
+                    main component. */}
+                {secondStaffUnmetTasks.map((t) => (
+                  <button key={t.id} onClick={() => onEditTask(t)} className="w-full text-left text-xs bg-slate-900/60 hover:bg-slate-900 rounded px-2 py-1.5 text-slate-300">
+                    {t.name}
+                    <span className="block text-slate-500">
+                      wanted {staff.find((s) => s.id === t.secondStaffId)?.name || 'a second person'} alongside them, not free for all of it — task is scheduled fine, just missing its second person
                     </span>
                   </button>
                 ))}
@@ -4029,6 +4077,12 @@ function TaskModal({ task, processes, staff, equipment = [], procedures = [], pr
   const [equipmentId, setEquipmentId] = useState(task?.assignment?.equipmentId || '');
   const [startDate, setStartDate] = useState(task?.assignment?.startDate || '');
   const [staffId, setStaffId] = useState(task?.staffId || '');
+  // Same field, same rule as job.secondStaffId (see "Two-person jobs" in
+  // scheduler/CLAUDE.md): a second person riding along on the task at the
+  // same time, most often a trainee — only offered once a primary is
+  // named, no sign-off required, their time is still blocked for the
+  // task's days.
+  const [secondStaffId, setSecondStaffId] = useState(task?.secondStaffId || '');
   const [projectId, setProjectId] = useState(task?.projectId || '');
   const [notes, setNotes] = useState(task?.notes || '');
 
@@ -4052,6 +4106,7 @@ function TaskModal({ task, processes, staff, equipment = [], procedures = [], pr
       dueDate,
       projectId: projectId || null,
       staffId: staffId || null,
+      secondStaffId: secondStaffId || null,
       notes,
       status: task?.status || 'active',
       completedDate: task?.completedDate || null,
@@ -4113,6 +4168,25 @@ function TaskModal({ task, processes, staff, equipment = [], procedures = [], pr
           </select>
         </Field>
       </div>
+      {/* A second person on the task at the same time — most often a
+          trainee shadowing whoever's assigned above. Same rule as
+          JobModal's own Training partner field: only offered once a
+          primary is named, offers every OTHER staff member (not just
+          qualifiedStaff — this is exactly the case where the person
+          genuinely isn't signed off yet), no sign-off required. */}
+      {staffId && (
+        <Field label="Training partner (optional)">
+          <select className={inputCls} value={secondStaffId} onChange={(e) => setSecondStaffId(e.target.value)}>
+            <option value="">No one else — just {staff.find((s) => s.id === staffId)?.name || 'this person'}</option>
+            {staff.filter((s) => s.id !== staffId).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <p className="text-xs text-slate-500 mt-1">
+            {secondStaffId
+              ? `${staff.find((s) => s.id === secondStaffId)?.name || 'This person'} is also blocked out for the task's days, alongside ${staff.find((s) => s.id === staffId)?.name || 'the assigned person'} — no sign-off on ${process || 'the process'} required.`
+              : 'For training: a second person present the whole time, without needing to be signed off yet.'}
+          </p>
+        </Field>
+      )}
       <p className="text-xs text-slate-500 -mt-2 mb-3">
         {equipmentId && startDate
           ? `Pinned to ${equipment.find((e) => e.id === equipmentId)?.name || 'this equipment'} starting ${fmtDate(startDate)} on Save, same as a job pinned from its own modal — won't move until this is changed.`
@@ -5990,7 +6064,11 @@ function taskToJobUnit(t) {
     parallelProcessing: false,
     preferredEquipmentId: null,
     staffId: t.staffId || null,
-    secondStaffId: null,
+    // Same field, same all-or-nothing rule as a job's (see
+    // attachSecondStaff in scheduler.js) — only meaningful alongside a
+    // primary staffId, only checked once the primary's own placement
+    // already exists.
+    secondStaffId: t.secondStaffId || null,
     lockedEquipmentId: null,
     tags: [],
     assignment: t.assignment ? { ...t.assignment } : null,
