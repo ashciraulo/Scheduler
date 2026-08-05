@@ -20,11 +20,16 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.waitForTimeout(500);
   const zoomLabel = page.locator('span.tabular-nums');
   const zoomButtons = zoomLabel.locator('xpath=..').locator('button');
+  // Compared against the default read fresh, not a hardcoded literal — the
+  // default itself is what #50/#59-era work (see scheduler/CLAUDE.md) tunes,
+  // so a literal here would silently start asserting nothing the moment two
+  // +20% clicks happen to land back on whatever number used to be default.
+  const zoomDefault = await zoomLabel.innerText();
   await zoomButtons.nth(1).click();
   await zoomButtons.nth(1).click();
   await page.waitForTimeout(150);
   const zoomBefore = await zoomLabel.innerText();
-  check('#50 zoom actually changed from the default', zoomBefore !== '100%', zoomBefore);
+  check('#50 zoom actually changed from the default', zoomBefore !== zoomDefault, `${zoomDefault} -> ${zoomBefore}`);
 
   await page.click('nav >> text=Job Backlog');
   await page.waitForTimeout(300);

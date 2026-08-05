@@ -111,14 +111,16 @@ export default async function run({ page, check, errors, baseUrl }) {
   const zoomOut = zoomBox.locator('button').first();
   const zoomLabel = zoomBox.locator('span');
   const initialZoom = await zoomLabel.innerText();
-  await zoomOut.click();
+  // The default (60%) sits exactly ONE step above the floor (40%) — unlike
+  // the old default/floor pair, which were two steps apart — so a single
+  // click already lands on the (now disabled) floor button; a second click
+  // here would hang waiting for it to become clickable again.
   await zoomOut.click();
   await page.waitForTimeout(150);
   const zoomedOut = await zoomLabel.innerText();
   check('#27 zooming out shrinks the reported zoom level', zoomedOut !== initialZoom && parseInt(zoomedOut) < parseInt(initialZoom),
         `${initialZoom} -> ${zoomedOut}`);
   const zoomIn = zoomBox.locator('button').nth(1);
-  await zoomIn.click();
   await zoomIn.click();
   await page.waitForTimeout(150);
   const zoomedBack = await zoomLabel.innerText();

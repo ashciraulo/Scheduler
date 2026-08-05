@@ -603,7 +603,7 @@ show through). The per-equipment name label was already using this
 vertically on purpose, only its horizontal position is pinned within its own
 row).
 
-Zoom (`colWidth`/`laneH` scaled by a `zoom` state, 60%–160% in 20% steps, via
+Zoom (`colWidth`/`laneH` scaled by a `zoom` state, 40%–160% in 20% steps, via
 +/− buttons next to the range-length picker) exists specifically so a
 fully-booked machine's stacked jobs don't push the next piece of equipment
 off-screen — without it, dragging a job between two machines can require
@@ -614,6 +614,18 @@ scrolling one of them out of view first. `zoom` lives in the main
 reset back to 100% each time you came back to the Schedule tab. Still not
 saved to storage across a reload; a viewing preference for the session, not
 schedule data.
+
+**Default is 60%, not 100%, and `ZOOM_MIN` (40%) sits below it, not AT it.**
+60% used to be the floor itself — the most zoomed-out the grid could ever
+get, which happened to also be the level most useful as a everyday default
+for seeing a fully-booked shop without scrolling. That meant "the default"
+and "as far out as you can go" were the same number: there was no way to
+zoom out any further when even 60% still didn't fit everything on screen,
+only in. `ZOOM_MIN` dropping to 40% makes 60% a genuine midpoint, one step
+away from the floor in either direction, same as it always was from the
+ceiling. If either bound ever moves again, keep the default strictly
+between them — collapsing the two back together reintroduces the same
+one-directional trap.
 
 **Job-name column width (#35)**: `JOB_COL_WIDTH` (320px, up from the original
 240) is a single constant reused everywhere the column's width has to agree
@@ -666,6 +678,46 @@ nullable `staff.color`. `ScheduleView`'s `staffColor` lookup prefers it and
 only falls back to the palette-by-index when it's unset — `normalizeStaff`
 already spread unknown fields through, so no migration was needed for
 existing records.
+
+**Due-this-month highlight**: a job whose `effectiveDueDate` (department due
+date if set, else the client one — same value everything else on this page
+already prioritises by) falls within the *current calendar month* gets its
+name card tinted and its timeline bar bordered in `DUE_THIS_MONTH_COLOR`
+(`#8B5CF6`, a violet distinct from every other colour already meaningful on
+a job tile) — computed per `renderJobLane` call as `dueDate.slice(0, 7) ===
+todayIso.slice(0, 7)`. The point is telling apart "due this month" from
+"merely scheduled in whatever window happens to be on screen right now" —
+without it, a job scheduled today that isn't due for another four months
+reads identically to one that's genuinely due in the next few weeks.
+
+Read off `parent`, not the per-tile `job` — a split job's dates live at the
+job level only (see "Splitting a job"), so a part has no `dueDate`/
+`departmentDueDate` of its own; `renderJobLane` already derives `jobNo` the
+same way for the same reason. Jobs only — tasks (below) don't carry a
+client-facing due date in the same sense, and weren't asked for.
+
+**Colour choice was deliberate, not arbitrary.** Amber/coral is already the
+app's general-purpose accent (pins, warnings, the various amber markers);
+red means conflict; sky and orange are already claimed for equipment-type
+colouring (`EQUIP_TYPE_STYLE`) and sky doubles as the parallel-processing
+icon on this very same tile. Reusing any of those would have blurred into
+an existing meaning rather than adding a new, orthogonal one. Applied via
+inline style (the timeline bar's border) and a dedicated `bg-violet-500/15`
+class (the name cell), never an inline `style` background layered on top of
+`bg-slate-900` — that class's background is set with `!important` by
+`index.css`'s "Company light theme" remap, which beats any inline style
+regardless of source order, so swapping the whole class is the only way to
+actually change what renders. `bg-violet-500/15` has its own light-theme
+mapping in `index.css` for the same reason `bg-slate-950/30` needed one
+(see "The timeline includes the past" further down) — an unmapped opacity
+variant falls through to raw Tailwind colours rather than the
+calculator-style palette the rest of the app uses.
+
+On the timeline bar itself, precedence is conflict (red) > due-this-month
+(violet) > pinned (coral) > default — a real scheduling problem still wins
+over everything, and due-this-month is checked ahead of the plain pinned
+border since pinned already has its own `Pin` icon in the name cell and
+doesn't need the border too.
 
 ### Blocking a piece of equipment out for a day (#53)
 

@@ -1401,7 +1401,10 @@ export default function WeldingScheduler() {
   // rangeLength do (#50): ScheduleView unmounts when you switch tabs, so
   // state local to it resets every time you come back. Still not saved to
   // storage — a viewing preference for the session, not schedule data.
-  const [zoom, setZoom] = useState(1);
+  // 60% (ZOOM_MIN in ScheduleView) is the default, not 100% — a fully-booked
+  // shop reads better zoomed out from the start, with room to zoom in either
+  // direction from there rather than only ever being able to zoom further out.
+  const [zoom, setZoom] = useState(0.6);
   const visibleDays = useMemo(
     () => workingDays.slice(rangeStart, rangeStart + rangeLength),
     [workingDays, rangeStart, rangeLength]
@@ -3143,6 +3146,18 @@ export default function WeldingScheduler() {
 const STAFF_PALETTE = ['#3E6B8B', '#2F8F86', '#C4634A', '#7E6BA8', '#C98A3E', '#5B8C5A', '#4E7CA1', '#B5677F', '#6A7F8C', '#8A9A3F'];
 const UNASSIGNED_COLOR = '#475569';
 const COMPLETE_GREY = '#64748b';
+// A job due (effectiveDueDate — department due date if set, else the client
+// one) within the current calendar month gets its name card and timeline bar
+// picked out in this colour, so it reads apart from other work merely
+// scheduled during the same window that isn't actually due yet. Deliberately
+// its own hue, not a reused one: amber/coral is already the app's general-
+// purpose accent (pins, warnings, markers), red means conflict, and sky/
+// orange are already claimed for equipment-type colouring (and sky doubles
+// as the parallel-processing icon on this same tile) — reusing any of them
+// here would blur into an existing meaning instead of adding a new one.
+// Applied via inline style/class, same as the conflict/pinned colours below,
+// so it renders identically regardless of index.css's light-theme remap.
+const DUE_THIS_MONTH_COLOR = '#8B5CF6';
 
 // Positioned colour segments for one job's bar across the visible window. Each
 // day's entries are laid out proportionally; a gap day inside the job's own
@@ -3196,7 +3211,11 @@ function ScheduleView({
   // switching tabs and back, same as rangeStart/rangeLength — still not
   // saved to storage, a viewing preference for the session, not schedule
   // data.
-  const ZOOM_MIN = 0.6, ZOOM_MAX = 1.6, ZOOM_STEP = 0.2;
+  // ZOOM_MIN sits below the 60% default (set in WeldingScheduler's own
+  // useState) specifically so it's a genuine midpoint, zoomable both further
+  // out and further in — it used to BE the minimum, which meant "default"
+  // and "as far out as you can go" were the same thing.
+  const ZOOM_MIN = 0.4, ZOOM_MAX = 1.6, ZOOM_STEP = 0.2;
   const colWidth = Math.round((displayMode ? 92 : 76) * zoom);
   const laneH = Math.round((displayMode ? 56 : 46) * zoom);
   // 240px cut most job names off mid-word — job number, staff colour dots and
@@ -3446,6 +3465,17 @@ function ScheduleView({
                 function renderJobLane(job) {
                   const parent = job._parentJob || job;
                   const jobNo = parent.bcJobNo || '—';
+                  // Same effectiveDueDate the scheduler itself prioritises
+                  // by (department due date if set, else the client one),
+                  // not the raw job.dueDate — so the highlight tracks
+                  // whatever date is actually driving urgency, consistent
+                  // with the Backlog's Due column and "Needs scheduling"
+                  // sort. Read off `parent`, not `job`: a split job's
+                  // dates live at the job level only (see "Splitting a
+                  // job") — a part has no dueDate/departmentDueDate of its
+                  // own to read.
+                  const jobDueDate = effectiveDueDate(parent);
+                  const dueThisMonth = !!jobDueDate && jobDueDate.slice(0, 7) === todayIso.slice(0, 7);
                   // Includes secondStaffId (a paired training partner —
                   // see scheduler.js's attachSecondStaff) alongside the
                   // primary on purpose: they're genuinely both working
@@ -3477,7 +3507,7 @@ function ScheduleView({
                   // like any other two people who happened to hand off
                   // the same job — this only needs to flag the miss.
                   const secondUnmet = job.assignment.secondStaffUnmet;
-                  const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${lockedEquip ? ' · equipment locked' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}${secondUnmet ? ' · training partner not paired — review' : ''}`;
+                  const tip = `${jobNo} · ${job.name} · ${job.hoursTotal}h · ${staffNames}${manualStaff ? ' (assigned manually)' : ''}${lockedEquip ? ' · equipment locked' : ''}${job.parallelProcessing ? ' · parallel processing allowed' : ''}${conflict ? ' · OVERBOOKED' : ''}${preferredMissed ? ' · not on preferred equipment — review' : ''}${secondUnmet ? ' · training partner not paired — review' : ''}${dueThisMonth ? ' · due this month' : ''}`;
                   const segs = buildJobSegments(job, visibleDays, colWidth, staffColor);
                   // A job is being dragged over THIS row's name cell,
                   // about to take its slot on drop (#55) — distinct from
@@ -3490,15 +3520,28 @@ function ScheduleView({
                   return (
                     <div key={job.id} className="flex border-b border-slate-800/40">
                       <div
-                        // A background tint, not a border, for the hint —
+                        // A background tint, not a border, for both the
+                        // drag hint and the due-this-month highlight below —
                         // `border-r border-slate-800` on this element sets
                         // `border-color` (all four sides) with `!important`
                         // in index.css's light-theme remap, which would
                         // silently steamroll any `border-t-*` colour class
                         // added alongside it regardless of source order.
                         // `bg-amber-500/20` is the same already-mapped hint
-                        // colour the day cells below already use.
-                        className={`shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 ${isReorderTarget ? 'bg-amber-500/20' : 'bg-slate-900'}`}
+                        // colour the day cells below already use. This has
+                        // to stay a CLASS swap, not an inline `style`
+                        // background layered on top of `bg-slate-900` —
+                        // index.css's light-theme remap sets that class's
+                        // background with `!important`, which beats any
+                        // inline style regardless of source order, so a
+                        // conditional class is the only way to actually
+                        // change what renders. `bg-violet-500/15` has its
+                        // own light-theme mapping in index.css for the same
+                        // reason. The drag hint still wins when both are
+                        // true — it's live feedback about where a drop will
+                        // land, more urgent in the moment than a static
+                        // due-date highlight.
+                        className={`shrink-0 px-3 py-0.5 border-r border-slate-800 flex flex-col justify-center min-w-0 cursor-pointer sticky left-0 z-10 ${isReorderTarget ? 'bg-amber-500/20' : dueThisMonth ? 'bg-violet-500/15' : 'bg-slate-900'}`}
                         style={{ width: JOB_COL_WIDTH }}
                         // Same drag handle as the timeline bar itself
                         // (#51) — reassigning equipment/day by dragging
@@ -3584,7 +3627,21 @@ function ScheduleView({
                                 : sg.color,
                               borderRadius: 4,
                               opacity: 0.92,
-                              border: conflict ? '1.5px solid #ef4444' : job.assignment.pinned ? '1.5px solid #E0523C' : '1px solid rgba(37,54,70,.35)',
+                              // conflict (a real scheduling problem) still
+                              // wins over everything; due-this-month is
+                              // deliberately checked ahead of the plain
+                              // pinned border — pinned already has its own
+                              // Pin icon in the name cell, so it doesn't
+                              // need the border too, and due-this-month is
+                              // the more useful thing to see at a glance
+                              // here.
+                              border: conflict
+                                ? '1.5px solid #ef4444'
+                                : dueThisMonth
+                                ? `1.5px solid ${DUE_THIS_MONTH_COLOR}`
+                                : job.assignment.pinned
+                                ? '1.5px solid #E0523C'
+                                : '1px solid rgba(37,54,70,.35)',
                             }}
                           />
                         ))}

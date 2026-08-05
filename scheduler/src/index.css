@@ -33,6 +33,10 @@ body {
 .bg-amber-500\/10 { background-color: #FBEEEB !important; }
 .bg-amber-500\/20 { background-color: #F7DED8 !important; }
 .bg-amber-950\/20 { background-color: #FBF1EE !important; }
+/* Schedule view: a job due within the current month — its own accent,
+   distinct from amber/coral (already the general-purpose highlight) and
+   red (conflict). See DUE_THIS_MONTH_COLOR in WeldingScheduler.jsx. */
+.bg-violet-500\/15 { background-color: #EFEAFB !important; }
 .bg-emerald-900\/40 { background-color: #E5F0EA !important; }
 .bg-red-950 { background-color: #F7E4E2 !important; }
 .bg-red-950\/40 { background-color: #FAECEA !important; }

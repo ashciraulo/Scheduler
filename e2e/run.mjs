@@ -38,6 +38,7 @@ import secondPersonHours from './specs/second-person-hours.mjs';
 import efficiencyAndLabourCost from './specs/efficiency-and-labour-cost.mjs';
 import nestedModalScrollLock from './specs/nested-modal-scroll-lock.mjs';
 import jobProcedureDirect from './specs/job-procedure-direct.mjs';
+import scheduleZoomAndDueHighlight from './specs/schedule-zoom-and-due-highlight.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -75,6 +76,7 @@ const SUITES = [
   ['efficiency + average labour cost — blended job/task costing', efficiencyAndLabourCost],
   ['nested modal scroll lock — page scroll stays correct through nested/confirm dialogs', nestedModalScrollLock],
   ['job procedure — assignable directly, not only via a template', jobProcedureDirect],
+  ['schedule zoom default + due-this-month highlight', scheduleZoomAndDueHighlight],
 ];
 
 const only = process.argv[2]; // optional substring filter
