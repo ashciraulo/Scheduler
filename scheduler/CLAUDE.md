@@ -1351,6 +1351,34 @@ Saving **replaces every entry for that date** with what the dialog showed, so
 clearing a row to blank removes its entry rather than leaving a stale one.
 Entries are keyed by `jobId`, not by assignment, so a day's work stays
 attached to the right job when the plan it was entered against later moves.
+
+**A row for a job/task with a paired training partner
+(`secondStaffId` — see "Two-person jobs") gets a second, independent hours
+field**, not a single figure shared between both people. The example that
+drove this: a primary spends 20h on a job, the trainee rides along the
+whole time but only actually works 4h of it — the schedule's own duration
+stays 20h either way (`secondStaffId` never affects placement, only who
+else's calendar is blocked), but the two people's LOGGED hours are
+genuinely different numbers that both need to survive into the R&D/Quality
+reports as their own rows. Mechanically this is still exactly one row per
+`(jobId, date)` per person — TWO `wf_timelog` entries, one keyed to
+`job.staffId` and one to `job.secondStaffId`, both written by the same
+Save. The row-building code has to pick the *right* existing entry back
+apart on reopen (`existing.find(x => x.jobId === jobId && x.staffId !==
+secondStaffId)` for the primary, `... === secondStaffId` for the second)
+rather than just grabbing the first match by `jobId` alone, now that two
+can share one — getting this backwards would show the trainee's hours in
+the primary's box and vice versa. Who the second person IS is never
+editable in this modal — that's the pairing set on the job/task itself
+(JobModal/TaskModal); this only ever asks how many of the primary's hours
+they were actually part of. Not shown at all for a split job — the pairing
+lives per-part there (`part.secondStaffId`), so there's no single
+`job.secondStaffId` at the top level for this modal to key a second field
+off, and it deliberately isn't worth flattening parts back apart just for
+this. **`loggedHours()`/report totals sum both entries** — a paired job's
+"hours logged" figure becomes total labour-hours across both people (24 in
+the example above), not wall-clock duration; that's the intended reading
+for a cost-tracking figure, not an inflation bug.
 **The timeline includes the past.** `workingDays` starts `HISTORY_DAYS` (90)
 *behind* today and runs to the forward `HORIZON_DAYS` horizon; `todayIdx` is
 today's index in it, and `rangeStart` opens there. It used to begin at today,
@@ -1490,6 +1518,13 @@ used often enough that the extra guidance would earn its keep.
 directly.** Everything above applies unchanged; the one place it doesn't
 extend is `BackfillTaskModal`, which has no `assignment` to pair a second
 person's calendar into at all.
+
+**The two people's actual hours are logged separately, not assumed equal**
+— see "The daily hours log" further down for `TimeLogModal`'s per-person
+hours fields. `secondStaffId` itself only ever governs placement (whose
+calendar gets blocked, for how many days); how many of those hours the
+second person genuinely worked is a completely separate question, answered
+after the fact in the daily log, not here.
 
 ### Rework — a linked follow-up job (Quality tab)
 

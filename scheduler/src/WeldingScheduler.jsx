@@ -825,6 +825,16 @@ function ReworkModal({ job, onCancel, onConfirm }) {
    Opens on a date, lists the jobs the schedule expected that day
    (so the common case is confirming numbers, not hunting for jobs),
    and lets any other active job be added for when reality differed.
+
+   A row for a job/task with a paired training partner (secondStaffId)
+   gets a second, independent hours field — see the "Two-person jobs" note
+   on separately-logged hours in scheduler/CLAUDE.md for why: a trainee
+   riding along for the whole block doesn't mean they necessarily worked
+   the whole block, and the R&D/Quality reports need each person's own
+   figure to attribute hours and cost correctly, not one blended total.
+   Who the second person IS isn't editable here — that's the pairing set
+   on the job/task itself (JobModal/TaskModal); this only ever asks how
+   many of the primary's hours they were actually part of.
    ============================================================ */
 
 function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
@@ -847,8 +857,22 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
     existing.forEach((e) => plannedIds.add(e.jobId));
 
     setRows([...plannedIds].map((jobId) => {
-      const e = existing.find((x) => x.jobId === jobId);
       const job = activeJobs.find((j) => j.id === jobId);
+      // A split job's pairing lives per-part, not on the job as a whole
+      // (see "Two-person jobs" in scheduler/CLAUDE.md), so there's no
+      // single secondStaffId to attribute a row's second entry to here —
+      // this deliberately falls back to the single-entry behaviour below
+      // for a split job, same as one with no pairing at all.
+      const secondStaffId = job && !Array.isArray(job.parts) ? job.secondStaffId : null;
+      // The primary's entry is "whichever one isn't the paired second
+      // person's", not just the first match — with a pairing active there
+      // can be two entries for this job on this date, and picking blindly
+      // would sometimes hand the trainee's own hours back as if they were
+      // the primary's.
+      const e = secondStaffId
+        ? existing.find((x) => x.jobId === jobId && x.staffId !== secondStaffId)
+        : existing.find((x) => x.jobId === jobId);
+      const e2 = secondStaffId ? existing.find((x) => x.jobId === jobId && x.staffId === secondStaffId) : null;
       const units = job && Array.isArray(job.parts) && job.parts.length ? job.parts : job ? [job] : [];
       const planned = units.reduce((s, u) =>
         s + (u.assignment?.days || []).filter((d) => d.date === day).reduce((t, d) => t + (d.hours || 0), 0), 0);
@@ -860,12 +884,15 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
         staffId: e ? (e.staffId || '') : '',
         note: e ? (e.note || '') : '',
         id: e ? e.id : uid('tl'),
+        secondStaffId,
+        secondHours: e2 ? String(e2.hours) : '',
+        secondId: e2 ? e2.id : uid('tl'),
       };
     }).sort((a, b) => b.planned - a.planned || a.name.localeCompare(b.name)));
   }, [day, entries, activeJobs]);
 
   const setRow = (jobId, patch) => setRows((rs) => rs.map((r) => (r.jobId === jobId ? { ...r, ...patch } : r)));
-  const total = Math.round(rows.reduce((s, r) => s + (Number(r.hours) || 0), 0) * 100) / 100;
+  const total = Math.round(rows.reduce((s, r) => s + (Number(r.hours) || 0) + (Number(r.secondHours) || 0), 0) * 100) / 100;
   const addable = activeJobs.filter((j) => !rows.some((r) => r.jobId === j.id));
 
   return (
@@ -908,6 +935,19 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
                     placeholder="0"
                     onChange={(e) => setRow(r.jobId, { hours: e.target.value })}
                   />
+                  {/* The training partner's own hours, independent of the
+                      primary's — see the modal's header comment. Not shown
+                      at all unless the job/task actually has one paired. */}
+                  {r.secondStaffId && (
+                    <input
+                      type="number" min={0} step={0.25}
+                      className="w-20 mt-1 bg-slate-800 border border-slate-700 rounded text-xs px-1.5 py-1 text-slate-100"
+                      value={r.secondHours}
+                      placeholder="0"
+                      title={`${staff.find((s) => s.id === r.secondStaffId)?.name || 'Training partner'}'s hours`}
+                      onChange={(e) => setRow(r.jobId, { secondHours: e.target.value })}
+                    />
+                  )}
                 </td>
                 <td className="px-3 py-2">
                   <select
@@ -918,6 +958,15 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
                     <option value="">—</option>
                     {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
+                  {/* Who the second person is comes from the job/task's own
+                      pairing (JobModal/TaskModal), not editable here — this
+                      is purely a label lining up with their hours field
+                      above. */}
+                  {r.secondStaffId && (
+                    <div className="w-[130px] mt-1 text-[11px] text-slate-400 truncate" title={`${staff.find((s) => s.id === r.secondStaffId)?.name || 'Training partner'} (training)`}>
+                      {staff.find((s) => s.id === r.secondStaffId)?.name || 'Training partner'} <span className="text-slate-600">(training)</span>
+                    </div>
+                  )}
                 </td>
                 <td className="px-3 py-2">
                   <input
@@ -952,7 +1001,11 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
             onClick={() => {
               const j = activeJobs.find((x) => x.id === addId);
               if (!j) return;
-              setRows((rs) => [...rs, { jobId: j.id, name: j.name, planned: 0, hours: '', staffId: '', note: '', id: uid('tl') }]);
+              const secondStaffId = !Array.isArray(j.parts) ? j.secondStaffId : null;
+              setRows((rs) => [...rs, {
+                jobId: j.id, name: j.name, planned: 0, hours: '', staffId: '', note: '', id: uid('tl'),
+                secondStaffId, secondHours: '', secondId: uid('tl'),
+              }]);
               setAddId('');
             }}
           ><Plus size={14} /> Add</button>
@@ -965,12 +1018,19 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
           <button className={btnGhost} onClick={onClose}>Cancel</button>
           <button
             className={btnPrimary}
-            onClick={() => onSave(day, rows.map((r) => ({
-              id: r.id, jobId: r.jobId, date: day,
-              hours: Number(r.hours) || 0,
-              staffId: r.staffId || null,
-              note: (r.note || '').trim(),
-            })))}
+            onClick={() => {
+              const built = [];
+              rows.forEach((r) => {
+                built.push({ id: r.id, jobId: r.jobId, date: day, hours: Number(r.hours) || 0, staffId: r.staffId || null, note: (r.note || '').trim() });
+                // The second entry rides on the same note and date, its own
+                // id/staffId/hours — saveTimeLog (main component) filters
+                // out anything that ends up at 0h, same as the primary.
+                if (r.secondStaffId) {
+                  built.push({ id: r.secondId, jobId: r.jobId, date: day, hours: Number(r.secondHours) || 0, staffId: r.secondStaffId, note: (r.note || '').trim() });
+                }
+              });
+              onSave(day, built);
+            }}
           ><Check size={14} /> Save log</button>
         </div>
       </div>

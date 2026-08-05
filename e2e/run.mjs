@@ -34,6 +34,7 @@ import reworkQuality from './specs/rework-quality.mjs';
 import rdProjectsAndTasks from './specs/rd-projects-and-tasks.mjs';
 import reportsAndBackfill from './specs/reports-and-backfill.mjs';
 import taskOrderingAndTrainingPartner from './specs/task-ordering-and-training-partner.mjs';
+import secondPersonHours from './specs/second-person-hours.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -67,6 +68,7 @@ const SUITES = [
   ['R&D projects and tasks — non-job schedulable items sharing the engine', rdProjectsAndTasks],
   ['reports and backfill — Quality/R&D exports and logging past work directly', reportsAndBackfill],
   ['task ordering + training partner — schedule-order lanes and two-person tasks', taskOrderingAndTrainingPartner],
+  ['second-person hours — a training partner\'s own hours, logged separately', secondPersonHours],
 ];
 
 const only = process.argv[2]; // optional substring filter
