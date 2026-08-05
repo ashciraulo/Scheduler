@@ -1518,6 +1518,37 @@ the *procedure itself* costs to run, independent of any one job's
 setup/breakdown share, and blending it there would misrepresent the
 procedure's own numbers.
 
+### A job's procedure is directly assignable, not just inherited from a template
+
+`job.procedureId` — what `jobCost()`/`hourlyRate()` actually price against —
+used to only ever reach a job by way of `applyTemplate` copying it across
+from a picked template. A custom (one-off) job, or any job whose template
+never had a procedure set on it, had no way to get cost tracking at all
+short of inventing a template purely to carry the procedure through.
+
+`JobModal`'s Value & costing section now has its own "Procedure — for
+cost" select, filtered to `procedures.filter(p => p.process === process)`
+same as `TaskModal`/`TemplateModal`'s own procedure pickers — **always
+present, not gated on `custom` or "no template"**. A template still supplies
+a sensible starting point via `applyTemplate` (unchanged — it copies
+`template.procedureId` across exactly like tags/hours), but from there
+`procedureId` is an ordinary, directly-editable job field like any other:
+picking a different procedure in the modal only ever writes to the job,
+never back to the template it came from, the same one-way relationship
+`tags`/`hoursPerUnit`/every other template-seeded field already has.
+
+**Changing the process clears an incompatible procedure**, same reasoning
+as `TaskModal`'s and `TemplateModal`'s own process selects: a procedure
+belongs to exactly one process, so carrying the old `procedureId` across a
+process change would silently price the job against the wrong process's
+rate. The job-level process select (`{(parts || custom) && (...)}`, shown
+whenever the job has no template to derive it from) now validates
+`procedureId` against the new process on every change and blanks it if it
+no longer matches — mirroring `TaskModal`'s unconditional clear rather than
+`TemplateModal`'s auto-pick-first, since "no procedure selected yet" is a
+perfectly normal state for a job to be in and there's no reason to guess
+one on the user's behalf.
+
 ## Assigning staff by hand
 
 A job's people are normally derived by the scheduler and shown, not chosen. The

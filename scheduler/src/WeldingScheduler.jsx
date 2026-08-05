@@ -5434,7 +5434,17 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
 
           {(parts || custom) && (
             <Field label="Welding / coating process">
-              <select className={inputCls} value={process} onChange={(e) => setProcess(e.target.value)}>
+              <select
+                className={inputCls} value={process}
+                onChange={(e) => {
+                  const nv = e.target.value; setProcess(nv);
+                  // A procedure belongs to one process — carrying the old
+                  // one across a process change would price the job against
+                  // the wrong process's rate, same reasoning as TaskModal's
+                  // process select.
+                  if (!procedures.some((p) => p.id === procedureId && p.process === nv)) setProcedureId('');
+                }}
+              >
                 {processes.map((p) => <option key={p} value={p}>{p}</option>)}
               </select>
             </Field>
@@ -5691,6 +5701,22 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
           </Section>
 
           <Section title="Value & costing">
+            {/* Independent of the Template section above — templates set this
+                as a starting point (applyTemplate copies template.procedureId
+                across, same as tags/hours), but it's an ordinary field from
+                there, editable regardless of whether the job has a template
+                at all. A custom (one-off) job, or a template-less shop that
+                never uses templates, previously had no way to get a
+                procedureId onto a job at all, which meant jobCost() always
+                came back null for it — cost tracking silently required a
+                template even though nothing else about it does. */}
+            <Field label="Procedure — for cost (optional)">
+              <select className={inputCls} value={procedureId} onChange={(e) => setProcedureId(e.target.value)} disabled={!process}>
+                <option value="">None</option>
+                {procedures.filter((p) => p.process === process).map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p, costCentres))}/hr</option>)}
+              </select>
+              {!process && <p className="text-xs text-slate-500 mt-1">Pick a process first — a procedure is specific to one.</p>}
+            </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Total job value ($)">
                 <input type="number" min={0} step={1} className={inputCls} value={totalValue} onChange={(e) => setTotalValue(e.target.value)} />

@@ -37,6 +37,7 @@ import taskOrderingAndTrainingPartner from './specs/task-ordering-and-training-p
 import secondPersonHours from './specs/second-person-hours.mjs';
 import efficiencyAndLabourCost from './specs/efficiency-and-labour-cost.mjs';
 import nestedModalScrollLock from './specs/nested-modal-scroll-lock.mjs';
+import jobProcedureDirect from './specs/job-procedure-direct.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -73,6 +74,7 @@ const SUITES = [
   ['second-person hours — a training partner\'s own hours, logged separately', secondPersonHours],
   ['efficiency + average labour cost — blended job/task costing', efficiencyAndLabourCost],
   ['nested modal scroll lock — page scroll stays correct through nested/confirm dialogs', nestedModalScrollLock],
+  ['job procedure — assignable directly, not only via a template', jobProcedureDirect],
 ];
 
 const only = process.argv[2]; // optional substring filter
