@@ -103,8 +103,11 @@ export default async function run({ page, check, errors, baseUrl }) {
   const qualityText = await page.locator('main').innerText();
   check('the Quality tab shows the rework job', qualityText.includes('Bracket Weld Batch 12 — Rework'));
   check('the Quality tab shows the linked original', qualityText.includes('Bracket Weld Batch 12'));
-  // 2h * $50/hr labour = $100.00
-  check('the Quality tab calculates cost from the procedure', qualityText.includes('100.00'), qualityText);
+  // 2h × $50/hr labour, blended at the default 75% efficiency (no average
+  // labour cost seeded) — see "Costing: efficiency and average labour
+  // cost" in scheduler/CLAUDE.md — so 2h × $37.50/hr = $75.00, not a flat
+  // 2h × $50.
+  check('the Quality tab calculates cost from the procedure', qualityText.includes('75.00'), qualityText);
 
   // ---- rework badge shows on the Backlog ----
   await page.click('nav >> text=Job Backlog');

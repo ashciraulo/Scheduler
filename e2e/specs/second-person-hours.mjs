@@ -121,10 +121,13 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('the report has exactly two rows for the paired task — one per person', reportRows.length === 2, JSON.stringify(reportRows));
   const alexRow = reportRows.find((r) => r.includes('Alex'));
   const jordanRow = reportRows.find((r) => r.includes('Jordan'));
-  check('the primary\'s row: 20h for Alex, costed at the procedure rate ($50/hr × 20h = $1,000.00)',
-        !!alexRow && /\b20\b/.test(alexRow) && alexRow.includes('1,000.00'), alexRow);
-  check('the trainee\'s row, separately: 4h for Jordan, on its own line ($50/hr × 4h = $200.00)',
-        !!jordanRow && /\b4\b/.test(jordanRow) && jordanRow.includes('200.00'), jordanRow);
+  // $50/hr procedure rate, blended at the default 75% efficiency (no
+  // average labour cost seeded) — see "Costing: efficiency and average
+  // labour cost" in scheduler/CLAUDE.md — so $37.50/hr effective, not $50.
+  check('the primary\'s row: 20h for Alex, costed at the blended rate (20h × $37.50/hr = $750.00)',
+        !!alexRow && /\b20\b/.test(alexRow) && alexRow.includes('750.00'), alexRow);
+  check('the trainee\'s row, separately: 4h for Jordan, on its own line (4h × $37.50/hr = $150.00)',
+        !!jordanRow && /\b4\b/.test(jordanRow) && jordanRow.includes('150.00'), jordanRow);
 
   check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 }

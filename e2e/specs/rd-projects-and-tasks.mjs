@@ -208,8 +208,11 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.click('nav >> text=R&D');
   await page.waitForTimeout(400);
   const rdText = await page.locator('main').innerText();
-  // 6h actual * $40/hr labour = $240.00 — same jobCost() every job/rework uses.
-  check('the project card and task row both show cost computed from actual hours × procedure rate', (rdText.match(/240\.00/g) || []).length >= 2, rdText);
+  // 6h actual × $40/hr labour, blended at the default 75% efficiency (no
+  // average labour cost seeded) — see "Costing: efficiency and average
+  // labour cost" in scheduler/CLAUDE.md — so 6h × $30/hr = $180.00, not a
+  // flat 6h × $40. Same jobCost() every job/rework uses.
+  check('the project card and task row both show cost computed from actual hours × the blended rate', (rdText.match(/180\.00/g) || []).length >= 2, rdText);
 
   // ---- deleting the project leaves the task's own record untouched ----
   await page.locator('button', { hasText: 'Coating Study' }).click();

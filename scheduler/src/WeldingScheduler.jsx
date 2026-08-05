@@ -305,11 +305,32 @@ function procedureParts(p, costCentres) {
 const procedureCost = (p, costCentres) => procedureParts(p, costCentres).total;
 // Hours used to cost a job: actual once complete, otherwise the estimate.
 const jobHoursForCost = (j) => (j && j.status === 'complete' && Number(j.actualHours) > 0 ? Number(j.actualHours) : Number((j && j.hoursTotal) || 0));
-function jobCost(j, procedures, costCentres) {
+// A job's SCHEDULED hours aren't all productive process time — some of
+// every job/task is setup and breakdown, which doesn't consume materials,
+// gas or machine time the way procedureCost's $/hr rate assumes, just a
+// person's time. `costSettings.efficiency` (%, default 75) is the assumed
+// productive share; the rest is priced at `costSettings.avgLabourRate`
+// alone — deliberately one global average, not a per-person rate (see
+// "Costing: efficiency and average labour cost" in scheduler/CLAUDE.md for
+// why: individual pay rates are HR data, not something this app holds).
+//
+// Because cost is linear in hours, "efficiency% at the full rate + the
+// rest at the labour rate" collapses to one blended $/hr — correct for ANY
+// hours figure it's multiplied by, not just a job's total. That's what
+// lets jobCost() (whole-item totals) and hourlyRate() (report rows, which
+// can be a single day's partial hours) share this one function instead of
+// each needing their own two-bucket split.
+function effectiveHourlyRate(procedure, costCentres, costSettings) {
+  const full = procedureCost(procedure, costCentres);
+  const eff = Math.max(0, Math.min(100, Number(costSettings?.efficiency ?? 75))) / 100;
+  const labour = Number(costSettings?.avgLabourRate) || 0;
+  return full * eff + labour * (1 - eff);
+}
+function jobCost(j, procedures, costCentres, costSettings) {
   if (!j || !j.procedureId) return null;
   const p = (procedures || []).find((x) => x.id === j.procedureId);
   if (!p) return null;
-  return procedureCost(p, costCentres) * jobHoursForCost(j);
+  return effectiveHourlyRate(p, costCentres, costSettings) * jobHoursForCost(j);
 }
 // Map a cost-calculator spec's process string onto one of the scheduler's processes.
 function mapImportProcess(str, schedProcesses) {
@@ -1039,9 +1060,13 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
 }
 
 function CostingView({
-  procedures, costCentres, processes, readOnly, onImport, onNewProcedure, onEditProcedure, onNewCentre, onEditCentre,
+  procedures, costCentres, costSettings, onSaveCostSettings, processes, readOnly, onImport, onNewProcedure, onEditProcedure, onNewCentre, onEditCentre,
   equipment, onAddEquip, onEditEquip, onDeleteEquip,
 }) {
+  const efficiency = costSettings?.efficiency ?? 75;
+  const avgLabourRate = costSettings?.avgLabourRate ?? 0;
+  const setEfficiency = (v) => onSaveCostSettings({ ...costSettings, efficiency: v });
+  const setAvgLabourRate = (v) => onSaveCostSettings({ ...costSettings, avgLabourRate: v });
   const fileRef = useRef(null);
   const byProcess = {};
   (procedures || []).forEach((p) => {
@@ -1104,6 +1129,38 @@ function CostingView({
             <button className={btnGhost} onClick={() => fileRef.current && fileRef.current.click()}><Upload size={15} /> Import from cost calculator</button>
           </div>
         )}
+      </div>
+
+      {/* A job's SCHEDULED hours aren't all productive process time — some
+          of every job/task is setup and breakdown, which doesn't burn
+          materials, gas or machine time the way a procedure's own $/hr
+          assumes, just a person's time. This blends that into every cost
+          figure the app shows (jobCost/hourlyRate — see
+          effectiveHourlyRate): `efficiency`% of the scheduled hours at the
+          procedure's own rate, the rest at this one average labour rate.
+          Deliberately ONE global average, not a rate per staff member —
+          individual pay is HR data and has no business living here. */}
+      <div className="border border-slate-800 bg-slate-900 rounded-lg p-4 mb-6">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Setup/breakdown time</h3>
+        <p className="text-xs text-slate-500 mb-3">
+          Not every scheduled hour is spent running the process — some is setup and pack-down. {Math.round(efficiency)}% of a
+          job's hours are costed at its procedure's own rate; the rest at the average labour cost below, since materials, gas
+          and machine time aren't being consumed while a job is being set up or broken down.
+        </p>
+        <div className="grid grid-cols-2 gap-3 max-w-md">
+          <Field label="Efficiency (%)">
+            <input
+              type="number" min={0} max={100} step={1} className={inputCls} disabled={readOnly}
+              value={efficiency} onChange={(e) => setEfficiency(e.target.value)}
+            />
+          </Field>
+          <Field label="Average labour cost ($/hr)">
+            <input
+              type="number" min={0} step={0.5} className={inputCls} disabled={readOnly}
+              value={avgLabourRate} onChange={(e) => setAvgLabourRate(e.target.value)}
+            />
+          </Field>
+        </div>
       </div>
 
       <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Cost centres (shared capital)</h3>
@@ -1187,6 +1244,15 @@ export default function WeldingScheduler() {
   const [jobs, setJobs] = useState([]);
   const [costCentres, setCostCentres] = useState([]);
   const [procedures, setProcedures] = useState([]);
+  // Scheduled hours aren't 100% productive process time — some of every job/
+  // task is setup and breakdown, which doesn't burn materials/gas/machine
+  // time the way a procedure's own $/hr rate assumes, just a person's time.
+  // `efficiency` (%) is the assumed productive share; the rest is costed at
+  // `avgLabourRate` alone. Deliberately ONE global average rate, not
+  // per-person — individual pay rates are HR data, not something this app
+  // should hold. See effectiveHourlyRate and "Costing: efficiency and
+  // average labour cost" in scheduler/CLAUDE.md.
+  const [costSettings, setCostSettings] = useState({ avgLabourRate: 0, efficiency: 75 });
   const [categories, setCategories] = useState([]);
   // Daily record of hours actually worked per job. Recalling a total at the
   // point of completion is guesswork; this is entered day by day while it's
@@ -1316,7 +1382,7 @@ export default function WeldingScheduler() {
   // ---------- initial load ----------
   useEffect(() => {
     (async () => {
-      const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov, pj, tk] = await Promise.all([
+      const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov, pj, tk, cs] = await Promise.all([
         loadKey('wf_equipment', null),
         loadKey('wf_staff', null),
         loadKey('wf_templates', null),
@@ -1330,6 +1396,7 @@ export default function WeldingScheduler() {
         loadKey(OVERRIDES_KEY, null),
         loadKey(PROJECTS_KEY, null),
         loadKey(TASKS_KEY, null),
+        loadKey(COST_SETTINGS_KEY, null),
       ]);
       if (pk) setParked(pk);
       if (tl) setTimeLog(tl);
@@ -1343,6 +1410,7 @@ export default function WeldingScheduler() {
       const finalPc = pc || seedProcedures();
       const finalPj = pj || [];
       const finalTk = tk || [];
+      const finalCs = cs || { avgLabourRate: 0, efficiency: 75 };
 
       setEquipment(finalEq);
       setStaff(finalSt);
@@ -1351,6 +1419,7 @@ export default function WeldingScheduler() {
       setCostCentres(finalCc);
       setProcedures(finalPc);
       setProjects(finalPj);
+      setCostSettings(finalCs);
       // Categories used to be free text typed per template. Seed the managed
       // list from whatever the existing templates already use, so nothing an
       // existing user set up disappears the first time they load this.
@@ -1372,6 +1441,7 @@ export default function WeldingScheduler() {
       if (!pc) saveKey('wf_procedures', finalPc);
       if (!ct) saveKey('wf_categories', finalCt);
       if (!pj) saveKey(PROJECTS_KEY, finalPj);
+      if (!cs) saveKey(COST_SETTINGS_KEY, finalCs);
 
       setLoaded(true);
     })();
@@ -1387,7 +1457,7 @@ export default function WeldingScheduler() {
   // write anything back: a save would bump the server's version and every
   // other screen would see *that* as a change, and so on around the loop.
   const reloadFromStore = useCallback(async () => {
-    const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov, pj, tk] = await Promise.all([
+    const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov, pj, tk, cs] = await Promise.all([
       loadKey('wf_equipment', null),
       loadKey('wf_staff', null),
       loadKey('wf_templates', null),
@@ -1401,11 +1471,13 @@ export default function WeldingScheduler() {
       loadKey(OVERRIDES_KEY, null),
       loadKey(PROJECTS_KEY, null),
       loadKey(TASKS_KEY, null),
+      loadKey(COST_SETTINGS_KEY, null),
     ]);
     if (ct) setCategories(ct);
     if (tl) setTimeLog(tl);
     if (ov) setOverrides(ov);
     if (pj) setProjects(pj);
+    if (cs) setCostSettings(cs);
     const nextEq = eq || latest.current.equipment;
     const nextSt = st ? st.map(normalizeStaff) : latest.current.staff;
     if (eq) setEquipment(nextEq);
@@ -2348,6 +2420,7 @@ export default function WeldingScheduler() {
   // ---------- costing: cost centres + procedures ----------
   function saveCostCentres(list) { setCostCentres(list); saveKey('wf_costcentres', list); }
   function saveProceduresList(list) { setProcedures(list); saveKey('wf_procedures', list); }
+  function saveCostSettings(next) { setCostSettings(next); saveKey(COST_SETTINGS_KEY, next); }
   function saveCentre(cc) {
     const map = Object.fromEntries(costCentres.map((x) => [x.id, x]));
     map[cc.id] = cc;
@@ -2605,6 +2678,8 @@ export default function WeldingScheduler() {
           <CostingView
             procedures={procedures}
             costCentres={costCentres}
+            costSettings={costSettings}
+            onSaveCostSettings={saveCostSettings}
             processes={processes}
             readOnly={readOnly}
             onImport={importCosting}
@@ -2620,13 +2695,14 @@ export default function WeldingScheduler() {
         )}
 
         {tab === 'reports' && !displayMode && (
-          <ReportsView jobs={jobs} equipment={equipment} staff={staff} procedures={procedures} costCentres={costCentres} />
+          <ReportsView jobs={jobs} equipment={equipment} staff={staff} procedures={procedures} costCentres={costCentres} costSettings={costSettings} />
         )}
         {tab === 'quality' && !displayMode && (
           <QualityView
             jobs={jobs}
             procedures={procedures}
             costCentres={costCentres}
+            costSettings={costSettings}
             timeLog={timeLog}
             onEditJob={(j) => !readOnly && setEditingJob(j)}
           />
@@ -2638,6 +2714,7 @@ export default function WeldingScheduler() {
             timeLog={timeLog}
             procedures={procedures}
             costCentres={costCentres}
+            costSettings={costSettings}
             staff={staff}
             readOnly={readOnly}
             onAddProject={() => setEditingProject('new')}
@@ -2678,6 +2755,7 @@ export default function WeldingScheduler() {
           equipment={equipment}
           procedures={procedures}
           costCentres={costCentres}
+          costSettings={costSettings}
           jobs={jobs}
           timeLog={timeLog}
           onClose={() => setEditingJob(null)}
@@ -3944,13 +4022,13 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
    logged and cost are computed with the exact same helpers as any other
    job (loggedHours, jobCost) — nothing rework-specific to keep in sync.
    ============================================================ */
-function QualityView({ jobs, procedures = [], costCentres = [], timeLog = [], onEditJob }) {
+function QualityView({ jobs, procedures = [], costCentres = [], costSettings, timeLog = [], onEditJob }) {
   const reworks = useMemo(
     () => jobs.filter((j) => j.isRework).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
     [jobs]
   );
   const totalHoursLogged = reworks.reduce((s, j) => s + loggedHours(timeLog, j.id), 0);
-  const totalCost = reworks.reduce((s, j) => s + (jobCost(j, procedures, costCentres) || 0), 0);
+  const totalCost = reworks.reduce((s, j) => s + (jobCost(j, procedures, costCentres, costSettings) || 0), 0);
   const [reportOpen, setReportOpen] = useState(false);
 
   // Read-only and self-contained (nothing here is saved), so — unlike
@@ -3963,8 +4041,8 @@ function QualityView({ jobs, procedures = [], costCentres = [], timeLog = [], on
     name: e.item.name,
     reason: e.item.notes || '—',
     hours: e.hours,
-    cost: hourlyRate(e.item, procedures, costCentres) * e.hours,
-  })), [reworks, timeLog, jobs, procedures, costCentres]);
+    cost: hourlyRate(e.item, procedures, costCentres, costSettings) * e.hours,
+  })), [reworks, timeLog, jobs, procedures, costCentres, costSettings]);
   const qualityColumns = [
     { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
     { key: 'job', label: 'Job', value: (r) => r.job },
@@ -4024,7 +4102,7 @@ function QualityView({ jobs, procedures = [], costCentres = [], timeLog = [], on
             {reworks.map((j) => {
               const original = jobs.find((o) => o.id === j.reworkOfJobId);
               const hours = loggedHours(timeLog, j.id);
-              const cost = jobCost(j, procedures, costCentres);
+              const cost = jobCost(j, procedures, costCentres, costSettings);
               const status = j.status === 'complete' ? 'Complete' : j.assignment ? 'Scheduled' : 'Unscheduled';
               return (
                 <tr key={j.id} className="border-b border-slate-800/60 hover:bg-slate-800/40">
@@ -4385,14 +4463,14 @@ function BackfillTaskModal({ task, processes, staff, procedures = [], projects =
 // same loggedHours() any job uses, cost from the same jobCost() (task field
 // names deliberately match: procedureId/status/actualHours/hoursTotal), so
 // nothing project-specific had to be built for either number.
-function projectRollup(project, tasks, timeLog, procedures, costCentres) {
+function projectRollup(project, tasks, timeLog, procedures, costCentres, costSettings) {
   const own = tasks.filter((t) => t.projectId === project.id);
   const hours = own.reduce((s, t) => s + loggedHours(timeLog, t.id), 0);
-  const cost = own.reduce((s, t) => s + (jobCost(t, procedures, costCentres) || 0), 0);
+  const cost = own.reduce((s, t) => s + (jobCost(t, procedures, costCentres, costSettings) || 0), 0);
   return { taskCount: own.length, hours: Math.round(hours * 100) / 100, cost };
 }
 
-function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff, readOnly, onAddProject, onEditProject, onAddTask, onEditTask, onAddBackfillTask }) {
+function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, costSettings, staff, readOnly, onAddProject, onEditProject, onAddTask, onEditTask, onAddBackfillTask }) {
   const [projectFilter, setProjectFilter] = useState('all');
   const [reportOpen, setReportOpen] = useState(false);
   const sortedProjects = [...projects].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
@@ -4410,9 +4488,9 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff
       project: project ? project.name : '—',
       task: e.item.name,
       hours: e.hours,
-      cost: hourlyRate(e.item, procedures, costCentres) * e.hours,
+      cost: hourlyRate(e.item, procedures, costCentres, costSettings) * e.hours,
     };
-  }), [tasks, timeLog, projects, staff, procedures, costCentres]);
+  }), [tasks, timeLog, projects, staff, procedures, costCentres, costSettings]);
   const rdColumns = [
     { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
     { key: 'person', label: 'Person', value: (r) => r.person },
@@ -4439,7 +4517,7 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {sortedProjects.map((p) => {
-              const roll = projectRollup(p, tasks, timeLog, procedures, costCentres);
+              const roll = projectRollup(p, tasks, timeLog, procedures, costCentres, costSettings);
               return (
                 <button
                   key={p.id} type="button"
@@ -4513,7 +4591,7 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, staff
                 const project = projects.find((p) => p.id === t.projectId);
                 const person = staff.find((s) => s.id === t.staffId);
                 const hours = loggedHours(timeLog, t.id);
-                const cost = jobCost(t, procedures, costCentres);
+                const cost = jobCost(t, procedures, costCentres, costSettings);
                 const status = t.status === 'complete' ? 'Complete' : t.assignment?.conflict ? 'Over capacity' : 'Scheduled';
                 return (
                   <tr key={t.id} className="border-b border-slate-800/60 hover:bg-slate-800/40 cursor-pointer" onClick={() => onEditTask(t)}>
@@ -4974,7 +5052,7 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
    JOB MODAL
    ============================================================ */
 
-function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costCentres = [], jobs = [], timeLog = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart, onMarkForRework, onOpenRelatedJob }) {
+function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costCentres = [], costSettings, jobs = [], timeLog = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart, onMarkForRework, onOpenRelatedJob }) {
   const isNew = !job;
   // Each part carries its own manual staff assignment and equipment lock,
   // independent of the other part's and of the (now unused, for a split job)
@@ -5606,7 +5684,10 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
             {procedureId && (() => {
               const proc = procedures.find((p) => p.id === procedureId);
               if (!proc) return null;
-              const rate = procedureCost(proc, costCentres);
+              // Blended, not the procedure's raw $/hr — matches jobCost()
+              // elsewhere, since scheduled hours aren't all productive
+              // process time. See effectiveHourlyRate.
+              const rate = effectiveHourlyRate(proc, costCentres, costSettings);
               const estHrs = Math.round((Number(quantity) || 0) * (Number(hoursPerUnit) || 0) * 100) / 100;
               const cost = rate * estHrs;
               const dep = Number(departmentValue) || 0;
@@ -5956,6 +6037,10 @@ const OVERRIDES_KEY = 'wf_overrides';
 // scheduled themselves. See "R&D projects and tasks" in scheduler/CLAUDE.md.
 const PROJECTS_KEY = 'wf_projects';
 
+// { avgLabourRate, efficiency } — see effectiveHourlyRate and "Costing:
+// efficiency and average labour cost" in scheduler/CLAUDE.md.
+const COST_SETTINGS_KEY = 'wf_costsettings';
+
 // Non-job schedulable items — see "R&D projects and tasks" in
 // scheduler/CLAUDE.md for why these are a separate array from `jobs` (kept
 // out of Job Backlog, Reports, batching, WIP import) while still sharing the
@@ -5975,15 +6060,17 @@ function loggedHours(timeLog, jobId) {
    ============================================================ */
 
 // $/hr for whatever procedure an item (job/task/rework) carries — the same
-// rate jobCost() uses, but exposed on its own so a report can price EACH
+// effectiveHourlyRate() jobCost() uses (efficiency-blended, not the raw
+// procedure rate), but exposed on its own so a report can price EACH
 // logged entry individually (entry.hours × rate) instead of only the
-// item's lifetime total. Returns 0, not null, so a report row's cost
-// column is always summable — no procedure just means no cost, not
-// missing data.
-function hourlyRate(item, procedures, costCentres) {
+// item's lifetime total — valid for a single day's partial hours too,
+// since the blend is linear (see effectiveHourlyRate's comment). Returns
+// 0, not null, so a report row's cost column is always summable — no
+// procedure just means no cost, not missing data.
+function hourlyRate(item, procedures, costCentres, costSettings) {
   if (!item || !item.procedureId) return 0;
   const p = (procedures || []).find((x) => x.id === item.procedureId);
-  return p ? procedureCost(p, costCentres) : 0;
+  return p ? effectiveHourlyRate(p, costCentres, costSettings) : 0;
 }
 
 // One row per unit of logged work, for a report over [dateFrom, dateTo].
@@ -7510,7 +7597,7 @@ function PatternsView({ overrides, equipment, templates, procedures, onOpenTempl
   );
 }
 
-function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = [] }) {
+function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = [], costSettings }) {
   const today = new Date();
   const [basis, setBasis] = useState('completed'); // completed | scheduled | due
   const [rangeStart, setRangeStart] = useState(isoDate(startOfMonth(today)));
@@ -7550,10 +7637,10 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
   const totalCompanyValue = included.reduce((s, j) => s + Number(j.totalValue || 0), 0);
   const totalDeptValue = included.reduce((s, j) => s + Number(j.departmentValue || 0), 0);
   const sharePct = totalCompanyValue > 0 ? Math.round((totalDeptValue / totalCompanyValue) * 1000) / 10 : 0;
-  const totalCost = included.reduce((s, j) => s + (jobCost(j, procedures, costCentres) || 0), 0);
+  const totalCost = included.reduce((s, j) => s + (jobCost(j, procedures, costCentres, costSettings) || 0), 0);
   const deptMargin = totalDeptValue - totalCost;
   const marginPct = totalDeptValue > 0 ? Math.round((deptMargin / totalDeptValue) * 1000) / 10 : 0;
-  const costedCount = included.filter((j) => jobCost(j, procedures, costCentres) != null).length;
+  const costedCount = included.filter((j) => jobCost(j, procedures, costCentres, costSettings) != null).length;
 
   const byProcess = useMemo(() => {
     const map = {};

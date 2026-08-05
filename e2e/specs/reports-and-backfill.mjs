@@ -64,7 +64,11 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('the Quality report lists the logged rework entry', (await modal().locator('td', { hasText: 'Bracket Weld — Rework' }).count()) === 1);
   check('...with its job number', (await modal().locator('td', { hasText: 'J00120' }).count()) === 1);
   check('...its reason for rework', (await modal().locator('td', { hasText: 'Porosity on inspection' }).count()) === 1);
-  check('...and cost computed from hours × procedure rate (3h × $50/hr)', (await modal().locator('td', { hasText: '150.00' }).count()) === 1);
+  // $50/hr procedure rate, blended at the default 75% efficiency (no
+  // average labour cost set) — see "Costing: efficiency and average
+  // labour cost" in scheduler/CLAUDE.md — so 3h × ($50 × 0.75) = $112.50,
+  // not a flat 3h × $50.
+  check('...and cost computed from hours × the blended (efficiency-adjusted) rate', (await modal().locator('td', { hasText: '112.50' }).count()) === 1);
 
   // Narrow the range to exclude the entry's date — it should disappear
   // entirely, proving the range genuinely filters rather than just labels.
@@ -86,7 +90,7 @@ export default async function run({ page, check, errors, baseUrl }) {
   const fs = await import('node:fs');
   const csv = fs.readFileSync(csvPath, 'utf8');
   check('the CSV has the requested header row', csv.startsWith('Date,Job,Job description/name,Hours logged,Reason for rework,Cost'), csv.split('\n')[0]);
-  check('the CSV row matches the table', csv.includes('J00120') && csv.includes('Bracket Weld') && csv.includes('150.00'));
+  check('the CSV row matches the table', csv.includes('J00120') && csv.includes('Bracket Weld') && csv.includes('112.50'));
 
   await modal().getByRole('button', { name: 'Close', exact: true }).click();
   await page.waitForSelector(modalSel, { state: 'detached' });

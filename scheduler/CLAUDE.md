@@ -1437,6 +1437,48 @@ both dense, grid-of-inputs forms. Two things worth knowing if either grows:
   asset name. Matches `ProcedureEditor`, which already opened `wide` for
   the same reason.
 
+### Costing: efficiency and average labour cost
+
+A job/task's **scheduled** hours aren't all productive process time — every
+one includes some setup and pack-down, which doesn't burn materials, gas or
+machine time the way `procedureCost()`'s $/hr rate assumes, just a person's
+time. Pricing the whole duration at the full procedure rate was overstating
+cost by exactly that setup/breakdown share. Fixed by splitting scheduled
+hours into two buckets: `efficiency`% (default 75, editable) priced at the
+procedure's own rate as before, the rest priced at a new, single **average
+labour cost** ($/hr) instead — both set once, globally, under the Costing
+tab's "Setup/breakdown time" card (`costSettings`/`COST_SETTINGS_KEY` =
+`wf_costsettings`, `{ avgLabourRate, efficiency }`).
+
+**Deliberately one global average rate, not a rate per staff member.**
+Asked of the user directly: individual pay rates are HR data and this app
+must not hold them, even indirectly via a per-person hourly cost field. One
+shared average is the ceiling of precision that's appropriate here.
+
+**`effectiveHourlyRate(procedure, costCentres, costSettings)`** is the one
+function this all runs through — `procedureCost() × efficiency% +
+avgLabourRate × (1 − efficiency%)`. Because cost is linear in hours, this
+blended $/hr is correct to multiply by ANY hours figure, not just a job's
+full total: `0.75×H×rateA + 0.25×H×rateB` is algebraically identical to
+`H×(0.75×rateA + 0.25×rateB)` for every `H`. That's what lets both
+`jobCost()` (a whole item's total cost) and `hourlyRate()` (a single
+report row's hours, which can be one day out of a much longer job) share
+this one function instead of each needing its own two-bucket split —
+there's no risk of a report over- or under-counting setup time by
+splitting it per-row instead of per-item.
+
+**Every cost figure in the app goes through this now, not just `jobCost`/
+`hourlyRate`'s existing call sites** — `jobCost`, `hourlyRate` and
+`JobModal`'s own margin-estimate preview (`Cost — $/hr × Nh`, shown while
+picking a procedure) all take a `costSettings` argument/prop now.
+`procedureCost`/`procedureParts` themselves are UNCHANGED and still shown
+raw (not blended) in three places on purpose: `ProcedureEditor`'s own
+breakdown, `CostingView`'s procedure cards, and the procedure picker's
+"$X/hr" reference labels (JobModal, TemplateModal) — those describe what
+the *procedure itself* costs to run, independent of any one job's
+setup/breakdown share, and blending it there would misrepresent the
+procedure's own numbers.
+
 ## Assigning staff by hand
 
 A job's people are normally derived by the scheduler and shown, not chosen. The
