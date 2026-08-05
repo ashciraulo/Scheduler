@@ -1221,6 +1221,45 @@ Any future button added directly inside a component that itself renders
 `<Modal>` needs this wrapper, not a raw `useContext` call at that component's
 own top level.
 
+### `lockBodyScroll` — why page scroll intermittently stopped working entirely
+
+The whole app relies on the page/`document.body`'s own scroll for anything
+taller than the viewport — Job Backlog, Costing, Patterns, and every other
+tab share one `<main>` with no `overflow` of its own (see "Layout"). The
+Schedule view is the one exception, with its own independent
+`overflow-auto` grid container (see "Schedule view rendering") — which is
+exactly why it kept scrolling through this bug while every other tab
+silently stopped.
+
+`Modal` locks page scroll for as long as it's open — `document.body.style.
+overflow = 'hidden'`, restored on close — so a long form's own internal
+scroll (`max-h-[85vh] overflow-y-auto`) doesn't chain into the page behind
+it. The original version captured/restored a **per-instance snapshot**:
+read `document.body.style.overflow` at mount, restore that exact value at
+unmount. Correct for exactly one modal open at a time — broken the moment
+modals **nest**, which happens throughout this file: JobModal/TaskModal/
+BackfillTaskModal/ProjectModal's own Delete button opens the confirm-delete
+`Modal` *while the first one is still mounted*, and several conflict/
+confirm dialogs elsewhere do the same. With two independent snapshots in
+play, whichever modal's cleanup happened to run last would restore
+`body.style.overflow` to **its own** mount-time snapshot — not necessarily
+the empty string — leaving scroll silently locked at `'hidden'` even after
+every modal involved had genuinely closed. Intermittent by nature: it only
+showed up on whichever nesting/closing sequence the sibling ordering in the
+tree made land wrong, and once triggered, it stayed locked for the rest of
+the session (a fresh load resets `document.body.style.overflow`), which is
+what made "Job Backlog/Costing/Patterns can't scroll" look unrelated to
+"the Schedule view scrolls fine."
+
+Fixed with a shared, reference-counted lock instead of per-instance
+capture/restore: a module-level `openModalCount`, incremented on mount and
+decremented on unmount; scroll is locked exactly while the count is `> 0`
+and unlocked (`''`, not a captured snapshot) the moment it returns to `0`,
+regardless of how many modals are nested or what order they close in.
+`lockBodyScroll()` is the whole mechanism — `Modal` just does `useEffect(()
+=> lockBodyScroll(), [])`. See `e2e/specs/nested-modal-scroll-lock.mjs` for
+the nested-open/cancel-inner/close-outer sequence this specifically guards.
+
 ### Template categories
 
 Categories are a managed list (`wf_categories`), not free text typed per

@@ -36,6 +36,7 @@ import reportsAndBackfill from './specs/reports-and-backfill.mjs';
 import taskOrderingAndTrainingPartner from './specs/task-ordering-and-training-partner.mjs';
 import secondPersonHours from './specs/second-person-hours.mjs';
 import efficiencyAndLabourCost from './specs/efficiency-and-labour-cost.mjs';
+import nestedModalScrollLock from './specs/nested-modal-scroll-lock.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -71,6 +72,7 @@ const SUITES = [
   ['task ordering + training partner — schedule-order lanes and two-person tasks', taskOrderingAndTrainingPartner],
   ['second-person hours — a training partner\'s own hours, logged separately', secondPersonHours],
   ['efficiency + average labour cost — blended job/task costing', efficiencyAndLabourCost],
+  ['nested modal scroll lock — page scroll stays correct through nested/confirm dialogs', nestedModalScrollLock],
 ];
 
 const only = process.argv[2]; // optional substring filter

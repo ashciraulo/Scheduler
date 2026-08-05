@@ -473,6 +473,23 @@ const MODAL_WIDTH = { md: 'max-w-md', lg: 'max-w-5xl', xl: 'max-w-[1400px]' };
 // (there have never been any, but nothing requires there never to be).
 const DirtyContext = createContext(() => {});
 
+// Reference-counted body-scroll lock, shared by every mounted Modal —
+// see the usage below for why a plain per-instance capture/restore of
+// document.body.style.overflow doesn't work once modals can nest (a
+// confirm-delete dialog opened from inside JobModal/TaskModal/etc. while
+// the first one is still open, which happens throughout this file).
+// Module-level, not a ref or context: it has to be shared across
+// completely independent Modal instances that know nothing of each other.
+let openModalCount = 0;
+function lockBodyScroll() {
+  openModalCount += 1;
+  if (openModalCount === 1) document.body.style.overflow = 'hidden';
+  return () => {
+    openModalCount = Math.max(0, openModalCount - 1);
+    if (openModalCount === 0) document.body.style.overflow = '';
+  };
+}
+
 function Modal({ title, onClose, children, wide, size }) {
   // A backdrop click closes the modal, but "click" fires on the nearest common
   // ancestor of mousedown and mouseup — so selecting text inside the modal and
@@ -503,11 +520,22 @@ function Modal({ title, onClose, children, wide, size }) {
   // lifetime handles the backdrop and keyboard/touch cases; the dialog's own
   // `overscroll-contain` (below) stops wheel scroll from "chaining" to the
   // body once the dialog hits its own top/bottom edge.
-  useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prevOverflow; };
-  }, []);
+  //
+  // Goes through the shared counter (lockBodyScroll), not a plain
+  // capture-and-restore of document.body.style.overflow here — this modal
+  // is very often not the only one mounted (a Delete button inside
+  // JobModal/TaskModal/BackfillTaskModal/ProjectModal opens the
+  // confirm-delete Modal while the first one is still open, and there are
+  // several similar confirm/conflict dialogs elsewhere in this file), and
+  // whichever nested Modal's cleanup happened to run last used to stomp
+  // body.overflow back to whatever ITS OWN mount-time snapshot was, not
+  // necessarily the empty string — that's exactly what made Job Backlog/
+  // Costing/Patterns intermittently stop scrolling: page scroll got left
+  // locked at 'hidden' after every modal involved had actually closed. The
+  // Schedule view's timeline kept scrolling through all of this regardless,
+  // since its grid has its own independent `overflow-auto` container (see
+  // "Schedule view rendering" below) and was never relying on body scroll.
+  useEffect(() => lockBodyScroll(), []);
 
   return (
     <div
