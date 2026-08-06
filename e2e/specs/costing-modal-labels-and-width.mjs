@@ -22,7 +22,13 @@ export default async function run({ page, check, errors, baseUrl }) {
   const modal = () => page.locator('div.fixed.inset-0 > div').first();
 
   // ---- Cost centre modal is wide, not the cramped default ----
+  // "New cost centre" now opens CreateChoiceModal first (blank vs. copy an
+  // existing one) rather than the editor directly — "Create new" reaches
+  // the same blank editor this test already expects.
   await page.locator('button', { hasText: /new cost centre/i }).first().click();
+  await page.waitForSelector('div.fixed.inset-0');
+  await page.waitForTimeout(200);
+  await page.locator('text=Create new').click();
   await page.waitForTimeout(300);
   const ccBox = await modal().boundingBox();
   check('#61 the cost centre modal is wider than the old cramped default (448px)', ccBox.width > 900, ccBox.width);
@@ -31,8 +37,11 @@ export default async function run({ page, check, errors, baseUrl }) {
 
   // ---- Procedure modal: every column has a persistent header, not just
   // a placeholder that vanishes once a prefilled 0 is sitting in the field ----
+  // Same CreateChoiceModal detour as cost centres above.
   await page.locator('button', { hasText: /new procedure/i }).first().click();
   await page.waitForSelector('div.fixed.inset-0');
+  await page.waitForTimeout(200);
+  await page.locator('text=Create new').click();
   await page.waitForTimeout(300);
 
   const bodyText = await modal().innerText();

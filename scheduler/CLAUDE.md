@@ -1584,6 +1584,66 @@ as `normalizeStaff` defaulting absent fields elsewhere in this file.
 `parseCostingImport` (the external cost-calculator JSON format) gets the
 same default, since that calculator has only ever exported powder specs.
 
+### Duplicating a procedure/cost centre, and collapsible procedure groups
+
+"New procedure"/"New cost centre" used to open `ProcedureEditor`/
+`CostCentreEditor` directly, always blank. Some equipment is similar enough
+to existing cost centres (and some procedures similar enough to existing
+ones) that retyping every field by hand — capital assets, gas flows, powder
+or wire feedstock, labour rows — was pure waste for what's really a small
+adjustment to something that already exists. Both buttons now open
+`CreateChoiceModal` first: **Create new** (unchanged — reaches the same
+blank editor) or **Create from existing** (expands the same modal in place
+with a picker — `CostCentreCopyPicker`, a flat list, or `ProcedureCopyPicker`,
+grouped by process — rather than closing and opening a second modal).
+
+**Deliberately one shared modal component for both record types, not two.**
+The choice itself (blank vs. copy) and the back-and-forth between the choice
+screen and the picker is identical regardless of what's being created —
+only the picker content (`children`) differs, supplied by the caller.
+
+**The duplicate is a genuinely new, unsaved record, not an edit of the
+source — this needed a real prop, not a trick with existing ones.**
+`isNew` in both editors has always derived from whether the record prop
+itself is present (`!procedure`/`!centre`), which governs the modal's
+title, whether Delete shows, and (for `ProcedureEditor`) the `materialMode`/
+`wire`/`powder` back-fill. Prefilling from a copy needs a **second, optional**
+prop — `seedFrom` — consulted only in the state initialiser and only when
+the "real" record prop is absent: `const source = procedure || seedFrom`
+supplies the initial field values, but `isNew` still reads `!procedure`
+alone, so a duplicate reads and behaves as new (title "New procedure", no
+Delete button) while starting from copied data. The new record also always
+gets a **fresh id** (`uid('proc')`/`uid('cc')`, generated again even though
+`seedFrom`'s own id gets deep-cloned in along with everything else) and the
+name gets `" (copy)"` appended, so it's obvious at a glance which record is
+the original — both edited freely from there, same as any other field.
+
+**State-wise, duplicating from picker to saved record is: pick → seed →
+open 'new'.** `procedureSeed`/`costCentreSeed` (main component state) hold
+the source record chosen in the picker; `onPick` sets the seed THEN sets
+`editingProcedure`/`editingCentre` to `'new'` (not to the source record
+itself — that would make `procedure`/`centre` non-null and flip `isNew` to
+false, exactly the bug this design avoids). The editor's `seedFrom` prop is
+only ever passed when `editingProcedure === 'new'`; editing an existing
+record ignores it entirely. Every entry point that sets `editingProcedure`/
+`editingCentre` — "Create new," a picker pick, "Edit" on an existing card,
+Save, Delete — also explicitly (re)sets or clears the matching seed, so a
+stale seed from a previous duplicate can never leak into an unrelated
+"blank new" or "edit existing" flow.
+
+**Procedures are grouped by process in the picker, collapsed by default —
+and `CostingView`'s own procedure listing now works exactly the same way,
+for the same reason.** A shop accumulates procedures per process over time;
+a flat list (or, in the main tab, every process group permanently expanded)
+is exactly the "one really long page to scroll through" problem once enough
+exist. Both use the same `Section` component (`defaultOpen={false}`) already
+established elsewhere in this file — collapsed by default is a deliberate
+choice here, not merely convenient: the point is to keep the page short by
+default, not just organised. `CostCentreCopyPicker` stays a flat list on
+purpose — cost centres map to physical shared capital (a robot cell, a spray
+booth), and there are only ever expected to be a handful, so grouping would
+be organisational overhead with nothing to organise.
+
 ### Costing: efficiency and average labour cost
 
 A job/task's **scheduled** hours aren't all productive process time — every

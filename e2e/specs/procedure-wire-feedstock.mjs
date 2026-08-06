@@ -23,8 +23,13 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.waitForTimeout(400);
 
   // ---- a new procedure defaults to Powder, unchanged from before ----
+  // "New procedure" opens CreateChoiceModal first (blank vs. copy an
+  // existing one — see duplicate-procedure-costcentre.mjs); "Create new"
+  // reaches the same blank ProcedureEditor this spec is about.
   await page.getByRole('button', { name: 'New procedure' }).click();
   await page.waitForSelector(modalSel);
+  await page.waitForTimeout(200);
+  await page.locator('text=Create new').click();
   await page.waitForTimeout(200);
 
   check('a "Feedstock" toggle is present', (await modal().locator('text=Feedstock').count()) === 1);
@@ -87,6 +92,11 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('the OTHER mode\'s data (powder) is still present, not wiped by switching modes', !!newProc.powder, JSON.stringify(newProc.powder));
 
   await page.waitForTimeout(2200); // let the save toast fade — it also contains the procedure name
+  // CostingView's procedure groups are collapsed by default (see
+  // "duplicate-procedure-costcentre.mjs") — the new procedure's group has
+  // to be expanded before its card is even in the DOM to look at.
+  await page.locator('button', { hasText: new RegExp(`^${newProc.process.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(`) }).first().click();
+  await page.waitForTimeout(200);
   const card = page.locator('div.font-semibold.text-slate-100.text-sm.truncate', { hasText: newProc.name }).locator('xpath=ancestor::div[contains(@class,"rounded-lg")]').first();
   const cardText = await card.innerText();
   check('the Costing card labels the row "Wire", not "Powder"', cardText.includes('Wire') && !cardText.includes('Powder'), cardText.replace(/\n/g, ' | '));
@@ -107,6 +117,10 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.click('nav >> text=Costing');
   await page.waitForTimeout(400);
 
+  // Expand the HVOF group — the legacy procedure lands in it and, like
+  // every group, starts collapsed.
+  await page.locator('button', { hasText: /^Thermal Spray - HVOF \(/ }).first().click();
+  await page.waitForTimeout(200);
   const legacyCard = page.locator('div.font-semibold.text-slate-100.text-sm.truncate', { hasText: 'Legacy powder procedure' }).locator('xpath=ancestor::div[contains(@class,"rounded-lg")]').first();
   check('a legacy (no materialMode/wire) procedure still shows correctly — $120.00/hr powder cost', (await legacyCard.innerText()).includes('120.00'), (await legacyCard.innerText()).replace(/\n/g, ' | '));
 

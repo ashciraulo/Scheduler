@@ -4,7 +4,7 @@ import {
   Monitor, ChevronLeft, ChevronRight, ChevronDown, Trash2, Pencil, Pin, PinOff,
   Loader2, ClipboardList, LayoutGrid, CircleCheck, DollarSign, Clock, CalendarOff,
   Upload, FileWarning, UserCheck, ZoomIn, ZoomOut, Target, Lock, FlaskConical,
-  Download, FileClock
+  Download, FileClock, Copy, FilePlus
 } from 'lucide-react';
 import {
   parseXlsx, autoMap, analyse, buildSchedulerJobs, FIELDS,
@@ -690,9 +690,125 @@ const EQUIP_COLOR = {
    COSTING VIEW — cost centres + procedures with $/hr breakdown
    ============================================================ */
 
-function CostCentreEditor({ centre, onClose, onSave, onDelete }) {
+// Shown before ProcedureEditor/CostCentreEditor ever open, in front of both
+// "New procedure" and "New cost centre" — some pieces of equipment/
+// procedures are close enough to an existing one that retyping every field
+// by hand is wasted effort. `onCreateBlank` mirrors the old direct
+// behaviour (skip straight to an empty editor); `children` is the picker
+// for "Create from existing" — a flat list for cost centres, a grouped one
+// for procedures (see CostingView) — rendered only once that option is
+// chosen, not built up front, since it's plain JSX from the caller either
+// way. Deliberately generic over both record types rather than two
+// near-identical modals: the choice itself (blank vs. copy) and the
+// back-and-forth between the two states is exactly the same regardless of
+// what's being created.
+function CreateChoiceModal({ title, onClose, onCreateBlank, children }) {
+  const [showExisting, setShowExisting] = useState(false);
+  return (
+    <Modal title={title} onClose={onClose}>
+      {!showExisting ? (
+        <div className="space-y-2">
+          <button
+            type="button"
+            className="w-full text-left border border-slate-800 bg-slate-900 hover:border-slate-600 rounded-lg p-3 flex items-start gap-3"
+            onClick={onCreateBlank}
+          >
+            <FilePlus size={18} className="text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-slate-100 text-sm">Create new</div>
+              <div className="text-xs text-slate-500 mt-0.5">Start from a blank form.</div>
+            </div>
+          </button>
+          <button
+            type="button"
+            className="w-full text-left border border-slate-800 bg-slate-900 hover:border-slate-600 rounded-lg p-3 flex items-start gap-3"
+            onClick={() => setShowExisting(true)}
+          >
+            <Copy size={18} className="text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-slate-100 text-sm">Create from existing</div>
+              <div className="text-xs text-slate-500 mt-0.5">Copy an existing one's data as a starting point, then adjust what's different.</div>
+            </div>
+          </button>
+        </div>
+      ) : (
+        <div>
+          <button type="button" className="text-xs text-amber-400 hover:underline mb-3" onClick={() => setShowExisting(false)}>‹ Back</button>
+          {children}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// CreateChoiceModal's "Create from existing" content for cost centres —
+// a flat list, since there are only ever expected to be a handful of these
+// (unlike procedures below, which get grouped).
+function CostCentreCopyPicker({ costCentres, onPick }) {
+  if (!costCentres?.length) return <p className="text-xs text-slate-600">No cost centres yet to copy from.</p>;
+  return (
+    <div className="space-y-1 max-h-[50vh] overflow-y-auto">
+      {costCentres.map((c) => (
+        <button
+          key={c.id} type="button"
+          className="w-full text-left text-sm text-slate-300 hover:text-amber-300 hover:bg-slate-800/60 px-2.5 py-1.5 rounded flex items-center justify-between gap-2"
+          onClick={() => onPick(c)}
+        >
+          <span className="truncate">{c.name || '(unnamed)'}</span>
+          <span className="text-[11px] text-slate-500 font-mono shrink-0">{fmtMoney(costCentrePerHr(c))} /hr</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// CreateChoiceModal's "Create from existing" content for procedures —
+// grouped by process, each a collapsed-by-default Section, mirroring
+// CostingView's own listing further down (same "one really long page"
+// problem, just inside a modal instead of the tab itself).
+function ProcedureCopyPicker({ procedures, costCentres, onPick }) {
+  const byProcess = {};
+  (procedures || []).forEach((p) => {
+    const key = p.process || '(no process assigned)';
+    (byProcess[key] = byProcess[key] || []).push(p);
+  });
+  const groups = Object.keys(byProcess).sort();
+  if (!groups.length) return <p className="text-xs text-slate-600">No procedures yet to copy from.</p>;
+  return (
+    <div className="max-h-[55vh] overflow-y-auto">
+      {groups.map((gk) => (
+        <Section key={gk} title={`${gk} (${byProcess[gk].length})`} defaultOpen={false}>
+          <div className="space-y-1">
+            {byProcess[gk].map((p) => (
+              <button
+                key={p.id} type="button"
+                className="w-full text-left text-sm text-slate-300 hover:text-amber-300 hover:bg-slate-800/60 px-2.5 py-1.5 rounded flex items-center justify-between gap-2"
+                onClick={() => onPick(p)}
+              >
+                <span className="truncate">{p.name || '(unnamed)'}</span>
+                <span className="text-[11px] text-slate-500 font-mono shrink-0">{fmtMoney(procedureCost(p, costCentres))} /hr</span>
+              </button>
+            ))}
+          </div>
+        </Section>
+      ))}
+    </div>
+  );
+}
+
+// `seedFrom` — an existing cost centre to copy data from, offered via
+// CreateChoiceModal — only ever applies when `centre` itself is absent
+// (i.e. genuinely creating new, not editing one that already exists): it
+// prefills `d`, but `isNew` still derives from `centre` alone, so the
+// result reads and behaves as a brand new, unsaved record (title, no
+// Delete button, a fresh id) rather than as an edit of the source.
+function CostCentreEditor({ centre, seedFrom, onClose, onSave, onDelete }) {
   const isNew = !centre;
-  const [d, setD] = useState(() => (centre ? JSON.parse(JSON.stringify(centre)) : { id: uid('cc'), name: '', interestRate: 10, annualHours: 3800, assets: [{ name: '', capital: 0, salvage: 0, life: 0 }] }));
+  const [d, setD] = useState(() => {
+    if (centre) return JSON.parse(JSON.stringify(centre));
+    if (seedFrom) return { ...JSON.parse(JSON.stringify(seedFrom)), id: uid('cc'), name: `${seedFrom.name || 'Untitled cost centre'} (copy)` };
+    return { id: uid('cc'), name: '', interestRate: 10, annualHours: 3800, assets: [{ name: '', capital: 0, salvage: 0, life: 0 }] };
+  });
   const set = (patch) => setD((x) => ({ ...x, ...patch }));
   const setAsset = (i, k, v, text) => setD((x) => { const a = x.assets.slice(); a[i] = { ...a[i], [k]: text ? v : (Number(v) || 0) }; return { ...x, assets: a }; });
   const addAsset = () => setD((x) => ({ ...x, assets: [...x.assets, { name: '', capital: 0, salvage: 0, life: 0 }] }));
@@ -735,7 +851,12 @@ function CostCentreEditor({ centre, onClose, onSave, onDelete }) {
   );
 }
 
-function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, onDelete }) {
+// `seedFrom` — same idea as CostCentreEditor's: an existing procedure to
+// copy from, only ever consulted when `procedure` itself is absent, so
+// `isNew`/title/Delete-visibility all still derive from `procedure` alone
+// and the result is a genuinely new record (fresh id), not an edit of the
+// source.
+function ProcedureEditor({ procedure, seedFrom, processes, costCentres, onClose, onSave, onDelete }) {
   const isNew = !procedure;
   const [d, setD] = useState(() => {
     // `materialMode`/`wire` post-date this shape — a procedure saved before
@@ -744,10 +865,15 @@ function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, o
     // etc. without this. Defaulting `materialMode` to 'powder' here (not
     // just at the procedureParts()/cost layer) keeps every read in this
     // component working off the same "undefined means powder" convention.
-    const base = procedure ? JSON.parse(JSON.stringify(procedure)) : {
+    const source = procedure || seedFrom;
+    const base = source ? JSON.parse(JSON.stringify(source)) : {
       id: uid('proc'), name: '', process: processes[0] || '', costCentreId: (costCentres[0] && costCentres[0].id) || '', substrate: '', notes: '',
       gases: [], electricity: { kw: 0, tariff: 0.28 }, spares: [], maintenance: [], consumables: [], labour: [], qa: [],
     };
+    if (!procedure && seedFrom) {
+      base.id = uid('proc');
+      base.name = `${seedFrom.name || 'Untitled procedure'} (copy)`;
+    }
     if (!base.materialMode) base.materialMode = 'powder';
     if (!base.powder) base.powder = { material: '', pricePerKg: 0, gPerMin: 0 };
     if (!base.wire) base.wire = { type: '', diameterMm: 0, feedSpeedMPerMin: 0, pricePerKg: 0 };
@@ -1337,9 +1463,14 @@ function CostingView({
 
       <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Procedures</h3>
       {groups.length === 0 && <p className="text-xs text-slate-600">No procedures yet — import from your cost calculator.</p>}
+      {/* Collapsed by default, same reasoning as ProcedureCopyPicker's
+          grouping (the "Create from existing" picker, above) — this page is
+          a handful of procedures per process today, but the whole point of
+          grouping by process is that it won't stay that way. A dozen
+          processes each with several procedures, all expanded, is exactly
+          the "one really long page" this replaces. */}
       {groups.map((gk) => (
-        <div key={gk} className="mb-5">
-          <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">{gk}</div>
+        <Section key={gk} title={`${gk} (${byProcess[gk].length})`} defaultOpen={false}>
           <div className="grid lg:grid-cols-2 gap-3">
             {byProcess[gk].map((p) => {
               const parts = procedureParts(p, costCentres);
@@ -1377,7 +1508,7 @@ function CostingView({
               );
             })}
           </div>
-        </div>
+        </Section>
       ))}
     </div>
   );
@@ -1437,6 +1568,16 @@ export default function WeldingScheduler() {
   const [editingStaff, setEditingStaff] = useState(null);
   const [editingProcedure, setEditingProcedure] = useState(null); // procedure object or 'new' or null
   const [editingCentre, setEditingCentre] = useState(null);       // cost-centre object or 'new' or null
+  // "New procedure"/"New cost centre" open one of these first (CreateChoiceModal)
+  // instead of editingProcedure/editingCentre directly — Create new still
+  // lands on the same blank editor as before; Create from existing sets the
+  // matching *Seed state below and THEN opens the same 'new' editor, which
+  // prefills from the seed without treating it as an edit of the source
+  // (see ProcedureEditor/CostCentreEditor's seedFrom prop).
+  const [procedureChoiceOpen, setProcedureChoiceOpen] = useState(false);
+  const [costCentreChoiceOpen, setCostCentreChoiceOpen] = useState(false);
+  const [procedureSeed, setProcedureSeed] = useState(null);
+  const [costCentreSeed, setCostCentreSeed] = useState(null);
   const [editingTask, setEditingTask] = useState(null);           // task object or 'new' or null
   const [editingProject, setEditingProject] = useState(null);     // project object or 'new' or null
   // A task backfilled via "Log past work" (BackfillTaskModal) — a task
@@ -1660,7 +1801,8 @@ export default function WeldingScheduler() {
   // would jump under the cursor. It applies as soon as they're done.
   const busyEditing = !!(
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
-    || editingProcedure || editingCentre || pendingComplete || confirmDelete || dragJobId
+    || editingProcedure || editingCentre || procedureChoiceOpen || costCentreChoiceOpen
+    || pendingComplete || confirmDelete || dragJobId
     || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
     || confirmClearPatterns || reworkOf || editingTask || editingProject || pendingTaskComplete || dragTaskId
     || backfillTask
@@ -2577,17 +2719,19 @@ export default function WeldingScheduler() {
     map[cc.id] = cc;
     saveCostCentres(Object.values(map));
     setEditingCentre(null);
+    setCostCentreSeed(null);
     showToast(`Saved cost centre ${cc.name}.`);
   }
-  function deleteCentre(id) { saveCostCentres(costCentres.filter((x) => x.id !== id)); setEditingCentre(null); }
+  function deleteCentre(id) { saveCostCentres(costCentres.filter((x) => x.id !== id)); setEditingCentre(null); setCostCentreSeed(null); }
   function saveProcedure(p) {
     const map = Object.fromEntries(procedures.map((x) => [x.id, x]));
     map[p.id] = p;
     saveProceduresList(Object.values(map));
     setEditingProcedure(null);
+    setProcedureSeed(null);
     showToast(`Saved procedure ${p.name}.`);
   }
-  function deleteProcedure(id) { saveProceduresList(procedures.filter((x) => x.id !== id)); setEditingProcedure(null); }
+  function deleteProcedure(id) { saveProceduresList(procedures.filter((x) => x.id !== id)); setEditingProcedure(null); setProcedureSeed(null); }
   function importCosting(data) {
     const parsed = parseCostingImport(data, processes);
     if (!parsed) { showToast("That file doesn't look like a cost-calculator export."); return; }
@@ -2834,10 +2978,10 @@ export default function WeldingScheduler() {
             processes={processes}
             readOnly={readOnly}
             onImport={importCosting}
-            onNewProcedure={() => setEditingProcedure('new')}
-            onEditProcedure={(p) => setEditingProcedure(p)}
-            onNewCentre={() => setEditingCentre('new')}
-            onEditCentre={(c) => setEditingCentre(c)}
+            onNewProcedure={() => setProcedureChoiceOpen(true)}
+            onEditProcedure={(p) => { setProcedureSeed(null); setEditingProcedure(p); }}
+            onNewCentre={() => setCostCentreChoiceOpen(true)}
+            onEditCentre={(c) => { setCostCentreSeed(null); setEditingCentre(c); }}
             equipment={equipment}
             onAddEquip={() => setEditingEquipment('new')}
             onEditEquip={(e) => setEditingEquipment(e)}
@@ -3039,12 +3183,40 @@ export default function WeldingScheduler() {
         />
       )}
 
+      {procedureChoiceOpen && (
+        <CreateChoiceModal
+          title="New procedure"
+          onClose={() => setProcedureChoiceOpen(false)}
+          onCreateBlank={() => { setProcedureChoiceOpen(false); setProcedureSeed(null); setEditingProcedure('new'); }}
+        >
+          <ProcedureCopyPicker
+            procedures={procedures}
+            costCentres={costCentres}
+            onPick={(p) => { setProcedureChoiceOpen(false); setProcedureSeed(p); setEditingProcedure('new'); }}
+          />
+        </CreateChoiceModal>
+      )}
+
+      {costCentreChoiceOpen && (
+        <CreateChoiceModal
+          title="New cost centre"
+          onClose={() => setCostCentreChoiceOpen(false)}
+          onCreateBlank={() => { setCostCentreChoiceOpen(false); setCostCentreSeed(null); setEditingCentre('new'); }}
+        >
+          <CostCentreCopyPicker
+            costCentres={costCentres}
+            onPick={(c) => { setCostCentreChoiceOpen(false); setCostCentreSeed(c); setEditingCentre('new'); }}
+          />
+        </CreateChoiceModal>
+      )}
+
       {editingProcedure && (
         <ProcedureEditor
           procedure={editingProcedure === 'new' ? null : editingProcedure}
+          seedFrom={editingProcedure === 'new' ? procedureSeed : null}
           processes={processes}
           costCentres={costCentres}
-          onClose={() => setEditingProcedure(null)}
+          onClose={() => { setEditingProcedure(null); setProcedureSeed(null); }}
           onSave={saveProcedure}
           onDelete={deleteProcedure}
         />
@@ -3053,7 +3225,8 @@ export default function WeldingScheduler() {
       {editingCentre && (
         <CostCentreEditor
           centre={editingCentre === 'new' ? null : editingCentre}
-          onClose={() => setEditingCentre(null)}
+          seedFrom={editingCentre === 'new' ? costCentreSeed : null}
+          onClose={() => { setEditingCentre(null); setCostCentreSeed(null); }}
           onSave={saveCentre}
           onDelete={deleteCentre}
         />
