@@ -1854,6 +1854,25 @@ oversight: what "rework of one part" or "rework of one batch member" should
 even create wasn't asked for, and guessing at it risked building the wrong
 shape. Revisit if that need actually comes up.
 
+**`isRework`/`reworkOfJobId` have to be carried through `JobModal`'s save
+path explicitly, same as `batchId`/`batchOrder`.** Reported from testing:
+adding a procedure to a rework job (or editing any other field on it) and
+saving made it disappear from the Quality tab and show up only as an
+ordinary job — the link back to the original was gone too. Cause was the
+exact same "fresh object" trap documented under Batches below:
+`JobModal.handleSave()` builds `data` from scratch out of its own local
+state rather than merging into the existing job, and neither field is
+editable from this modal (a rework is only ever created via "Mark for
+rework" on the *original* job), so they were never in that local state to
+begin with — every save silently dropped them, not just the first one after
+creation. Fixed by carrying `job?.isRework || false` / `job?.reworkOfJobId
+?? null` through explicitly, the same pattern `batchId`/`batchOrder`/
+`actualHours`/`completedDate` already use just above them in the same
+object. See `'isRework survives an unrelated edit + save'` in
+`e2e/specs/rework-quality.mjs` — if another field is ever added that's set
+outside this modal (created by some other flow, never itself editable
+here), it needs the same treatment or it will vanish exactly this way.
+
 ### Splitting a job
 
 For when a job has to come off equipment before it's done (an urgent job

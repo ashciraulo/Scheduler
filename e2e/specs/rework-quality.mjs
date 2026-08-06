@@ -10,7 +10,9 @@
    - the new job carries the link back, and the original shows the link
      forward, both clickable
    - the Quality tab lists rework jobs with hours logged and cost, computed
-     with the same loggedHours/jobCost helpers as any other job */
+     with the same loggedHours/jobCost helpers as any other job
+   - isRework/reworkOfJobId survive an unrelated edit + save from JobModal,
+     not just the initial creation (#59-style "fresh object" trap) */
 
 import { modalSel } from '../lib/harness.mjs';
 
@@ -141,6 +143,39 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.waitForTimeout(400);
   const qualityAfterLog = await page.locator('main').innerText();
   check('logged hours against the rework show up on the Quality tab', /1\.5h/.test(qualityAfterLog), qualityAfterLog);
+
+  // ---- editing ANY field on the rework and saving must not silently drop
+  // isRework/reworkOfJobId — JobModal's handleSave builds a fresh `data`
+  // object rather than merging into the existing job (same trap as
+  // batchId/batchOrder, #59), so a field added here without an explicit
+  // carry-through vanishes the moment the job is next saved. Reported from
+  // testing: adding a procedure to a rework job made it disappear from the
+  // Quality tab and show up only as an ordinary job. ----
+  await page.click('nav >> text=Job Backlog');
+  await page.waitForTimeout(300);
+  await page.locator('tr', { hasText: 'Bracket Weld Batch 12 — Rework' }).locator('button[title="Edit"]').click();
+  await page.waitForSelector(modalSel);
+  await page.waitForTimeout(300);
+  await modal().locator('textarea').first().fill('Edited during testing — unrelated change');
+  await modal().getByRole('button', { name: 'Save', exact: true }).click();
+  await page.waitForTimeout(500);
+
+  const afterEdit = await page.evaluate((id) => {
+    const jobs = JSON.parse(localStorage.getItem('wf::wf_jobs') || '[]');
+    return jobs.find((j) => j.id === id);
+  }, state.rework.id);
+  check('isRework survives an unrelated edit + save', afterEdit?.isRework === true, JSON.stringify(afterEdit));
+  check('reworkOfJobId survives an unrelated edit + save', afterEdit?.reworkOfJobId === 'job_orig', JSON.stringify(afterEdit?.reworkOfJobId));
+
+  await page.click('nav >> text=Quality');
+  await page.waitForTimeout(400);
+  check('the rework job is STILL listed on the Quality tab after being edited',
+        (await page.locator('main').innerText()).includes('Bracket Weld Batch 12 — Rework'));
+
+  await page.click('nav >> text=Job Backlog');
+  await page.waitForTimeout(300);
+  check('the rework badge is STILL on the Backlog row after being edited',
+        (await page.locator('tr', { hasText: 'Bracket Weld Batch 12 — Rework' }).locator('text=rework').count()) === 1);
 
   check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 }

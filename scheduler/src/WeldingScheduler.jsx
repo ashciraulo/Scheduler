@@ -5681,6 +5681,17 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       // never had these fields to begin with (#59).
       batchId: job?.batchId ?? null,
       batchOrder: job?.batchOrder ?? null,
+      // Same trap, same fix as batchId/batchOrder just above: not editable
+      // from this modal (a rework is created via "Mark for rework" on the
+      // ORIGINAL job, never toggled here), so it has to be carried through
+      // explicitly or it silently vanishes the moment ANY field on the
+      // rework job is edited and saved — the rework quietly turns into an
+      // ordinary job, disappearing from the Quality tab and losing its link
+      // back to the original with no error or warning. Reported from
+      // testing: adding a procedure to a rework job and saving was enough
+      // to trigger it.
+      isRework: job?.isRework || false,
+      reworkOfJobId: job?.reworkOfJobId ?? null,
       assignment: computeAssignment(),
       // hoursTotal/percentComplete/status are derived from parts by the
       // scheduler on the very next recompute when the job is split, but set
