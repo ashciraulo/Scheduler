@@ -90,11 +90,18 @@ export default async function run({ page, check, errors, baseUrl }) {
   const bCell = page.locator('div', { hasText: 'Job B' }).filter({ has: page.locator('span.font-mono') }).last();
   const eqHeader = page.locator('span.font-semibold', { hasText: 'Cell 1' });
   const eqBox = await eqHeader.boundingBox();
+  // Measured from the actual rendered day-header cell, not a hardcoded 76 —
+  // colWidth scales with the zoom level's default (see "60% default" in
+  // scheduler/CLAUDE.md), so a literal pixel width here would silently land
+  // the drop on the wrong day column the next time that default changes,
+  // same trap two other specs hit when it last moved.
+  const dayHeaderRow = page.locator('div.border-b.border-slate-800.bg-slate-900.sticky.top-0.z-20');
+  const colWidth = (await dayHeaderRow.locator('> div').nth(1).boundingBox()).width;
   const beforeTimelineDrop = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_jobs') || '[]').find((j) => j.name === 'Job B').assignment.startDate);
   await bCell.hover();
   await page.mouse.down();
-  await page.mouse.move(eqBox.x + 6 * 76, eqBox.y + 40, { steps: 10 }); // a day column well past the seeded jobs, empty timeline space
-  await page.mouse.move(eqBox.x + 6 * 76, eqBox.y + 40, { steps: 5 });
+  await page.mouse.move(eqBox.x + 6 * colWidth, eqBox.y + 40, { steps: 10 }); // a day column well past the seeded jobs, empty timeline space
+  await page.mouse.move(eqBox.x + 6 * colWidth, eqBox.y + 40, { steps: 5 });
   await page.mouse.up();
   await page.waitForTimeout(500);
   const afterTimelineDrop = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_jobs') || '[]').find((j) => j.name === 'Job B').assignment.startDate);

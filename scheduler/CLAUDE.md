@@ -1528,6 +1528,62 @@ both dense, grid-of-inputs forms. Two things worth knowing if either grows:
   asset name. Matches `ProcedureEditor`, which already opened `wide` for
   the same reason.
 
+### Costing: wire feedstock alongside powder
+
+`ProcedureEditor` used to assume every procedure was thermal-spray-shaped —
+a hardcoded "Powder" section (material name, $/kg, g/min) with no
+alternative. Fine for HVOF/Plasma Spray, wrong for anything wire-fed
+(Robotic MIG/TIG welding — and, importantly, Thermal Spray - Arc Spray,
+which **is also wire-fed** despite being a spray process). That last case
+is why the choice is a manual "Feedstock" radio toggle (`p.materialMode`,
+`'powder'` default or `'wire'`) rather than something inferred from
+`process`: process alone can't tell powder and wire apart, since one spray
+process uses wire and the two weld processes do too.
+
+**Wire's $/hr is calculated, not entered.** Unlike powder's g/min (which
+the cost calculator already reports straight from the spray gun's
+settings), nobody types a wire consumption rate directly — they type what
+they actually know: wire type, diameter (mm), feed speed (m/min) and
+$/kg. `wireConsumptionGPerMin(wire)` derives grams/min from those via the
+standard welding deposition-rate relationship, cross-sectional area ×
+feed speed × density, which happens to equal g/min with **no extra
+unit-conversion factor** — the mm→m and cm³→mm³ conversions cancel
+exactly. That g/min is then run through the same `× 0.06` (g/min → kg/hr)
+`× $/kg` used for powder, so both feedstocks share one small piece of
+arithmetic once the g/min number exists.
+
+**Density comes from `WIRE_DENSITIES`, a lookup by wire type, not a field
+the user fills in.** Asked of the user directly: two procedures using the
+same wire type must not be able to silently disagree about its density,
+and a technician entering a procedure shouldn't need to know or look one
+up. The wire-type `<select>` in `ProcedureEditor` is generated straight
+from its keys (currently Carbon Steel, Stainless Steel, Nickel Alloy,
+Titanium — extend the object as more are needed, nothing else to touch).
+The density and the resulting consumption figure are both shown as a
+one-line caption under the wire fields so the $/hr above it isn't a black
+box.
+
+**`procedureParts()`'s old `powder` key is now `material`** — a single
+active-feedstock cost, computed from whichever of `p.powder`/`p.wire` is
+selected by `p.materialMode`; every reader (`ProcedureEditor`'s own total,
+`CostingView`'s procedure cards) was updated to match, and the card's row
+label switches between "Powder"/"Wire" to match. **Switching modes never
+clears the other mode's fields** — `p.powder` and `p.wire` can both be
+present on a procedure at once, only the active one ever contributes to
+`total`, so flipping the radio back and forth to compare doesn't lose
+work either way.
+
+**Backward compatible with every procedure saved before this existed**,
+without a migration step: `p.materialMode` is only ever compared `===
+'wire'`, so `undefined` (every old record) already reads as powder, which
+is exactly what those records meant. `ProcedureEditor`'s own state init
+additionally backfills a missing `wire`/`powder`/`materialMode` onto `d`
+the moment such a procedure is opened, so the wire fields never crash
+reading `d.wire.type` off an object that was never there — same reasoning
+as `normalizeStaff` defaulting absent fields elsewhere in this file.
+`parseCostingImport` (the external cost-calculator JSON format) gets the
+same default, since that calculator has only ever exported powder specs.
+
 ### Costing: efficiency and average labour cost
 
 A job/task's **scheduled** hours aren't all productive process time — every

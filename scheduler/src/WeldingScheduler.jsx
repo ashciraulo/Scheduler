@@ -223,7 +223,7 @@ function seedProcedures() {
   const note = 'Placeholder from cost calculator — edit or re-import with your real values.';
   return [
     { id: 'proc_wccocr', name: 'WC-CoCr 86/10/4 — hydraulic rod', process: 'Thermal Spray - HVOF', costCentreId: 'cc_hvof_gas', substrate: '17-4PH stainless', notes: note,
-      powder: { material: 'WC-CoCr 86/10/4', pricePerKg: 82, gPerMin: 83.33 },
+      materialMode: 'powder', powder: { material: 'WC-CoCr 86/10/4', pricePerKg: 82, gPerMin: 83.33 },
       gases: [
         { name: 'Hydrogen (fuel)', role: 'primary', unit: 'm³', pricePerUnit: 8.5, lPerMin: 750 },
         { name: 'Oxygen', role: 'secondary', unit: 'm³', pricePerUnit: 2.2, lPerMin: 300 },
@@ -237,7 +237,7 @@ function seedProcedures() {
       qa: [{ name: 'Metallurgical coupon', costPerHour: 18 }, { name: 'CMM inspection', costPerHour: 9 }, { name: 'Documentation / cert', costPerHour: 6 }],
     },
     { id: 'proc_cr3c2', name: 'Cr₃C₂-NiCr — turbine shroud', process: 'Thermal Spray - HVOF', costCentreId: 'cc_hvof_kero', substrate: 'Inconel 718', notes: note,
-      powder: { material: 'Cr₃C₂-NiCr (WOKA 7202)', pricePerKg: 95, gPerMin: 75 },
+      materialMode: 'powder', powder: { material: 'Cr₃C₂-NiCr (WOKA 7202)', pricePerKg: 95, gPerMin: 75 },
       gases: [
         { name: 'Kerosene (fuel)', role: 'primary', unit: 'L', pricePerUnit: 1.6, lPerMin: 0.37 },
         { name: 'Oxygen', role: 'secondary', unit: 'm³', pricePerUnit: 2.2, lPerMin: 916.67 },
@@ -251,7 +251,7 @@ function seedProcedures() {
       qa: [{ name: 'Metallurgical coupon', costPerHour: 22 }, { name: 'CMM inspection', costPerHour: 9 }, { name: 'Documentation / cert', costPerHour: 6 }],
     },
     { id: 'proc_nicraly', name: 'NiCrAlY bond coat — APS', process: 'Thermal Spray - Plasma Spray', costCentreId: 'cc_plasma', substrate: 'Various', notes: note,
-      powder: { material: 'NiCrAlY', pricePerKg: 120, gPerMin: 63.33 },
+      materialMode: 'powder', powder: { material: 'NiCrAlY', pricePerKg: 120, gPerMin: 63.33 },
       gases: [
         { name: 'Argon', role: 'primary', unit: 'm³', pricePerUnit: 3.8, lPerMin: 60 },
         { name: 'Hydrogen', role: 'secondary', unit: 'm³', pricePerUnit: 8.5, lPerMin: 15 },
@@ -284,13 +284,51 @@ function costCentrePerHr(cc) {
     return s + dep + interest;
   }, 0);
 }
+// g/cm³ — turns a wire's diameter + feed speed into a consumption rate
+// (see wireConsumptionGPerMin) without asking the user to know or enter a
+// density themselves. A per-material lookup, not a field on the procedure,
+// so two procedures using the same wire type can't silently disagree about
+// its density, and it stays in sync everywhere at once if a figure needs
+// correcting. Extend this as more wire types are needed — ProcedureEditor's
+// wire-type select is generated straight from its keys.
+const WIRE_DENSITIES = {
+  'Carbon Steel': 7.85,
+  'Stainless Steel': 8.00,
+  'Nickel Alloy': 8.19,
+  'Titanium': 4.51,
+};
+// Wire feedstock's consumption rate isn't a field the user enters directly
+// the way powder's g/min is (the cost calculator already reports that one
+// straight from the spray gun's settings) — it's derived from the wire
+// itself: cross-sectional area (mm², from diameter) × feed speed (m/min) ×
+// density (g/cm³) gives grams/min directly, with no extra unit-juggling
+// factor needed — the mm→m and cm³→mm³ conversions cancel each other out
+// exactly (standard welding-engineering deposition-rate formula). Returns 0
+// for an unrecognised/blank wire type rather than guessing a density.
+function wireConsumptionGPerMin(wire) {
+  const density = WIRE_DENSITIES[wire?.type] || 0;
+  const diameterMm = Number(wire?.diameterMm) || 0;
+  const feedSpeedMPerMin = Number(wire?.feedSpeedMPerMin) || 0;
+  const areaMm2 = Math.PI * (diameterMm / 2) ** 2;
+  return areaMm2 * density * feedSpeedMPerMin;
+}
 // Procedure → per-category and total $/hr.
 function procedureParts(p, costCentres) {
-  if (!p) return { powder: 0, gas: 0, electricity: 0, spares: 0, maintenance: 0, consumables: 0, depreciation: 0, labour: 0, qa: 0, total: 0 };
+  if (!p) return { material: 0, gas: 0, electricity: 0, spares: 0, maintenance: 0, consumables: 0, depreciation: 0, labour: 0, qa: 0, total: 0 };
   const pw = p.powder || {}, el = p.electricity || {};
   const cc = (costCentres || []).find((c) => c.id === p.costCentreId);
   const t = {};
-  t.powder = (Number(pw.pricePerKg) || 0) * ((Number(pw.gPerMin) || 0) * 0.06);
+  // `materialMode` — 'wire' or 'powder' (default) — is a manual per-procedure
+  // choice, not inferred from `process`: Thermal Spray - Arc Spray is
+  // wire-fed while HVOF/Plasma are powder-fed, so process alone can't tell
+  // the two apart. Switching modes in ProcedureEditor doesn't clear the
+  // other mode's fields, so `p.powder`/`p.wire` can both be present at once
+  // — only the active mode's ever contributes to cost. Same *0.06 g/min→kg/hr
+  // conversion either way (see wireConsumptionGPerMin's comment for wire's
+  // own g/min derivation).
+  t.material = p.materialMode === 'wire'
+    ? (Number(p.wire?.pricePerKg) || 0) * (wireConsumptionGPerMin(p.wire) * 0.06)
+    : (Number(pw.pricePerKg) || 0) * ((Number(pw.gPerMin) || 0) * 0.06);
   t.gas = (p.gases || []).reduce((s, g) => s + (Number(g.pricePerUnit) || 0) * gasUnitsHr(g), 0);
   t.electricity = (Number(el.kw) || 0) * (Number(el.tariff) || 0);
   t.spares = (p.spares || []).reduce((s, r) => s + (Number(r.life) > 0 ? (Number(r.cost) || 0) / Number(r.life) : 0), 0);
@@ -299,7 +337,7 @@ function procedureParts(p, costCentres) {
   t.depreciation = costCentrePerHr(cc);
   t.labour = (p.labour || []).reduce((s, r) => s + (Number(r.rate) || 0) * (Number(r.count) || 0), 0);
   t.qa = (p.qa || []).reduce((s, r) => s + (Number(r.costPerHour) || 0), 0);
-  t.total = t.powder + t.gas + t.electricity + t.spares + t.maintenance + t.consumables + t.depreciation + t.labour + t.qa;
+  t.total = t.material + t.gas + t.electricity + t.spares + t.maintenance + t.consumables + t.depreciation + t.labour + t.qa;
   return t;
 }
 const procedureCost = (p, costCentres) => procedureParts(p, costCentres).total;
@@ -354,7 +392,15 @@ function parseCostingImport(data, schedProcesses) {
   }));
   const procedures = rawSpecs.map((s) => ({
     id: s.id || uid('proc'), name: s.name || '', process: mapImportProcess(s.process || s.name, schedProcesses), costCentreId: s.processId || s.costCentreId || '', substrate: s.substrate || '', notes: s.notes || '',
-    powder: s.powder || { material: '', pricePerKg: 0, gPerMin: 0 }, gases: Array.isArray(s.gases) ? s.gases : [], electricity: s.electricity || { kw: 0, tariff: 0 },
+    // The external cost calculator this format comes from only ever exported
+    // powder specs, so an import with no materialMode/wire at all defaults
+    // to powder — same fallback ProcedureEditor and procedureParts use for
+    // any older stored procedure missing these fields. Passed through as-is
+    // (rather than dropped) in case a future export does include wire data.
+    materialMode: s.materialMode === 'wire' ? 'wire' : 'powder',
+    powder: s.powder || { material: '', pricePerKg: 0, gPerMin: 0 },
+    wire: s.wire || { type: '', diameterMm: 0, feedSpeedMPerMin: 0, pricePerKg: 0 },
+    gases: Array.isArray(s.gases) ? s.gases : [], electricity: s.electricity || { kw: 0, tariff: 0 },
     spares: Array.isArray(s.spares) ? s.spares : [], maintenance: Array.isArray(s.maintenance) ? s.maintenance : [], consumables: Array.isArray(s.consumables) ? s.consumables : [],
     labour: Array.isArray(s.labour) ? s.labour : [], qa: Array.isArray(s.qa) ? s.qa : [],
   }));
@@ -691,15 +737,31 @@ function CostCentreEditor({ centre, onClose, onSave, onDelete }) {
 
 function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, onDelete }) {
   const isNew = !procedure;
-  const [d, setD] = useState(() => (procedure ? JSON.parse(JSON.stringify(procedure)) : {
-    id: uid('proc'), name: '', process: processes[0] || '', costCentreId: (costCentres[0] && costCentres[0].id) || '', substrate: '', notes: '',
-    powder: { material: '', pricePerKg: 0, gPerMin: 0 }, gases: [], electricity: { kw: 0, tariff: 0.28 }, spares: [], maintenance: [], consumables: [], labour: [], qa: [],
-  }));
+  const [d, setD] = useState(() => {
+    // `materialMode`/`wire` post-date this shape — a procedure saved before
+    // they existed (or one that's only ever used powder) has no `wire`
+    // object at all, so the wire fields would crash reading `d.wire.type`
+    // etc. without this. Defaulting `materialMode` to 'powder' here (not
+    // just at the procedureParts()/cost layer) keeps every read in this
+    // component working off the same "undefined means powder" convention.
+    const base = procedure ? JSON.parse(JSON.stringify(procedure)) : {
+      id: uid('proc'), name: '', process: processes[0] || '', costCentreId: (costCentres[0] && costCentres[0].id) || '', substrate: '', notes: '',
+      gases: [], electricity: { kw: 0, tariff: 0.28 }, spares: [], maintenance: [], consumables: [], labour: [], qa: [],
+    };
+    if (!base.materialMode) base.materialMode = 'powder';
+    if (!base.powder) base.powder = { material: '', pricePerKg: 0, gPerMin: 0 };
+    if (!base.wire) base.wire = { type: '', diameterMm: 0, feedSpeedMPerMin: 0, pricePerKg: 0 };
+    return base;
+  });
   const set = (patch) => setD((x) => ({ ...x, ...patch }));
   const setArr = (k, i, f, v, text) => setD((x) => { const a = x[k].slice(); a[i] = { ...a[i], [f]: text ? v : (Number(v) || 0) }; return { ...x, [k]: a }; });
   const addRow = (k, tpl) => setD((x) => ({ ...x, [k]: [...x[k], JSON.parse(JSON.stringify(tpl))] }));
   const delRow = (k, i) => setD((x) => ({ ...x, [k]: x[k].filter((_, j) => j !== i) }));
   const setPw = (f, v, text) => setD((x) => ({ ...x, powder: { ...x.powder, [f]: text ? v : (Number(v) || 0) } }));
+  // Wire type is a select (text) — everything else is a number, same split
+  // as setPw. Switching materialMode deliberately never resets `x.wire` or
+  // `x.powder` — see the materialMode comment on procedureParts.
+  const setWire = (f, v, text) => setD((x) => ({ ...x, wire: { ...x.wire, [f]: text ? v : (Number(v) || 0) } }));
   const setEl = (f, v) => setD((x) => ({ ...x, electricity: { ...x.electricity, [f]: Number(v) || 0 } }));
   const parts = procedureParts(d, costCentres);
   // Plain function (not a nested component) so inputs keep focus across renders.
@@ -741,19 +803,77 @@ function ProcedureEditor({ procedure, processes, costCentres, onClose, onSave, o
         <span className="text-xs text-slate-400 uppercase tracking-wide">Total hourly operating cost</span>
         <span className="text-lg font-bold font-mono text-amber-300">{fmtMoney(parts.total)} /hr</span>
       </div>
+      {/* Not every process feeds the same way — Thermal Spray HVOF/Plasma
+          use powder, Robotic MIG/TIG welding uses wire, and Thermal Spray -
+          Arc Spray is ALSO wire-fed despite being a spray process, so
+          `process` alone can't tell powder and wire apart. A manual choice
+          instead of an inferred one, same reasoning as materialMode's
+          comment on procedureParts. */}
       <div className="mb-3">
-        <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Powder</span><span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts.powder)} /hr</span></div>
-        <div className="grid gap-1.5 mb-1" style={{ gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)' }}>
-          <span className="text-[10px] text-slate-500 uppercase">Material</span>
-          <span className="text-[10px] text-slate-500 uppercase">$/kg</span>
-          <span className="text-[10px] text-slate-500 uppercase">g/min</span>
-        </div>
-        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)' }}>
-          <input className={smallInput} placeholder="Material" value={d.powder.material} onChange={(e) => setPw('material', e.target.value, true)} />
-          <input className={smallInput} type="number" step="any" placeholder="$/kg" value={d.powder.pricePerKg} onChange={(e) => setPw('pricePerKg', e.target.value)} />
-          <input className={smallInput} type="number" step="any" placeholder="g/min" value={d.powder.gPerMin} onChange={(e) => setPw('gPerMin', e.target.value)} />
+        <span className="block text-xs font-medium text-slate-400 mb-1 tracking-wide uppercase">Feedstock</span>
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-1.5 text-sm text-slate-300 cursor-pointer">
+            <input
+              type="radio" name="materialMode" className="accent-amber-500"
+              checked={d.materialMode !== 'wire'}
+              onChange={() => set({ materialMode: 'powder' })}
+            />
+            Powder
+          </label>
+          <label className="flex items-center gap-1.5 text-sm text-slate-300 cursor-pointer">
+            <input
+              type="radio" name="materialMode" className="accent-amber-500"
+              checked={d.materialMode === 'wire'}
+              onChange={() => set({ materialMode: 'wire' })}
+            />
+            Wire
+          </label>
         </div>
       </div>
+      {d.materialMode === 'wire' ? (
+        <div className="mb-3">
+          <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Wire</span><span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts.material)} /hr</span></div>
+          <div className="grid gap-1.5 mb-1" style={{ gridTemplateColumns: 'minmax(0,1.3fr) minmax(0,.8fr) minmax(0,.8fr) minmax(0,.8fr)' }}>
+            <span className="text-[10px] text-slate-500 uppercase">Wire type</span>
+            <span className="text-[10px] text-slate-500 uppercase">Diameter mm</span>
+            <span className="text-[10px] text-slate-500 uppercase">Feed m/min</span>
+            <span className="text-[10px] text-slate-500 uppercase">$/kg</span>
+          </div>
+          <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(0,1.3fr) minmax(0,.8fr) minmax(0,.8fr) minmax(0,.8fr)' }}>
+            <select className={smallInput} value={d.wire.type} onChange={(e) => setWire('type', e.target.value, true)}>
+              <option value="">— select —</option>
+              {Object.keys(WIRE_DENSITIES).map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <input className={smallInput} type="number" step="any" placeholder="mm" value={d.wire.diameterMm} onChange={(e) => setWire('diameterMm', e.target.value)} />
+            <input className={smallInput} type="number" step="any" placeholder="m/min" value={d.wire.feedSpeedMPerMin} onChange={(e) => setWire('feedSpeedMPerMin', e.target.value)} />
+            <input className={smallInput} type="number" step="any" placeholder="$/kg" value={d.wire.pricePerKg} onChange={(e) => setWire('pricePerKg', e.target.value)} />
+          </div>
+          {/* Density comes from WIRE_DENSITIES, not a field here — this line
+              is the only place it's ever shown, so the consumption figure
+              driving the $/hr above isn't a black box. */}
+          {d.wire.type ? (
+            <p className="text-[11px] text-slate-500 mt-1">
+              {WIRE_DENSITIES[d.wire.type]} g/cm³ · ≈ {(wireConsumptionGPerMin(d.wire) * 0.06).toFixed(2)} kg/hr consumption
+            </p>
+          ) : (
+            <p className="text-[11px] text-amber-400/80 mt-1">Pick a wire type to calculate consumption and cost.</p>
+          )}
+        </div>
+      ) : (
+        <div className="mb-3">
+          <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Powder</span><span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts.material)} /hr</span></div>
+          <div className="grid gap-1.5 mb-1" style={{ gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)' }}>
+            <span className="text-[10px] text-slate-500 uppercase">Material</span>
+            <span className="text-[10px] text-slate-500 uppercase">$/kg</span>
+            <span className="text-[10px] text-slate-500 uppercase">g/min</span>
+          </div>
+          <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)' }}>
+            <input className={smallInput} placeholder="Material" value={d.powder.material} onChange={(e) => setPw('material', e.target.value, true)} />
+            <input className={smallInput} type="number" step="any" placeholder="$/kg" value={d.powder.pricePerKg} onChange={(e) => setPw('pricePerKg', e.target.value)} />
+            <input className={smallInput} type="number" step="any" placeholder="g/min" value={d.powder.gPerMin} onChange={(e) => setPw('gPerMin', e.target.value)} />
+          </div>
+        </div>
+      )}
       {sec('gases', 'Process gas', 'minmax(0,1.4fr) 104px minmax(0,.9fr) minmax(0,.9fr) 60px 16px', [{ k: 'name', text: true, ph: 'Gas', label: 'Gas' }, { k: 'role', sel: true, opts: ['primary', 'secondary', 'carrier'], label: 'Role' }, { k: 'pricePerUnit', ph: '$/unit', label: '$/unit' }, { k: 'lPerMin', ph: 'L/min', label: 'L/min' }, { k: 'unit', text: true, ph: 'm³', label: 'Unit' }], { name: '', role: 'primary', unit: 'm³', pricePerUnit: 0, lPerMin: 0 }, 'gas')}
       <div className="mb-3">
         <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Electricity</span><span className="text-[11px] text-slate-500 font-mono">{fmtMoney(parts.electricity)} /hr</span></div>
@@ -1225,7 +1345,7 @@ function CostingView({
               const parts = procedureParts(p, costCentres);
               const cc = (costCentres || []).find((c) => c.id === p.costCentreId);
               const rows = [
-                ['Powder', parts.powder], ['Process gas', parts.gas], ['Electricity', parts.electricity],
+                [p.materialMode === 'wire' ? 'Wire' : 'Powder', parts.material], ['Process gas', parts.gas], ['Electricity', parts.electricity],
                 ['Spares', parts.spares], ['Maintenance', parts.maintenance], ['Consumables', parts.consumables],
                 ['Depreciation + interest', parts.depreciation], ['Labour', parts.labour], ['QA', parts.qa],
               ];
