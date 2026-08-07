@@ -15,7 +15,14 @@
      yet.
    - Direct: "New action" on the Quality tab (QualityActionModal), no
      rework job involved at all, an optional job link instead of a
-     required one. */
+     required one, and — as a follow-up — no operator required either.
+
+   Also covered: the Quality tab's action LIST is deliberately shorter than
+   the full record (Details/Job/Category/Due date/Status only — Operator,
+   Proposed solution and the "Progress notes" field all stay one click
+   away in the edit modal instead of crowding the list), and Progress
+   notes itself, which — like Status — only appears once an action already
+   exists, never at creation. */
 
 import { modalSel } from '../lib/harness.mjs';
 
@@ -90,15 +97,32 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('it starts open', bundled[0]?.status === 'open');
 
   // ================================================================
-  // Quality tab shows it in the new action list
+  // Quality tab shows it in the new action list — deliberately a SHORT
+  // row: Details, Job, Category, Due date, Status only. Operator and
+  // Proposed solution stay one click away in the modal rather than
+  // crowding a list meant to be scanned at a glance.
   // ================================================================
   await page.click('nav >> text=Quality');
   await page.waitForTimeout(400);
   let qText = await page.locator('main').innerText();
   check('the action list shows the bundled action\'s details', qText.includes('Coating thickness out of spec'));
-  check('the action list resolves the operator id to a name (Jordan)', /Coating thickness out of spec[\s\S]{0,60}Jordan/.test(qText), qText);
   check('the action list resolves the linked job id to its name', /Coating thickness out of spec[\s\S]{0,60}Shaft HVOF Coat/.test(qText), qText);
   check('"Open actions" tile reads 1', /OPEN ACTIONS\s*\n?1\b/.test(qText), qText.slice(0, 250));
+
+  // The h2's own next sibling is just the "New action" button (same flex
+  // row) — the table is a sibling of that whole flex row, one level up.
+  const actionsTable = page.locator('h2:has-text("Quality actions")').locator('xpath=../following-sibling::div[1]');
+  const actionTableHeaders = await actionsTable.locator('th').allInnerTexts();
+  check('the action table has exactly these five columns, in order',
+        JSON.stringify(actionTableHeaders.map((h) => h.trim().toLowerCase())) === JSON.stringify(['details', 'job', 'category', 'due date', 'status']),
+        JSON.stringify(actionTableHeaders));
+  check('Operator does NOT appear as a column header — it\'s an edit-modal-only field now', !actionTableHeaders.some((h) => /operator/i.test(h)));
+  check('Proposed solution does NOT appear as a column header either', !actionTableHeaders.some((h) => /proposed solution/i.test(h)));
+  // Scoped to the actions table specifically — "Coating thickness…" also
+  // appears in the REWORK table's own Reason column on this same page, so
+  // an unscoped `tr` locator would match both and double-count cells.
+  const actionRow = actionsTable.locator('tr', { hasText: 'Coating thickness out of spec' });
+  check('the row itself has exactly 5 cells, not 7', (await actionRow.locator('td').count()) === 5, await actionRow.locator('td').count());
 
   // ================================================================
   // Direct creation — no rework job at all, and NO operator required:
@@ -112,6 +136,7 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.waitForTimeout(300);
   check('the direct-create modal opens titled "New quality action"', (await modal().locator('h3').innerText()) === 'New quality action');
   check('no Status field at creation — a new action is open by definition', (await modal().locator('text=Status').count()) === 0);
+  check('no Progress notes field at creation either — nothing to report on yet', (await modal().locator('text=Progress notes').count()) === 0);
   const opSelectDirect = modal().locator('label:has-text("Operator") select');
   check('the operator field is explicitly labelled optional', (await modal().locator('text=Operator (optional)').count()) === 1);
   check('its blank option reads as a considered choice, not an unfinished field', (await opSelectDirect.locator('option').first().innerText()) === 'Not tied to one person');
@@ -144,16 +169,18 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('an operator can still be added later, just isn\'t mandatory up front', withOperator?.operatorId === 'st_4', JSON.stringify(withOperator));
 
   // ================================================================
-  // Editing an existing action: fill in category/solution/due date once
-  // an investigation has actually determined them, then mark it complete
+  // Editing an existing action: fill in category/solution/due date/
+  // progress once an investigation is under way, then mark it complete
   // ================================================================
   await page.locator('text=Grit blast media contaminated with oil').first().click();
   await page.waitForSelector(modalSel);
   await page.waitForTimeout(300);
   check('editing an existing action DOES show a Status field', (await modal().locator('text=Status').count()) > 0);
+  check('editing an existing action DOES show a Progress notes field', (await modal().locator('text=Progress notes').count()) > 0);
   await modal().locator('label:has-text("Category") select').selectOption({ label: 'Material defect' });
   await modal().locator('label:has-text("Proposed solution") textarea').fill('Switch grit supplier, add moisture check to receiving');
   await modal().locator('label:has-text("Due date") input[type=date]').fill('2026-09-01');
+  await modal().locator('label:has-text("Progress notes") textarea').fill('New supplier contacted, awaiting sample batch');
   await modal().locator('label:has-text("Status") select').selectOption({ label: 'Complete' });
   await modal().getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForTimeout(500);
@@ -162,9 +189,11 @@ export default async function run({ page, check, errors, baseUrl }) {
   const completed = afterComplete.find((a) => a.id === direct.id);
   check('the action is now marked complete with a completedDate stamped', completed?.status === 'complete' && !!completed?.completedDate, JSON.stringify(completed));
   check('category and proposed solution and due date were saved', completed?.category === 'Material defect' && completed?.proposedSolution.includes('grit supplier') && completed?.dueDate === '2026-09-01', JSON.stringify(completed));
+  check('progress notes were saved', completed?.progressNotes === 'New supplier contacted, awaiting sample batch', JSON.stringify(completed));
 
   qText = await page.locator('main').innerText();
   check('"Open actions" drops back to 1 now that one of the two is complete', /OPEN ACTIONS\s*\n?1\b/.test(qText), qText.slice(0, 250));
+  check('progress notes text does NOT leak into the tightened action list', !qText.includes('New supplier contacted'), qText);
   check('the completed action shows "Complete" in the list, not "Open"', /Grit blast media contaminated with oil[\s\S]{0,250}Complete/.test(qText), qText);
 
   // ---- reopening clears completedDate ----

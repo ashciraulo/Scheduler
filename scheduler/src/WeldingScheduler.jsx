@@ -2380,6 +2380,11 @@ export default function WeldingScheduler() {
       dueDate: action?.dueDate || '',
       status: 'open',
       completedDate: null,
+      // Nothing to report yet at the moment of creation — same reasoning
+      // as Status being withheld from QualityActionModal at creation time,
+      // just here since the bundled path has no creation-time UI of its
+      // own for it at all. Filled in later by editing the action.
+      progressNotes: '',
       jobId: original.id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -3198,7 +3203,6 @@ export default function WeldingScheduler() {
             equipment={equipment}
             costSettings={costSettings}
             timeLog={timeLog}
-            staff={staff}
             qualityActions={qualityActions}
             onEditJob={(j) => !readOnly && setEditingJob(j)}
             onNewAction={() => !readOnly && setEditingQualityAction('new')}
@@ -4623,6 +4627,7 @@ function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, on
   const [dueDate, setDueDate] = useState(source?.dueDate || '');
   const [status, setStatus] = useState(source?.status || 'open');
   const [jobId, setJobId] = useState(source?.jobId || '');
+  const [progressNotes, setProgressNotes] = useState(source?.progressNotes || '');
   // Operator is required in ReworkModal's bundled version (there, it's
   // always about a specific person's work on a specific job) but NOT here
   // — a directly-created action can be for all sorts of reasons that have
@@ -4675,15 +4680,24 @@ function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, on
           placeholder="Can be filled in once an investigation determines one"
         />
       </Field>
-      {/* Not offered at creation — a brand new action is open by definition,
-          nothing to mark complete yet. */}
+      {/* Neither offered at creation — a brand new action has nothing to
+          report progress on yet, and is open by definition, nothing to
+          mark complete yet either. */}
       {!isNew && (
-        <Field label="Status">
-          <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value)}>
-            <option value="open">Open</option>
-            <option value="complete">Complete</option>
-          </select>
-        </Field>
+        <>
+          <Field label="Progress notes (optional)">
+            <textarea
+              className={inputCls} rows={2} value={progressNotes} onChange={(e) => setProgressNotes(e.target.value)}
+              placeholder="What's been done so far, or what's blocking it"
+            />
+          </Field>
+          <Field label="Status">
+            <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value)}>
+              <option value="open">Open</option>
+              <option value="complete">Complete</option>
+            </select>
+          </Field>
+        </>
       )}
       <div className="flex items-center justify-between pt-2 border-t border-slate-800 mt-2">
         {onDelete ? <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button> : <span />}
@@ -4700,6 +4714,7 @@ function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, on
               dueDate,
               jobId: jobId || null,
               status,
+              progressNotes,
               // Stamped the moment status actually reads 'complete' — kept
               // as-is if it already was, cleared if reopened, same
               // completedDate-follows-status pattern as a job's own toggle.
@@ -4725,7 +4740,7 @@ function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, on
    Also lists every quality action — see QualityActionModal above and
    "Quality actions" in scheduler/CLAUDE.md.
    ============================================================ */
-function QualityView({ jobs, procedures = [], equipment = [], costSettings, timeLog = [], staff = [], qualityActions = [], onEditJob, onNewAction, onEditAction }) {
+function QualityView({ jobs, procedures = [], equipment = [], costSettings, timeLog = [], qualityActions = [], onEditJob, onNewAction, onEditAction }) {
   const reworks = useMemo(
     () => jobs.filter((j) => j.isRework).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
     [jobs]
@@ -4739,7 +4754,6 @@ function QualityView({ jobs, procedures = [], equipment = [], costSettings, time
     [qualityActions]
   );
   const openActionCount = qualityActions.filter((a) => a.status !== 'complete').length;
-  const staffName = (id) => staff.find((s) => s.id === id)?.name || '—';
   const jobName = (id) => (id ? jobs.find((j) => j.id === id)?.name || 'Deleted job' : '—');
 
   // Read-only and self-contained (nothing here is saved), so — unlike
@@ -4858,15 +4872,19 @@ function QualityView({ jobs, procedures = [], equipment = [], costSettings, time
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">Quality actions</h2>
         <button className={btnPrimary} onClick={onNewAction}><Plus size={15} /> New action</button>
       </div>
+      {/* Deliberately a shorter row than the full record — Operator,
+          Proposed solution and Progress notes stay one click away in
+          QualityActionModal rather than crowding this list. Details, Job,
+          Category, Due date and Status are the fields worth scanning a
+          whole list of actions for at a glance; the rest are read once
+          you're already looking at one action in particular. */}
       <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase tracking-wide">
             <tr>
               <th className="px-3 py-2 text-left">Details</th>
               <th className="px-3 py-2 text-left">Job</th>
-              <th className="px-3 py-2 text-left">Operator</th>
               <th className="px-3 py-2 text-left">Category</th>
-              <th className="px-3 py-2 text-left">Proposed solution</th>
               <th className="px-3 py-2 text-left">Due date</th>
               <th className="px-3 py-2 text-left">Status</th>
             </tr>
@@ -4876,9 +4894,7 @@ function QualityView({ jobs, procedures = [], equipment = [], costSettings, time
               <tr key={a.id} className="border-b border-slate-800/60 hover:bg-slate-800/40 cursor-pointer" onClick={() => onEditAction?.(a)}>
                 <td className="px-3 py-2 text-slate-200 text-xs max-w-xs truncate" title={a.details}>{a.details || '—'}</td>
                 <td className="px-3 py-2 text-slate-400 text-xs">{jobName(a.jobId)}</td>
-                <td className="px-3 py-2 text-slate-400 text-xs">{staffName(a.operatorId)}</td>
                 <td className="px-3 py-2 text-slate-400 text-xs">{a.category || '—'}</td>
-                <td className="px-3 py-2 text-slate-500 text-xs max-w-xs truncate" title={a.proposedSolution}>{a.proposedSolution || '—'}</td>
                 <td className="px-3 py-2 text-slate-400 text-xs">{a.dueDate ? fmtDate(a.dueDate) : '—'}</td>
                 <td className="px-3 py-2">
                   <span className={a.status === 'complete' ? 'text-emerald-400' : 'text-amber-400'}>
@@ -4888,7 +4904,7 @@ function QualityView({ jobs, procedures = [], equipment = [], costSettings, time
               </tr>
             ))}
             {sortedActions.length === 0 && (
-              <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-600 text-sm">
+              <tr><td colSpan={5} className="px-3 py-8 text-center text-slate-600 text-sm">
                 No quality actions yet — created automatically when a job is marked for rework, or add one directly for an issue that doesn't need the job itself reworked.
               </td></tr>
             )}

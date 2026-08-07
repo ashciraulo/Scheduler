@@ -2126,7 +2126,7 @@ all. Two creation paths, one shared shape:
 
 ```js
 {
-  id, details, operatorId, category, proposedSolution, dueDate,
+  id, details, operatorId, category, proposedSolution, dueDate, progressNotes,
   status,        // 'open' | 'complete'
   completedDate, // stamped when status flips to 'complete', cleared on reopen
   jobId,         // the job this is about, or null
@@ -2193,19 +2193,30 @@ edit an existing one (`action` set) or the one a rework just created
 `jobId` is an ordinary optional `<select>` here (any job, or "Not linked
 to a specific job"), for an issue that needs a fix but doesn't call for
 the job itself being reworked — reported directly as the second half of
-this feature. **Status** (Open/Complete) is only shown in edit mode, never
-at creation — a brand new action is open by definition, nothing to mark
-complete yet; flipping it to Complete stamps `completedDate`, flipping
-back to Open clears it, mirroring how a job's own completion date follows
-its status.
+this feature. **Status** (Open/Complete) and **Progress notes** are both only shown in
+edit mode, never at creation — a brand new action is open by definition
+with nothing to report progress on yet. Flipping Status to Complete stamps
+`completedDate`, flipping back to Open clears it, mirroring how a job's
+own completion date follows its status. Progress notes is free text for
+what's been done so far or what's blocking it — reported directly as a
+follow-up, once actions existed there was nowhere to jot that down short
+of Proposed solution (which describes the intended fix, not how far along
+it is). `createRework`'s bundled path initialises it to `''` — there's no
+creation-time UI for it there either, same reasoning as Status being
+absent from `ReworkModal`'s own section.
 
 **The Quality tab's action list** (`QualityView`) is a second table below
-the existing rework table — Details, the linked job's name (or "—"),
-Operator resolved to a name, Category, Proposed solution, Due date, Status
-— clicking a row opens `QualityActionModal` in edit mode. An "Open
-actions" tile joins the existing three stat tiles at the top (Rework jobs,
-Hours logged, Total rework cost), counting `status !== 'complete'` so it
-reads useful the moment any actions exist, bundled or direct.
+the existing rework table, deliberately SHORTER than the full record:
+Details, the linked job's name (or "—"), Category, Due date, Status only
+— clicking a row opens `QualityActionModal` in edit mode, where Operator,
+Proposed solution and Progress notes live instead. Reported directly as a
+follow-up: the fields worth scanning a whole list of actions for at a
+glance aren't the same ones worth reading once you're already looking at
+one action in particular, and the original 7-column table was crowding
+the page. An "Open actions" tile joins the existing three stat tiles at
+the top (Rework jobs, Hours logged, Total rework cost), counting `status
+!== 'complete'` so it reads useful the moment any actions exist, bundled
+or direct.
 
 ### Splitting a job
 

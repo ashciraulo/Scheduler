@@ -133,9 +133,24 @@ export default async function run({ page, check, errors, baseUrl }) {
   // 2h × $50.
   check('the Quality tab calculates cost from the procedure', qualityText.includes('75.00'), qualityText);
   check('the Quality tab\'s action list shows the bundled action', qualityText.includes('Porosity found on final inspection'));
-  check('the action list shows the operator name, not a raw id', qualityText.includes('Alex'));
   check('the action list shows the linked original job\'s name', /Porosity found on final inspection[\s\S]{0,40}Bracket Weld Batch 12/.test(qualityText), qualityText);
   check('"Open actions" tile reflects the one bundled action', /OPEN ACTIONS\s*\n?1/.test(qualityText), qualityText.slice(0, 200));
+
+  // The action list itself is deliberately short (Details/Job/Category/Due
+  // date/Status) — Operator stays one click away in the edit modal rather
+  // than crowding the list. See "Quality actions" in scheduler/CLAUDE.md.
+  // Scoped to the actions table specifically — the rework table's own
+  // Reason column shows this same text, so an unscoped locator would hit
+  // that row (opening JobModal) instead.
+  const actionsTable = page.locator('h2:has-text("Quality actions")').locator('xpath=../following-sibling::div[1]');
+  await actionsTable.locator('text=Porosity found on final inspection').first().click();
+  await page.waitForSelector(modalSel, { state: 'visible' });
+  await page.waitForTimeout(300);
+  const qaModal = page.locator(modalSel, { hasText: 'Edit quality action' });
+  check('the operator picked when the rework was created is preserved and visible in the action\'s own modal',
+        (await qaModal.locator('label:has-text("Operator") select').inputValue()) === 'st_1');
+  await qaModal.locator('div.sticky.top-0 button').click();
+  await page.waitForTimeout(200);
 
   // ---- rework badge shows on the Backlog ----
   await page.click('nav >> text=Job Backlog');
