@@ -90,8 +90,8 @@ export default async function run({ page, check, errors, baseUrl }) {
   let jmText = await jm().innerText();
   check('the job modal never asks for a cost centre — only Equipment, and a Procedure for cost', !/Cost centre/i.test(jmText));
   let idx = jmText.indexOf('VALUE & COSTING');
-  const rateOnCell1 = /Cost — \$([\d.]+)\/hr/.exec(jmText.slice(idx, idx + 300));
-  check('a cost preview renders, blending the procedure with the assigned equipment\'s depreciation', !!rateOnCell1, jmText.slice(idx, idx + 300));
+  const rateOnCell1 = /Cost — \$([\d.]+)\/hr/.exec(jmText.slice(idx, idx + 500));
+  check('a cost preview renders, blending the procedure with the assigned equipment\'s depreciation', !!rateOnCell1, jmText.slice(idx, idx + 500));
 
   // Switch the Equipment field from eq_5 (Thermal Spray Cell 1) to eq_6
   // (Thermal Spray Cell 2) — same procedure, different machine, and the
@@ -106,8 +106,8 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.waitForTimeout(300);
   jmText = await jm().innerText();
   idx = jmText.indexOf('VALUE & COSTING');
-  const rateOnCell2 = /Cost — \$([\d.]+)\/hr/.exec(jmText.slice(idx, idx + 300));
-  check('a cost preview still renders after switching equipment', !!rateOnCell2, jmText.slice(idx, idx + 300));
+  const rateOnCell2 = /Cost — \$([\d.]+)\/hr/.exec(jmText.slice(idx, idx + 500));
+  check('a cost preview still renders after switching equipment', !!rateOnCell2, jmText.slice(idx, idx + 500));
   check('the calculated rate actually changed just from switching which equipment the job is on — proving cost auto-links to the assignment, not a manually picked cost centre',
         !!rateOnCell1 && !!rateOnCell2 && rateOnCell1[1] !== rateOnCell2[1],
         `cell1=${rateOnCell1?.[1]} cell2=${rateOnCell2?.[1]}`);

@@ -148,13 +148,20 @@ function seedStaff() {
   ];
 }
 
+// `efficiency` (%) — the productive share of a job's scheduled hours, see
+// effectiveHourlyRate and "Costing: efficiency and average labour cost" in
+// scheduler/CLAUDE.md. Varied deliberately across these five rather than
+// all left at the DEFAULT_EFFICIENCY (75), to demonstrate why this moved
+// off one global setting: the two heavily-automated robotic weld templates
+// sit above the default, the HVOF coating (which needs cooldown pauses
+// between passes) sits well below it.
 function seedTemplates() {
   return [
-    { id: 'tp_1', name: 'Bracket Weld - Standard', category: 'Brackets & Frames', tags: [], process: 'Robotic MIG Welding', hoursPerUnit: 0.5, totalValuePerUnit: 120, departmentValuePerUnit: 45 },
-    { id: 'tp_2', name: 'Chassis Frame Weld', category: 'Brackets & Frames', tags: ['5T Positioner'], process: 'Robotic TIG Welding', hoursPerUnit: 2, totalValuePerUnit: 850, departmentValuePerUnit: 310 },
-    { id: 'tp_3', name: 'Hydraulic Shaft HVOF Coating', category: 'Shafts & Rollers', tags: [], process: 'Thermal Spray - HVOF', hoursPerUnit: 1.5, totalValuePerUnit: 640, departmentValuePerUnit: 210 },
-    { id: 'tp_4', name: 'Turbine Blade Plasma Coat', category: 'Turbine Components', tags: [], process: 'Thermal Spray - Plasma Spray', hoursPerUnit: 3, totalValuePerUnit: 2100, departmentValuePerUnit: 780 },
-    { id: 'tp_5', name: 'Wear Plate Arc Spray', category: 'Wear Plates', tags: [], process: 'Thermal Spray - Arc Spray', hoursPerUnit: 1, totalValuePerUnit: 300, departmentValuePerUnit: 95 },
+    { id: 'tp_1', name: 'Bracket Weld - Standard', category: 'Brackets & Frames', tags: [], process: 'Robotic MIG Welding', hoursPerUnit: 0.5, totalValuePerUnit: 120, departmentValuePerUnit: 45, efficiency: 85 },
+    { id: 'tp_2', name: 'Chassis Frame Weld', category: 'Brackets & Frames', tags: ['5T Positioner'], process: 'Robotic TIG Welding', hoursPerUnit: 2, totalValuePerUnit: 850, departmentValuePerUnit: 310, efficiency: 80 },
+    { id: 'tp_3', name: 'Hydraulic Shaft HVOF Coating', category: 'Shafts & Rollers', tags: [], process: 'Thermal Spray - HVOF', hoursPerUnit: 1.5, totalValuePerUnit: 640, departmentValuePerUnit: 210, efficiency: 60 },
+    { id: 'tp_4', name: 'Turbine Blade Plasma Coat', category: 'Turbine Components', tags: [], process: 'Thermal Spray - Plasma Spray', hoursPerUnit: 3, totalValuePerUnit: 2100, departmentValuePerUnit: 780, efficiency: 70 },
+    { id: 'tp_5', name: 'Wear Plate Arc Spray', category: 'Wear Plates', tags: [], process: 'Thermal Spray - Arc Spray', hoursPerUnit: 1, totalValuePerUnit: 300, departmentValuePerUnit: 95, efficiency: 75 },
   ];
 }
 
@@ -412,11 +419,19 @@ function effectiveCompletionDate(job) {
 // A job's SCHEDULED hours aren't all productive process time — some of
 // every job/task is setup and breakdown, which doesn't consume materials,
 // gas or machine time the way procedureCost's $/hr rate assumes, just a
-// person's time. `costSettings.efficiency` (%, default 75) is the assumed
-// productive share; the rest is priced at `costSettings.avgLabourRate`
-// alone — deliberately one global average, not a per-person rate (see
-// "Costing: efficiency and average labour cost" in scheduler/CLAUDE.md for
-// why: individual pay rates are HR data, not something this app holds).
+// person's time. `efficiency` (%, default DEFAULT_EFFICIENCY) is the
+// assumed productive share; the rest is priced at `costSettings.avgLabourRate`
+// alone — still deliberately one global average LABOUR rate, not a
+// per-person one (see "Costing: efficiency and average labour cost" in
+// scheduler/CLAUDE.md for why: individual pay rates are HR data, not
+// something this app holds). `efficiency` itself is NOT global, though —
+// unlike labour cost, the productive-vs-setup split genuinely varies by
+// procedure (a manual process needs more setup than an automated one) and
+// even by job (a job needing cooldown pauses eats more of its scheduled
+// time than an identical one that doesn't), reported directly. It lives on
+// the template (a starting default) and then the job itself (the actual
+// value used, editable per job same as its procedure) — see "Costing:
+// efficiency and average labour cost" for the full story of the move.
 //
 // Because cost is linear in hours, "efficiency% at the full rate + the
 // rest at the labour rate" collapses to one blended $/hr — correct for ANY
@@ -435,9 +450,10 @@ function effectiveCompletionDate(job) {
 // which record it reads. `equipment` may be null (nothing assigned yet,
 // or no capital assets entered on it) — depreciation is simply $0 in that
 // case, same as a procedure with no material cost entered.
-function effectiveHourlyRate(procedure, equipment, costSettings) {
+const DEFAULT_EFFICIENCY = 75;
+function effectiveHourlyRate(procedure, equipment, efficiency, costSettings) {
   const full = procedureCost(procedure) + equipmentDepreciationPerHr(equipment);
-  const eff = Math.max(0, Math.min(100, Number(costSettings?.efficiency ?? 75))) / 100;
+  const eff = Math.max(0, Math.min(100, Number(efficiency ?? DEFAULT_EFFICIENCY))) / 100;
   const labour = Number(costSettings?.avgLabourRate) || 0;
   return full * eff + labour * (1 - eff);
 }
@@ -460,7 +476,7 @@ function jobCost(j, procedures, equipmentList, costSettings) {
   if (!j || !j.procedureId) return null;
   const p = (procedures || []).find((x) => x.id === j.procedureId);
   if (!p) return null;
-  return effectiveHourlyRate(p, resolveJobEquipment(j, equipmentList), costSettings) * jobHoursForCost(j);
+  return effectiveHourlyRate(p, resolveJobEquipment(j, equipmentList), j.efficiency, costSettings) * jobHoursForCost(j);
 }
 // Map a cost-calculator spec's process string onto one of the scheduler's processes.
 function mapImportProcess(str, schedProcesses) {
@@ -1362,9 +1378,7 @@ function CostingView({
   procedures, costSettings, onSaveCostSettings, processes, readOnly, onImport, onNewProcedure, onEditProcedure,
   equipment, onAddEquip, onEditEquip, onDeleteEquip,
 }) {
-  const efficiency = costSettings?.efficiency ?? 75;
   const avgLabourRate = costSettings?.avgLabourRate ?? 0;
-  const setEfficiency = (v) => onSaveCostSettings({ ...costSettings, efficiency: v });
   const setAvgLabourRate = (v) => onSaveCostSettings({ ...costSettings, avgLabourRate: v });
   const fileRef = useRef(null);
   const byProcess = {};
@@ -1447,25 +1461,24 @@ function CostingView({
           of every job/task is setup and breakdown, which doesn't burn
           materials, gas or machine time the way a procedure's own $/hr
           assumes, just a person's time. This blends that into every cost
-          figure the app shows (jobCost/hourlyRate — see
-          effectiveHourlyRate): `efficiency`% of the scheduled hours at the
-          procedure's own rate, the rest at this one average labour rate.
-          Deliberately ONE global average, not a rate per staff member —
+          figure the app shows (jobCost/hourlyRate — see effectiveHourlyRate):
+          `efficiency`% of the scheduled hours at the procedure's own rate,
+          the rest at this one average labour rate. Only the labour rate is
+          global, though — efficiency itself moved onto the template/job (see
+          "Costing: efficiency and average labour cost" in
+          scheduler/CLAUDE.md) since the productive-vs-setup split genuinely
+          varies by procedure and by job, unlike labour cost, which is
+          deliberately ONE global average, not a rate per staff member —
           individual pay is HR data and has no business living here. */}
       <div className="border border-slate-800 bg-slate-900 rounded-lg p-4 mb-6">
-        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Setup/breakdown time</h3>
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">Average labour cost</h3>
         <p className="text-xs text-slate-500 mb-3">
-          Not every scheduled hour is spent running the process — some is setup and pack-down. {Math.round(efficiency)}% of a
-          job's hours are costed at its procedure's own rate; the rest at the average labour cost below, since materials, gas
-          and machine time aren't being consumed while a job is being set up or broken down.
+          Not every scheduled hour is spent running the process — some is setup and pack-down, priced at this rate alone since
+          materials, gas and machine time aren't being consumed while a job is being set up or broken down. What share of a
+          job's hours counts as setup/pack-down is set per template (and per job) now, not here — it varies too much by
+          procedure and by job to be one figure for the whole shop.
         </p>
-        <div className="grid grid-cols-2 gap-3 max-w-md">
-          <Field label="Efficiency (%)">
-            <input
-              type="number" min={0} max={100} step={1} className={inputCls} disabled={readOnly}
-              value={efficiency} onChange={(e) => setEfficiency(e.target.value)}
-            />
-          </Field>
+        <div className="max-w-[15rem]">
           <Field label="Average labour cost ($/hr)">
             <input
               type="number" min={0} step={0.5} className={inputCls} disabled={readOnly}
@@ -1538,12 +1551,16 @@ export default function WeldingScheduler() {
   // Scheduled hours aren't 100% productive process time — some of every job/
   // task is setup and breakdown, which doesn't burn materials/gas/machine
   // time the way a procedure's own $/hr rate assumes, just a person's time.
-  // `efficiency` (%) is the assumed productive share; the rest is costed at
-  // `avgLabourRate` alone. Deliberately ONE global average rate, not
-  // per-person — individual pay rates are HR data, not something this app
-  // should hold. See effectiveHourlyRate and "Costing: efficiency and
-  // average labour cost" in scheduler/CLAUDE.md.
-  const [costSettings, setCostSettings] = useState({ avgLabourRate: 0, efficiency: 75 });
+  // `avgLabourRate` (the ONE remaining field here) is what the non-productive
+  // share is costed at — deliberately ONE global average rate, not
+  // per-person, since individual pay rates are HR data this app shouldn't
+  // hold. `efficiency` — the productive share itself — USED to live here
+  // too, but moved onto the template/job (see effectiveHourlyRate and
+  // "Costing: efficiency and average labour cost" in scheduler/CLAUDE.md):
+  // unlike labour cost, it genuinely varies by procedure and by job. See the
+  // initial-load useEffect below for the one-time migration of an existing
+  // deployment's global efficiency onto its templates/jobs.
+  const [costSettings, setCostSettings] = useState({ avgLabourRate: 0 });
   const [categories, setCategories] = useState([]);
   // Daily record of hours actually worked per job. Recalling a total at the
   // point of completion is guesswork; this is entered day by day while it's
@@ -1706,13 +1723,35 @@ export default function WeldingScheduler() {
       if (ov) setOverrides(ov);
       const finalEq = eq || seedEquipment();
       const finalSt = (st || seedStaff()).map(normalizeStaff);
-      const finalTp = tp || seedTemplates();
+      let finalTp = tp || seedTemplates();
       const finalPr = pr || DEFAULT_PROCESSES;
-      const finalJb = jb || seedJobs();
+      let finalJb = jb || seedJobs();
       const finalPc = pc || seedProcedures();
       const finalPj = pj || [];
       const finalTk = tk || [];
-      const finalCs = cs || { avgLabourRate: 0, efficiency: 75 };
+
+      // One-time migration: efficiency used to be a single global setting
+      // (costSettings.efficiency) rather than per-template/per-job (see
+      // "Costing: efficiency and average labour cost" in
+      // scheduler/CLAUDE.md). Unlike the earlier cost-centre→equipment
+      // reorg, this mapping IS reliable and lossless — the old model
+      // applied exactly one number everywhere, so that same number is the
+      // correct starting value for every existing template/job that
+      // doesn't already have its own. Self-terminating: the migrated
+      // costSettings saved below never carries `efficiency` again, so
+      // `cs.efficiency` reads undefined on every later load and this whole
+      // block becomes a no-op.
+      const legacyEfficiency = cs && cs.efficiency != null ? Math.max(0, Math.min(100, Number(cs.efficiency))) : null;
+      let migratedTemplates = false;
+      if (legacyEfficiency != null) {
+        finalTp = finalTp.map((t) => {
+          if (t.efficiency != null) return t;
+          migratedTemplates = true;
+          return { ...t, efficiency: legacyEfficiency };
+        });
+        finalJb = finalJb.map((j) => (j.efficiency != null ? j : { ...j, efficiency: legacyEfficiency }));
+      }
+      const finalCs = { avgLabourRate: Number((cs || {}).avgLabourRate) || 0 };
 
       setEquipment(finalEq);
       setStaff(finalSt);
@@ -1734,14 +1773,20 @@ export default function WeldingScheduler() {
 
       if (!eq) saveKey('wf_equipment', finalEq);
       saveKey('wf_staff', finalSt);
-      if (!tp) saveKey('wf_templates', finalTp);
+      // Also re-saved (not just when absent) when the efficiency migration
+      // above actually backfilled a template — jobs are already covered by
+      // the unconditional saveKey('wf_jobs', ...) below.
+      if (!tp || migratedTemplates) saveKey('wf_templates', finalTp);
       if (!pr) saveKey('wf_processes', finalPr);
       saveKey('wf_jobs', scheduled);
       saveKey(TASKS_KEY, scheduledTasks);
       if (!pc) saveKey('wf_procedures', finalPc);
       if (!ct) saveKey('wf_categories', finalCt);
       if (!pj) saveKey(PROJECTS_KEY, finalPj);
-      if (!cs) saveKey(COST_SETTINGS_KEY, finalCs);
+      // Also re-saved when it existed but still carried the legacy
+      // `efficiency` field, so it gets stripped and the migration above
+      // doesn't re-run (harmlessly, but pointlessly) on every future load.
+      if (!cs || cs.efficiency != null) saveKey(COST_SETTINGS_KEY, finalCs);
 
       setLoaded(true);
     })();
@@ -2209,6 +2254,7 @@ export default function WeldingScheduler() {
       // standing claim on a job that doesn't exist yet.
       tags: original.tags || [],
       procedureId: original.procedureId || '',
+      efficiency: original.efficiency ?? DEFAULT_EFFICIENCY,
       staffId: null,
       secondStaffId: null,
       preferredEquipmentId: original.preferredEquipmentId || null,
@@ -5515,6 +5561,16 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
   const [secondStaffId, setSecondStaffId] = useState(job?.secondStaffId || '');
   const [tags, setTags] = useState(job?.tags || (job ? [] : (templates.find((t) => t.id === templateId) || {}).tags) || []);
   const [procedureId, setProcedureId] = useState(job?.procedureId || (job ? '' : (templates.find((t) => t.id === templateId) || {}).procedureId) || '');
+  // Productive share of this job's scheduled hours — see effectiveHourlyRate
+  // and "Costing: efficiency and average labour cost" in scheduler/CLAUDE.md.
+  // Genuinely varies job to job (level of automation, cooldown pauses, …),
+  // so it's editable here directly, same as procedureId above — a template
+  // only ever supplies the starting value. An existing job saved before this
+  // field existed backfills to DEFAULT_EFFICIENCY, same reasoning as every
+  // other field this app has ever added to a long-lived record.
+  const [efficiency, setEfficiency] = useState(
+    job?.efficiency ?? (job ? DEFAULT_EFFICIENCY : (templates.find((t) => t.id === templateId) || {}).efficiency) ?? DEFAULT_EFFICIENCY
+  );
   // A soft nudge, not a pin — deliberately its own field, independent of
   // manualEquipId/manualStartDate below. Those two build a hard placement
   // (exact day, no operator picked automatically); this only ever narrows
@@ -5562,6 +5618,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       setHoursPerUnit(t.hoursPerUnit);
       setTags(t.tags || []);
       setProcedureId(t.procedureId || '');
+      setEfficiency(t.efficiency ?? DEFAULT_EFFICIENCY);
       setPreferredEquipmentId(t.preferredEquipmentId || '');
       if (t.totalValuePerUnit) setTotalValue(Math.round(t.totalValuePerUnit * quantity * 100) / 100);
       if (t.departmentValuePerUnit) setDepartmentValue(Math.round(t.departmentValuePerUnit * quantity * 100) / 100);
@@ -5666,6 +5723,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
       departmentValue: Number(departmentValue) || 0,
       tags,
       procedureId,
+      efficiency: Math.max(0, Math.min(100, Number(efficiency) || 0)),
       staffId: staffId || null,
       // Never saved without a primary to anchor it — the engine already
       // guards this too (attachSecondStaff only runs when both are set), but
@@ -6114,6 +6172,24 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               </select>
               {!process && <p className="text-xs text-slate-500 mt-1">Pick a process first — a procedure is specific to one.</p>}
             </Field>
+            {procedureId && (
+              // Not every scheduled hour is spent running the process — some
+              // is setup/pack-down, or (for some procedures) a cooldown
+              // pause. That share genuinely varies by procedure and by job
+              // (a template only sets the starting value), so it's an
+              // ordinary editable field here, not a global setting — see
+              // effectiveHourlyRate and "Costing: efficiency and average
+              // labour cost" in scheduler/CLAUDE.md.
+              <Field label="Efficiency (%) — productive share of scheduled hours">
+                <input
+                  type="number" min={0} max={100} step={1} className={inputCls}
+                  value={efficiency} onChange={(e) => setEfficiency(e.target.value)}
+                />
+                <p className="text-xs text-slate-500 mt-1">
+                  This much of the job's scheduled hours are costed at the procedure's own rate; the rest at the average labour cost (set under the Costing tab).
+                </p>
+              </Field>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <Field label="Total job value ($)">
                 <input type="number" min={0} step={1} className={inputCls} value={totalValue} onChange={(e) => setTotalValue(e.target.value)} />
@@ -6144,7 +6220,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               // just read live from the field instead of a saved job record
               // so the preview updates as the user picks equipment.
               const eq = equipment.find((e) => e.id === manualEquipId) || null;
-              const rate = effectiveHourlyRate(proc, eq, costSettings);
+              const rate = effectiveHourlyRate(proc, eq, efficiency, costSettings);
               const estHrs = Math.round((Number(quantity) || 0) * (Number(hoursPerUnit) || 0) * 100) / 100;
               // Once the job is complete, cost is (and always was, via
               // jobCost()/jobHoursForCost() elsewhere) calculated from the
@@ -6508,8 +6584,12 @@ const OVERRIDES_KEY = 'wf_overrides';
 // scheduled themselves. See "R&D projects and tasks" in scheduler/CLAUDE.md.
 const PROJECTS_KEY = 'wf_projects';
 
-// { avgLabourRate, efficiency } — see effectiveHourlyRate and "Costing:
-// efficiency and average labour cost" in scheduler/CLAUDE.md.
+// { avgLabourRate } — see effectiveHourlyRate and "Costing: efficiency and
+// average labour cost" in scheduler/CLAUDE.md. Used to also carry
+// `efficiency`; that moved onto templates/jobs (see the one-time migration
+// in the initial-load useEffect), so a value stored under this key from
+// before that move may still have the old field sitting in it until it's
+// next loaded and re-saved — harmless, just no longer read.
 const COST_SETTINGS_KEY = 'wf_costsettings';
 
 // Non-job schedulable items — see "R&D projects and tasks" in
@@ -6541,7 +6621,7 @@ function loggedHours(timeLog, jobId) {
 function hourlyRate(item, procedures, equipmentList, costSettings) {
   if (!item || !item.procedureId) return 0;
   const p = (procedures || []).find((x) => x.id === item.procedureId);
-  return p ? effectiveHourlyRate(p, resolveJobEquipment(item, equipmentList), costSettings) : 0;
+  return p ? effectiveHourlyRate(p, resolveJobEquipment(item, equipmentList), item.efficiency, costSettings) : 0;
 }
 
 // One row per unit of logged work, for a report over [dateFrom, dateTo].
@@ -7129,7 +7209,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
       if (r._rowId !== rowId) return r;
       const hoursTotal = Math.round(r.quantity * t.hoursPerUnit * 100) / 100;
       const departmentValue = r.departmentValue > 0 ? r.departmentValue : Math.round(r.quantity * (t.departmentValuePerUnit || 0) * 100) / 100;
-      return { ...r, templateId, process: t.process, hoursTotal, departmentValue, preferredEquipmentId: t.preferredEquipmentId || null };
+      return { ...r, templateId, process: t.process, hoursTotal, departmentValue, preferredEquipmentId: t.preferredEquipmentId || null, efficiency: t.efficiency ?? DEFAULT_EFFICIENCY };
     }));
   }
 
@@ -7140,7 +7220,7 @@ function ImportJobsModal({ templates, processes, existingJobs, onClose, onImport
       if (!r.include || r.templateId) return r; // don't clobber rows already assigned
       const hoursTotal = Math.round(r.quantity * t.hoursPerUnit * 100) / 100;
       const departmentValue = r.departmentValue > 0 ? r.departmentValue : Math.round(r.quantity * (t.departmentValuePerUnit || 0) * 100) / 100;
-      return { ...r, templateId: bulkTemplateId, process: t.process, hoursTotal, departmentValue, preferredEquipmentId: t.preferredEquipmentId || null };
+      return { ...r, templateId: bulkTemplateId, process: t.process, hoursTotal, departmentValue, preferredEquipmentId: t.preferredEquipmentId || null, efficiency: t.efficiency ?? DEFAULT_EFFICIENCY };
     }));
   }
 
@@ -7656,6 +7736,14 @@ function TemplateModal({ template, equipment, processes, procedures = [], allTag
   const [tags, setTags] = useState(template?.tags || []);
   const [process, setProcess] = useState(template?.process || processes[0] || '');
   const [procedureId, setProcedureId] = useState(template?.procedureId || '');
+  // Starting point for every job made from this template — see
+  // effectiveHourlyRate and "Costing: efficiency and average labour cost"
+  // in scheduler/CLAUDE.md. Genuinely varies by procedure (a manual process
+  // needs more setup than an automated one), which is why it lives here
+  // rather than as one global figure; still just a default, freely edited
+  // per job afterwards for the cases that vary further (a cooldown pause
+  // one particular run needed, say).
+  const [efficiency, setEfficiency] = useState(template?.efficiency ?? DEFAULT_EFFICIENCY);
   const [hoursPerUnit, setHoursPerUnit] = useState(template?.hoursPerUnit ?? 1);
   const [totalValuePerUnit, setTotalValuePerUnit] = useState(template?.totalValuePerUnit ?? '');
   const [departmentValuePerUnit, setDepartmentValuePerUnit] = useState(template?.departmentValuePerUnit ?? '');
@@ -7701,6 +7789,12 @@ function TemplateModal({ template, equipment, processes, procedures = [], allTag
           <option value="">— none —</option>
           {procsForProcess.map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p))}/hr</option>)}
         </select>
+      </Field>
+      <Field label="Efficiency (%) — productive share of scheduled hours">
+        <input type="number" min={0} max={100} step={1} className={inputCls} value={efficiency} onChange={(e) => setEfficiency(e.target.value)} />
+        <p className="text-xs text-slate-500 mt-1">
+          Not every scheduled hour runs the process — some is setup/pack-down, or a cooldown pause this procedure needs. This much is costed at the procedure's own rate; the rest at the average labour cost (Costing tab). A starting point for jobs made from this template — still editable per job.
+        </p>
       </Field>
       <Field label="Capability requirements (optional)">
         <TagEditor value={tags} onChange={setTags} suggestions={allTags} />
@@ -7757,6 +7851,7 @@ function TemplateModal({ template, equipment, processes, procedures = [], allTag
             tags,
             process,
             procedureId,
+            efficiency: Math.max(0, Math.min(100, Number(efficiency) || 0)),
             hoursPerUnit: Number(hoursPerUnit) || 1,
             totalValuePerUnit: totalValuePerUnit === '' ? null : Number(totalValuePerUnit),
             departmentValuePerUnit: departmentValuePerUnit === '' ? null : Number(departmentValuePerUnit),

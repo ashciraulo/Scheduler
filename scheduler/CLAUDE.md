@@ -1816,42 +1816,80 @@ one includes some setup and pack-down, which doesn't burn materials, gas or
 machine time the way `procedureCost()`'s $/hr rate assumes, just a person's
 time. Pricing the whole duration at the full procedure rate was overstating
 cost by exactly that setup/breakdown share. Fixed by splitting scheduled
-hours into two buckets: `efficiency`% (default 75, editable) priced at the
-procedure's own rate as before, the rest priced at a new, single **average
-labour cost** ($/hr) instead — both set once, globally, under the Costing
-tab's "Setup/breakdown time" card (`costSettings`/`COST_SETTINGS_KEY` =
-`wf_costsettings`, `{ avgLabourRate, efficiency }`).
+hours into two buckets: `efficiency`% (default `DEFAULT_EFFICIENCY`, 75)
+priced at the procedure's own rate, the rest priced at a single **average
+labour cost** ($/hr) instead.
 
-**Deliberately one global average rate, not a rate per staff member.**
-Asked of the user directly: individual pay rates are HR data and this app
-must not hold them, even indirectly via a per-person hourly cost field. One
-shared average is the ceiling of precision that's appropriate here.
+**`efficiency` lives on the template, then the job — NOT as one global
+setting.** It started out global (set once under the Costing tab, same
+place as the labour rate), but that meant every procedure and every job
+was assumed to have exactly the same productive-vs-setup split, which
+isn't true: reported directly — *"different procedures or even different
+jobs with the same procedure can have different efficiencies based on the
+level of automation or whether they require pauses to cool down."* A
+heavily automated robotic weld needs less setup per hour than a manual
+process; a coating procedure with a cooldown pause between passes needs
+more. So `efficiency` moved onto `Template` (a starting default,
+`TemplateModal`'s own "Efficiency (%)" field, applied via `applyTemplate`
+exactly like `procedureId`/`tags`/`hoursPerUnit`) and then onto `Job`
+itself (an ordinary, directly-editable field in `JobModal`'s Value &
+costing section, right under the Procedure select — only shown once a
+procedure is picked, since it only ever modifies that procedure's cost).
+Editing a job's own efficiency never writes back to the template it came
+from, the same one-way relationship every other template-seeded job field
+already has.
 
-**`effectiveHourlyRate(procedure, equipment, costSettings)`** is the one
-function this all runs through — `(procedureCost() + equipmentDepreciationPerHr(equipment)) × efficiency% +
-avgLabourRate × (1 − efficiency%)` (see "Costing: equipment is the cost
-centre" above for where the equipment term comes from). Because cost is
-linear in hours, this
-blended $/hr is correct to multiply by ANY hours figure, not just a job's
-full total: `0.75×H×rateA + 0.25×H×rateB` is algebraically identical to
-`H×(0.75×rateA + 0.25×rateB)` for every `H`. That's what lets both
-`jobCost()` (a whole item's total cost) and `hourlyRate()` (a single
-report row's hours, which can be one day out of a much longer job) share
-this one function instead of each needing its own two-bucket split —
-there's no risk of a report over- or under-counting setup time by
-splitting it per-row instead of per-item.
+**Average labour cost is still deliberately ONE global rate, not a rate
+per staff member or per template.** Asked of the user directly, separately
+from the efficiency move: individual pay rates are HR data and this app
+must not hold them, even indirectly via a per-person hourly cost field. It
+remains the one field left under the Costing tab's "Average labour cost"
+card (`costSettings`/`COST_SETTINGS_KEY` = `wf_costsettings`, now just
+`{ avgLabourRate }`).
 
-**Every cost figure in the app goes through this now, not just `jobCost`/
-`hourlyRate`'s existing call sites** — `jobCost`, `hourlyRate` and
-`JobModal`'s own margin-estimate preview (`Cost — $/hr × Nh`, shown while
-picking a procedure) all take a `costSettings` argument/prop now.
+**`effectiveHourlyRate(procedure, equipment, efficiency, costSettings)`**
+is the one function this all runs through — `(procedureCost() +
+equipmentDepreciationPerHr(equipment)) × efficiency% + avgLabourRate ×
+(1 − efficiency%)` (see "Costing: equipment is the cost centre" above for
+where the equipment term comes from). `efficiency` is passed in
+explicitly now rather than read off `costSettings` — `jobCost`/
+`hourlyRate` resolve it from the item itself (`j.efficiency`/
+`item.efficiency`), falling back to `DEFAULT_EFFICIENCY` for any job/task
+that's never had its own set (an old record from before this field
+existed, or a task — this app never asked for per-task efficiency editing,
+scoped deliberately to jobs/templates per the request). Because cost is
+linear in hours, this blended $/hr is correct to multiply by ANY hours
+figure, not just a job's full total: `0.75×H×rateA + 0.25×H×rateB` is
+algebraically identical to `H×(0.75×rateA + 0.25×rateB)` for every `H`.
+That's what lets both `jobCost()` (a whole item's total cost) and
+`hourlyRate()` (a single report row's hours, which can be one day out of a
+much longer job) share this one function instead of each needing its own
+two-bucket split — there's no risk of a report over- or under-counting
+setup time by splitting it per-row instead of per-item.
+
+**Every cost figure in the app goes through this** — `jobCost`,
+`hourlyRate` and `JobModal`'s own margin-estimate preview (`Cost — $/hr ×
+Nh`, shown once a procedure is picked) all resolve `efficiency` this way.
 `procedureCost`/`procedureParts` themselves are UNCHANGED and still shown
-raw (not blended) in three places on purpose: `ProcedureEditor`'s own
-breakdown, `CostingView`'s procedure cards, and the procedure picker's
-"$X/hr" reference labels (JobModal, TemplateModal) — those describe what
-the *procedure itself* costs to run, independent of any one job's
-setup/breakdown share, and blending it there would misrepresent the
-procedure's own numbers.
+raw (not blended, and equipment-free) in three places on purpose:
+`ProcedureEditor`'s own breakdown, `CostingView`'s procedure cards, and the
+procedure picker's "$X/hr" reference labels (JobModal, TemplateModal) —
+those describe what the *procedure itself* costs to run, independent of
+any one job's setup/breakdown share or which machine it lands on, and
+blending either in there would misrepresent the procedure's own numbers.
+
+**Migrating an existing deployment's global efficiency:** the one-time
+migration lives in the initial-load `useEffect`, and — unlike the
+cost-centre→equipment reorg, where no reliable mapping ever existed — this
+one IS lossless: the old model applied exactly one number everywhere, so
+that same number is the objectively correct starting value for every
+template/job that doesn't yet have its own. On first load after upgrading,
+if `costSettings` still carries the old `efficiency` field, every existing
+template and job without its own `efficiency` gets backfilled with that
+value, and the saved `costSettings` has the field stripped so the
+migration doesn't re-run (harmlessly, but pointlessly) on every later
+load. New templates/jobs created after that point simply start at
+`DEFAULT_EFFICIENCY`, edited freely from there.
 
 ### A job's procedure is directly assignable, not just inherited from a template
 
