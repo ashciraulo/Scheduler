@@ -1873,6 +1873,41 @@ object. See `'isRework survives an unrelated edit + save'` in
 outside this modal (created by some other flow, never itself editable
 here), it needs the same treatment or it will vanish exactly this way.
 
+**Completing a job from inside JobModal reopens it afterward, showing
+"Mark for rework" — it used to just close and go nowhere.** "Mark
+complete" inside `JobModal` has to close the modal first: the actual-hours
+prompt (`ActualHoursModal`, via `pendingComplete`) is a genuinely separate
+top-level dialog, and this file has no mechanism for nesting two
+independent modals under one `editingX` state the way `Modal`'s own
+confirm-delete dialogs nest inside their parent. Before this fix, that
+close was the end of it — confirming (or cancelling) the hours prompt left
+the user back at a bare Backlog with nothing open. "Mark for rework" (only
+offered on a completed, non-split job) was real and correct the instant
+they reopened the job by hand, but nothing told them to; reported from
+testing as "the modal isn't updating to show Mark for rework" / "doesn't
+appear until the scheduler is re-opened."
+
+`reopenJobAfterComplete` (main component state) is armed only when "Mark
+complete" is clicked *from inside JobModal* — not the Backlog row's own
+inline checkmark, which has no modal to return to and is correctly
+unaffected — and only on the way **to** complete, not un-completing
+(`toggleComplete`'s revert branch runs synchronously and never touches
+`pendingComplete`, so arming the flag there would leak it into some later,
+unrelated completion with nothing left to consume it). Both ways out of
+`ActualHoursModal` consume the flag and reopen: confirming
+(`completeWithHours`) reopens on the freshly-completed job — read back from
+`recompute`'s own return value, not the locally-built `updated` object,
+since the scheduler pass may have touched the job's `assignment` on the
+way through (the completed-job replay logic, see the scheduling invariants
+above) and a stale `assignment` would flash for one render otherwise;
+cancelling reopens on the job exactly as it was, since backing out of "how
+many hours" reads as "not ready to complete this," not "take me out of the
+job entirely." Both use the same close-then-reopen-on-a-tick pattern
+`onOpenRelatedJob` already established (`setEditingJob(null)` then
+`setTimeout(() => setEditingJob(fresh), 0)` — mutating `editingJob` in
+place wouldn't reset the modal's own `useState` fields). See
+`e2e/specs/complete-reopens-jobmodal.mjs`.
+
 ### Splitting a job
 
 For when a job has to come off equipment before it's done (an urgent job

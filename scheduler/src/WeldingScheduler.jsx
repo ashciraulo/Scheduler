@@ -1585,6 +1585,10 @@ export default function WeldingScheduler() {
   // with no assignment, i.e. was never scheduled), 'new', or null.
   const [backfillTask, setBackfillTask] = useState(null);
   const [pendingComplete, setPendingComplete] = useState(null);   // job awaiting actual-hours entry
+  // Set only when "Mark complete" was clicked FROM INSIDE JobModal (not the
+  // Backlog row's own inline toggle, which has no modal to return to) — see
+  // completeWithHours/the pendingComplete ActualHoursModal below for why.
+  const [reopenJobAfterComplete, setReopenJobAfterComplete] = useState(false);
   const [pendingTaskComplete, setPendingTaskComplete] = useState(null); // task awaiting actual-hours entry
   const [confirmDelete, setConfirmDelete] = useState(null); // {type, id, name}
   const [parallelConflict, setParallelConflict] = useState(null); // {job, candidates}
@@ -2132,7 +2136,7 @@ export default function WeldingScheduler() {
     if (!job) return;
     const cd = isoDate(new Date());
     const updated = { ...job, status: 'complete', completedDate: cd, percentComplete: 100, actualHours: hours, updatedAt: new Date().toISOString() };
-    recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
+    const jobsResult = recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
     setPendingComplete(null);
     (async () => {
       const arr = (await loadKey('wf_actuals', [])).filter((r) => r.jobId !== job.id);
@@ -2141,6 +2145,27 @@ export default function WeldingScheduler() {
       reaverageTemplate(job.templateId, arr);
     })();
     showToast(`${job.name} marked complete — ${hours}h recorded.`);
+    // "Mark complete" inside JobModal has to close it first (#25/#28 —
+    // ActualHoursModal is a separate dialog, and this file never nests two
+    // fully independent top-level modals under one editingX state), which
+    // used to just strand the user back at the Backlog with no modal open
+    // at all — "Mark for rework" (only offered on a completed job) was
+    // real and correct the moment they reopened it by hand, but nothing
+    // told them to. Reopening on the freshly-completed job here — same
+    // close-then-reopen-on-a-tick pattern `onOpenRelatedJob` already uses
+    // to jump JobModal between related jobs — puts them right back where
+    // they were, now showing the button, instead of requiring a manual
+    // trip back through the Backlog. `jobsResult` (recompute's return
+    // value), not `updated`, since the scheduler pass may have touched
+    // this job's `assignment` on the way through (e.g. the completed-job
+    // replay logic — see "Completing a job doesn't change the schedule…"
+    // in scheduler/CLAUDE.md) and a stale `assignment` would be visible for
+    // one render before the next state update caught up.
+    if (reopenJobAfterComplete) {
+      setReopenJobAfterComplete(false);
+      const fresh = jobsResult.find((j) => j.id === job.id) || updated;
+      setTimeout(() => setEditingJob(fresh), 0);
+    }
   }
   // A rework is a genuinely NEW, linked job (see "Rework" in
   // scheduler/CLAUDE.md), not the original reopened. Its own record and
@@ -3056,7 +3081,17 @@ export default function WeldingScheduler() {
           onClose={() => setEditingJob(null)}
           onSave={(data) => addOrUpdateJob(data, editingJob === 'new')}
           onDelete={editingJob !== 'new' ? () => setConfirmDelete({ type: 'job', id: editingJob.id, name: editingJob.name }) : null}
-          onToggleComplete={editingJob !== 'new' ? () => { toggleComplete(editingJob); setEditingJob(null); } : null}
+          onToggleComplete={editingJob !== 'new' ? () => {
+            // Only arm the reopen-after-complete flag on the way TO
+            // complete — un-completing (editingJob.status === 'complete')
+            // reverts synchronously inside toggleComplete itself and never
+            // touches pendingComplete/completeWithHours, so nothing would
+            // ever consume the flag and it would leak into some later,
+            // unrelated completion.
+            if (editingJob.status !== 'complete') setReopenJobAfterComplete(true);
+            toggleComplete(editingJob);
+            setEditingJob(null);
+          } : null}
           onUnpin={editingJob !== 'new' && editingJob.assignment?.pinned ? () => { unpinJob(editingJob); setEditingJob(null); } : null}
           onSplit={editingJob !== 'new' && !editingJob.parts ? (hoursA) => splitJob(editingJob, hoursA) : null}
           onMerge={editingJob !== 'new' && editingJob.parts ? () => mergeJobParts(editingJob) : null}
@@ -3236,7 +3271,19 @@ export default function WeldingScheduler() {
         <ActualHoursModal
           logged={loggedHours(timeLog, pendingComplete.id)}
           job={pendingComplete}
-          onCancel={() => setPendingComplete(null)}
+          onCancel={() => {
+            // Cancelling out of "how many hours" is "never mind, I wasn't
+            // ready to complete this" — not "take me out of the job
+            // entirely." Same reopen as completing (below), just with the
+            // job unchanged, so backing out of this dialog doesn't also
+            // strand the user back at the Backlog mid-edit.
+            const job = pendingComplete;
+            setPendingComplete(null);
+            if (reopenJobAfterComplete) {
+              setReopenJobAfterComplete(false);
+              setTimeout(() => setEditingJob(job), 0);
+            }
+          }}
           onConfirm={completeWithHours}
         />
       )}
