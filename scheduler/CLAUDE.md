@@ -2148,9 +2148,9 @@ onto the rework job's own `notes` (unchanged from the old `reason`
 behaviour) so the reason is still visible directly on the job itself, not
 just in the action list.
 
-**Only Details and Operator are required at creation — Category, Proposed
-solution and Due date all start blank on purpose.** Asked of the user
-directly: an investigation may still be needed to determine the root
+**Only Details and Operator are required at BUNDLED creation — Category,
+Proposed solution and Due date all start blank on purpose.** Asked of the
+user directly: an investigation may still be needed to determine the root
 cause, so forcing a category (or a fix, or a deadline) at the moment
 something is merely NOTICED would just produce guessed-at data. All three
 are freely editable later via `QualityActionModal`, once they're actually
@@ -2163,6 +2163,19 @@ replacement placement's `staffId`). Falls back to `job.staffId` (the
 manual assignment) if the job was never broken down day by day, and to a
 blank, must-pick-by-hand select if neither exists — still just a starting
 value either way, corrected in the same field if it's wrong.
+
+**Operator is required in `ReworkModal`'s bundled version but OPTIONAL
+everywhere else** — `QualityActionModal` (direct creation, and editing any
+action including a bundled one) only requires Details to save. Asked of
+the user directly, as a follow-up: a bundled action is always about a
+specific person's work on a specific job, but a directly-created one could
+be for all sorts of things that aren't tied to any one operator at all —
+an admin process, a design problem, a supplier issue — so forcing a name
+onto it would just produce a guess, the exact thing Category/Proposed
+solution/Due date are already deliberately spared from at creation. The
+`<select>` reads "Not tied to one person" rather than "— select —" for
+this reason once it's optional, so a blank operator reads as a real,
+considered state rather than something left unfinished.
 
 **`QUALITY_ACTION_CATEGORIES`** — a fixed list, not free text, so the
 Quality tab can eventually report on *where* problems are coming from, not

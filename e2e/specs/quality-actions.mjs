@@ -101,20 +101,25 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('"Open actions" tile reads 1', /OPEN ACTIONS\s*\n?1\b/.test(qText), qText.slice(0, 250));
 
   // ================================================================
-  // Direct creation — no rework job at all
+  // Direct creation — no rework job at all, and NO operator required:
+  // unlike the bundled path (always about one person's work on one job),
+  // a directly-created action can be for all sorts of reasons that aren't
+  // tied to any operator at all (an admin process, a design problem, a
+  // supplier issue) — reported directly as a follow-up.
   // ================================================================
   await page.getByRole('button', { name: 'New action' }).click();
   await page.waitForSelector(modalSel);
   await page.waitForTimeout(300);
   check('the direct-create modal opens titled "New quality action"', (await modal().locator('h3').innerText()) === 'New quality action');
   check('no Status field at creation — a new action is open by definition', (await modal().locator('text=Status').count()) === 0);
+  const opSelectDirect = modal().locator('label:has-text("Operator") select');
+  check('the operator field is explicitly labelled optional', (await modal().locator('text=Operator (optional)').count()) === 1);
+  check('its blank option reads as a considered choice, not an unfinished field', (await opSelectDirect.locator('option').first().innerText()) === 'Not tied to one person');
 
   const saveBtn = modal().getByRole('button', { name: 'Save', exact: true });
   check('Save is disabled with nothing filled in yet', await saveBtn.isDisabled());
   await modal().locator('label:has-text("Details") textarea').fill('Grit blast media contaminated with oil');
-  check('still disabled with details but no operator', await saveBtn.isDisabled());
-  await modal().locator('label:has-text("Operator") select').selectOption({ label: 'Casey' });
-  check('enabled once both details and operator are set — no job link needed', !(await saveBtn.isDisabled()));
+  check('enabled with ONLY details filled — no operator needed to save', !(await saveBtn.isDisabled()));
   await saveBtn.click();
   await page.waitForTimeout(500);
 
@@ -122,11 +127,21 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('a second action now exists, created with no rework job involved', afterDirect.length === 2, JSON.stringify(afterDirect));
   const direct = afterDirect.find((a) => a.id !== bundled[0].id);
   check('the direct action has no linked job', direct?.jobId === null, JSON.stringify(direct));
-  check('its operator is Casey, as picked', direct?.operatorId === 'st_4');
+  check('it saved with no operator at all', direct?.operatorId === '', JSON.stringify(direct));
 
   qText = await page.locator('main').innerText();
   check('the direct action shows "—" for its job column, not a job name', /Grit blast media contaminated with oil\s*\t?—/.test(qText.replace(/\n/g, '\t')) || qText.includes('Grit blast media contaminated with oil'));
   check('"Open actions" now reads 2', /OPEN ACTIONS\s*\n?2\b/.test(qText), qText.slice(0, 250));
+
+  // ---- operator is still editable afterwards, just never forced ----
+  await page.locator('text=Grit blast media contaminated with oil').first().click();
+  await page.waitForSelector(modalSel);
+  await page.waitForTimeout(300);
+  await modal().locator('label:has-text("Operator") select').selectOption({ label: 'Casey' });
+  await modal().getByRole('button', { name: 'Save', exact: true }).click();
+  await page.waitForTimeout(500);
+  const withOperator = (await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_qualityactions') || '[]'))).find((a) => a.id === direct.id);
+  check('an operator can still be added later, just isn\'t mandatory up front', withOperator?.operatorId === 'st_4', JSON.stringify(withOperator));
 
   // ================================================================
   // Editing an existing action: fill in category/solution/due date once

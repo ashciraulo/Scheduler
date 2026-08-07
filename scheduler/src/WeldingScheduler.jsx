@@ -4623,7 +4623,13 @@ function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, on
   const [dueDate, setDueDate] = useState(source?.dueDate || '');
   const [status, setStatus] = useState(source?.status || 'open');
   const [jobId, setJobId] = useState(source?.jobId || '');
-  const canSave = details.trim().length > 0 && !!operatorId;
+  // Operator is required in ReworkModal's bundled version (there, it's
+  // always about a specific person's work on a specific job) but NOT here
+  // — a directly-created action can be for all sorts of reasons that have
+  // nothing to do with any one operator (an admin process, a design
+  // problem, a supplier issue), so forcing a name onto it would just
+  // produce a guess. Only Details is required to save.
+  const canSave = details.trim().length > 0;
 
   return (
     <Modal title={isNew ? 'New quality action' : 'Edit quality action'} onClose={onClose}>
@@ -4633,9 +4639,9 @@ function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, on
           autoFocus placeholder="What happened, and why this needs an action"
         />
       </Field>
-      <Field label="Operator">
+      <Field label="Operator (optional)">
         <select className={inputCls} value={operatorId} onChange={(e) => setOperatorId(e.target.value)}>
-          <option value="">— select —</option>
+          <option value="">Not tied to one person</option>
           {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           {operatorId && !staff.some((s) => s.id === operatorId) && (
             <option value={operatorId}>Former staff member</option>
