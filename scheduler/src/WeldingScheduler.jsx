@@ -106,6 +106,22 @@ const DEFAULT_PROCESSES = [
 
 const EQUIP_TYPES = ['Welding Robot', 'Thermal Spray Robot'];
 
+// A quality action's root-cause category — set once an investigation has
+// actually established one (see QUALITY_ACTIONS below for why it's not
+// required up front). Fixed list rather than free text so the Quality tab
+// can report on WHERE problems are coming from, not just how many there
+// are — a free-text field would fragment into a dozen spellings of the
+// same cause and be useless for that.
+const QUALITY_ACTION_CATEGORIES = [
+  'Human error',
+  'Equipment error',
+  'Admin error',
+  'Material defect',
+  'Procedure error',
+  'Design/specification error',
+  'Other',
+];
+
 // interestRate/annualHours/assets — a machine's own depreciation+interest
 // profile, what used to live on a separate "cost centre" record with no
 // link back to the equipment that actually runs on. Equipment IS the cost
@@ -1105,13 +1121,33 @@ function ActualHoursModal({ job, logged = 0, onCancel, onConfirm, kind = 'job' }
    Collects just enough to schedule the rework as its own job — see
    createRework() for how this becomes a full job record, and "Rework"
    in scheduler/CLAUDE.md for why it's a linked record rather than
-   reopening the original. ============================================ */
-function ReworkModal({ job, onCancel, onConfirm }) {
+   reopening the original. Also always collects a linked Quality action
+   (see "Quality actions" in scheduler/CLAUDE.md) — every rework implies
+   something worth tracking down and preventing, not just a part to redo.
+   ============================================================ */
+function ReworkModal({ job, staff = [], onCancel, onConfirm }) {
   const [hoursTotal, setHoursTotal] = useState(job.hoursTotal || '');
   const [readyDate, setReadyDate] = useState('');
   const [dueDate, setDueDate] = useState(addDays(isoDate(new Date()), 14));
-  const [reason, setReason] = useState('');
-  const canCreate = Number(hoursTotal) > 0;
+  // Whoever logged the most hours against the ORIGINAL job — the best
+  // available answer to "who was working on this" without asking, same
+  // helper this app already uses to carry staff continuity forward
+  // elsewhere (e.g. seeding a replacement placement's staffId). Falls back
+  // to the job's own manual assignment if it was never broken down day by
+  // day. Still just a starting value — corrected below like any other
+  // field if it's wrong (a second person logged more of it, say).
+  const [operatorId, setOperatorId] = useState(primaryStaffOf(job.assignment) || job.staffId || '');
+  const [details, setDetails] = useState('');
+  // Root cause often isn't known yet at the moment rework gets marked — an
+  // investigation may still be needed — so this, the proposed fix, and the
+  // action's own due date all start blank and stay optional here. Only
+  // `details` (what went wrong) and `operator` are required: there has to
+  // be SOME record of what happened and who was involved, even before the
+  // "why" and "what next" are worked out.
+  const [category, setCategory] = useState('');
+  const [proposedSolution, setProposedSolution] = useState('');
+  const [actionDueDate, setActionDueDate] = useState('');
+  const canCreate = Number(hoursTotal) > 0 && details.trim().length > 0 && !!operatorId;
   return (
     <Modal title="Mark for rework" onClose={onCancel}>
       <p className="text-sm text-slate-300 mb-3">
@@ -1119,9 +1155,6 @@ function ReworkModal({ job, onCancel, onConfirm }) {
         own record, completion date and actual hours stay exactly as they are. The rework gets its own hours,
         its own schedule, and its own cost.
       </p>
-      <Field label="What needs reworking (optional)">
-        <textarea className={inputCls} rows={2} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
-      </Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label={`Estimated hours — original was ${job.hoursTotal}h`}>
           <input type="number" min={0} step={0.25} className={inputCls} value={hoursTotal} onChange={(e) => setHoursTotal(e.target.value)} />
@@ -1141,11 +1174,49 @@ function ReworkModal({ job, onCancel, onConfirm }) {
       {job.procedureId
         ? <p className="text-xs text-slate-500 mb-3">This job has a procedure assigned, so the rework's cost will be calculated from it automatically — see the Quality tab.</p>
         : <p className="text-xs text-slate-500 mb-3">This job has no procedure assigned, so the Quality tab will show hours logged but no cost for this rework.</p>}
+
+      <div className="border border-slate-800 bg-slate-800/50 rounded-lg p-3 mb-3">
+        <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wide mb-2">Quality action</h3>
+        <p className="text-xs text-slate-500 mb-3">
+          Tracked on the Quality tab's action list so the root cause and its fix don't get lost once the rework
+          itself is done.
+        </p>
+        <Field label="Details">
+          <textarea className={inputCls} rows={2} value={details} onChange={(e) => setDetails(e.target.value)} autoFocus placeholder="What needs reworking, and why" />
+        </Field>
+        <Field label="Operator">
+          <select className={inputCls} value={operatorId} onChange={(e) => setOperatorId(e.target.value)}>
+            <option value="">— select —</option>
+            {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            {operatorId && !staff.some((s) => s.id === operatorId) && (
+              <option value={operatorId}>Former staff member</option>
+            )}
+          </select>
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Category (optional)">
+            <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="">Not yet determined</option>
+              {QUALITY_ACTION_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
+          <Field label="Action due date (optional)">
+            <input type="date" className={inputCls} value={actionDueDate} onChange={(e) => setActionDueDate(e.target.value)} />
+          </Field>
+        </div>
+        <Field label="Proposed solution (optional)">
+          <textarea className={inputCls} rows={2} value={proposedSolution} onChange={(e) => setProposedSolution(e.target.value)} placeholder="Can be filled in once an investigation determines one" />
+        </Field>
+      </div>
+
       <div className="flex items-center justify-end gap-2">
         <button className={btnGhost} onClick={onCancel}>Cancel</button>
         <button
           className={btnPrimary} disabled={!canCreate}
-          onClick={() => onConfirm({ hoursTotal, readyDate, dueDate, reason })}
+          onClick={() => onConfirm({
+            hoursTotal, readyDate, dueDate,
+            action: { details, operatorId, category, proposedSolution, dueDate: actionDueDate },
+          })}
         >
           <Wrench size={14} /> Create rework job
         </button>
@@ -1585,6 +1656,9 @@ export default function WeldingScheduler() {
   // exactly as they were, seeing only real jobs.
   const [projects, setProjects] = useState([]);
   const [tasks, setTasks] = useState([]);
+  // Corrective/preventive actions tracked from the Quality tab — see
+  // QUALITY_ACTIONS_KEY and "Quality actions" in scheduler/CLAUDE.md.
+  const [qualityActions, setQualityActions] = useState([]);
 
   const [tab, setTab] = useState('schedule');
   const [readOnly, setReadOnly] = useState(false);
@@ -1625,6 +1699,11 @@ export default function WeldingScheduler() {
   // ReworkModal). Not the rework job itself, which doesn't exist until
   // createRework builds it.
   const [reworkOf, setReworkOf] = useState(null);
+  // Quality action object, 'new', or null — see QualityActionModal. The
+  // action bundled automatically into a rework (ReworkModal's own section)
+  // does NOT go through this state at all; it's built and saved directly
+  // inside createRework. This is only for the standalone create/edit flow.
+  const [editingQualityAction, setEditingQualityAction] = useState(null);
 
   const [dragJobId, setDragJobId] = useState(null);
   // A task drag is tracked separately from a job drag rather than sharing
@@ -1703,7 +1782,7 @@ export default function WeldingScheduler() {
   // ---------- initial load ----------
   useEffect(() => {
     (async () => {
-      const [eq, st, tp, pr, jb, pc, pk, ct, tl, ov, pj, tk, cs] = await Promise.all([
+      const [eq, st, tp, pr, jb, pc, pk, ct, tl, ov, pj, tk, cs, qa] = await Promise.all([
         loadKey('wf_equipment', null),
         loadKey('wf_staff', null),
         loadKey('wf_templates', null),
@@ -1717,6 +1796,7 @@ export default function WeldingScheduler() {
         loadKey(PROJECTS_KEY, null),
         loadKey(TASKS_KEY, null),
         loadKey(COST_SETTINGS_KEY, null),
+        loadKey(QUALITY_ACTIONS_KEY, null),
       ]);
       if (pk) setParked(pk);
       if (tl) setTimeLog(tl);
@@ -1729,6 +1809,7 @@ export default function WeldingScheduler() {
       const finalPc = pc || seedProcedures();
       const finalPj = pj || [];
       const finalTk = tk || [];
+      const finalQa = qa || [];
 
       // One-time migration: efficiency used to be a single global setting
       // (costSettings.efficiency) rather than per-template/per-job (see
@@ -1759,6 +1840,7 @@ export default function WeldingScheduler() {
       setProcesses(finalPr);
       setProcedures(finalPc);
       setProjects(finalPj);
+      setQualityActions(finalQa);
       setCostSettings(finalCs);
       // Categories used to be free text typed per template. Seed the managed
       // list from whatever the existing templates already use, so nothing an
@@ -1783,6 +1865,7 @@ export default function WeldingScheduler() {
       if (!pc) saveKey('wf_procedures', finalPc);
       if (!ct) saveKey('wf_categories', finalCt);
       if (!pj) saveKey(PROJECTS_KEY, finalPj);
+      if (!qa) saveKey(QUALITY_ACTIONS_KEY, finalQa);
       // Also re-saved when it existed but still carried the legacy
       // `efficiency` field, so it gets stripped and the migration above
       // doesn't re-run (harmlessly, but pointlessly) on every future load.
@@ -1802,7 +1885,7 @@ export default function WeldingScheduler() {
   // write anything back: a save would bump the server's version and every
   // other screen would see *that* as a change, and so on around the loop.
   const reloadFromStore = useCallback(async () => {
-    const [eq, st, tp, pr, jb, pc, pk, ct, tl, ov, pj, tk, cs] = await Promise.all([
+    const [eq, st, tp, pr, jb, pc, pk, ct, tl, ov, pj, tk, cs, qa] = await Promise.all([
       loadKey('wf_equipment', null),
       loadKey('wf_staff', null),
       loadKey('wf_templates', null),
@@ -1816,11 +1899,13 @@ export default function WeldingScheduler() {
       loadKey(PROJECTS_KEY, null),
       loadKey(TASKS_KEY, null),
       loadKey(COST_SETTINGS_KEY, null),
+      loadKey(QUALITY_ACTIONS_KEY, null),
     ]);
     if (ct) setCategories(ct);
     if (tl) setTimeLog(tl);
     if (ov) setOverrides(ov);
     if (pj) setProjects(pj);
+    if (qa) setQualityActions(qa);
     if (cs) setCostSettings(cs);
     const nextEq = eq || latest.current.equipment;
     const nextSt = st ? st.map(normalizeStaff) : latest.current.staff;
@@ -1856,7 +1941,7 @@ export default function WeldingScheduler() {
     || pendingComplete || confirmDelete || dragJobId
     || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
     || confirmClearPatterns || reworkOf || editingTask || editingProject || pendingTaskComplete || dragTaskId
-    || backfillTask
+    || backfillTask || editingQualityAction
   );
   useEffect(() => {
     if (!remoteChange || !loaded || busyEditing) return;
@@ -2223,7 +2308,15 @@ export default function WeldingScheduler() {
   // ActualHoursModal, the Schedule view, ReportsView) handle it with no
   // special-casing at all — the only things that treat it differently are a
   // Backlog badge and the Quality tab's own filter on `isRework`.
-  function createRework(original, { hoursTotal, readyDate, dueDate, reason }) {
+  // `action` — the bundled Quality action (see ReworkModal's own "Quality
+  // action" section) — is REQUIRED here, not optional: every rework now
+  // always creates one alongside the rework job itself, in the same click.
+  // { details, operatorId, category, proposedSolution, dueDate } — that
+  // `dueDate` is the ACTION's own due date, deliberately a separate field
+  // from the rework job's `dueDate` above (when the corrective action
+  // needs to be done vs. when the rework part needs to be done are two
+  // different dates that just happen to share a name).
+  function createRework(original, { hoursTotal, readyDate, dueDate, action }) {
     const rework = {
       id: uid('job'),
       name: `${original.name} — Rework`,
@@ -2237,7 +2330,11 @@ export default function WeldingScheduler() {
       dueDate,
       departmentDueDate: null,
       templateId: null,
-      notes: reason || '',
+      // Same text as the linked quality action's own `details` — kept here
+      // too so the reason for the rework is visible directly on the job
+      // itself (JobModal, Schedule tooltips), same as it always was before
+      // "reason" had a dedicated Quality-action home.
+      notes: action?.details || '',
       totalValue: 0,
       departmentValue: 0,
       percentComplete: 0,
@@ -2269,6 +2366,27 @@ export default function WeldingScheduler() {
       assignment: null,
     };
     recompute([...jobs, rework], equipment, staff);
+    // Bundled quality action, created in the same click — see the comment
+    // on this function's own `action` param above. Linked to `original`
+    // (the job that actually needed reworking), not to the new `rework`
+    // job itself: the action is about what went wrong the first time, and
+    // stays meaningful even once the rework is long complete.
+    const qualityAction = {
+      id: uid('qa'),
+      details: action?.details || '',
+      operatorId: action?.operatorId || '',
+      category: action?.category || '',
+      proposedSolution: action?.proposedSolution || '',
+      dueDate: action?.dueDate || '',
+      status: 'open',
+      completedDate: null,
+      jobId: original.id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const nextActions = [...qualityActions, qualityAction];
+    setQualityActions(nextActions);
+    saveKey(QUALITY_ACTIONS_KEY, nextActions);
     setReworkOf(null);
     showToast(`${rework.name} created — schedule it like any other job.`);
   }
@@ -2320,6 +2438,29 @@ export default function WeldingScheduler() {
     // task itself, its hours and its cost are untouched.
     setConfirmDelete(null);
     setEditingProject(null);
+  }
+  // ------------------------------------------------------------
+  // Quality actions — see QUALITY_ACTIONS_KEY and "Quality actions" in
+  // scheduler/CLAUDE.md. Two entry points: this pair (used by
+  // QualityActionModal, both for a direct "New action" and for editing an
+  // existing one), and the bundled creation inside createRework below,
+  // which builds and saves its own action record directly rather than
+  // going through editingQualityAction/this save function at all — there's
+  // no separate "review before saving" step for the bundled one, it's
+  // created in the same click as the rework job itself.
+  function saveQualityAction(data, isNew) {
+    const stamped = { ...data, updatedAt: new Date().toISOString() };
+    const next = isNew ? [...qualityActions, stamped] : qualityActions.map((a) => (a.id === stamped.id ? stamped : a));
+    setQualityActions(next);
+    saveKey(QUALITY_ACTIONS_KEY, next);
+    setEditingQualityAction(null);
+  }
+  function deleteQualityAction(id) {
+    const next = qualityActions.filter((a) => a.id !== id);
+    setQualityActions(next);
+    saveKey(QUALITY_ACTIONS_KEY, next);
+    setConfirmDelete(null);
+    setEditingQualityAction(null);
   }
   // A task is always created already pinned — Equipment and Planned start
   // date are both required fields (see TaskModal), there's no "automatic"
@@ -3057,7 +3198,11 @@ export default function WeldingScheduler() {
             equipment={equipment}
             costSettings={costSettings}
             timeLog={timeLog}
+            staff={staff}
+            qualityActions={qualityActions}
             onEditJob={(j) => !readOnly && setEditingJob(j)}
+            onNewAction={() => !readOnly && setEditingQualityAction('new')}
+            onEditAction={(a) => !readOnly && setEditingQualityAction(a)}
           />
         )}
         {tab === 'rd' && !displayMode && (
@@ -3137,6 +3282,7 @@ export default function WeldingScheduler() {
       {reworkOf && (
         <ReworkModal
           job={reworkOf}
+          staff={staff}
           onCancel={() => setReworkOf(null)}
           onConfirm={(data) => createRework(reworkOf, data)}
         />
@@ -3176,6 +3322,17 @@ export default function WeldingScheduler() {
           onClose={() => setEditingProject(null)}
           onSave={(data, isNew) => addOrUpdateProject(data, isNew)}
           onDelete={editingProject !== 'new' ? () => setConfirmDelete({ type: 'project', id: editingProject.id, name: editingProject.name }) : null}
+        />
+      )}
+
+      {editingQualityAction && (
+        <QualityActionModal
+          action={editingQualityAction === 'new' ? null : editingQualityAction}
+          jobs={jobs}
+          staff={staff}
+          onClose={() => setEditingQualityAction(null)}
+          onSave={(data, isNew) => saveQualityAction(data, isNew)}
+          onDelete={editingQualityAction !== 'new' ? () => setConfirmDelete({ type: 'qualityAction', id: editingQualityAction.id, name: 'this quality action' }) : null}
         />
       )}
 
@@ -3320,6 +3477,7 @@ export default function WeldingScheduler() {
                 if (confirmDelete.type === 'staff') deleteStaff(confirmDelete.id);
                 if (confirmDelete.type === 'task') deleteTask(confirmDelete.id);
                 if (confirmDelete.type === 'project') deleteProject(confirmDelete.id);
+                if (confirmDelete.type === 'qualityAction') deleteQualityAction(confirmDelete.id);
               }}
             >
               <Trash2 size={14} /> Delete
@@ -4446,14 +4604,122 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
 }
 
 /* ============================================================
+   QUALITY ACTION MODAL
+   Create or edit one action, either standalone ("New action" on the
+   Quality tab — an issue that needs a fix but not a rework) or reached by
+   clicking a row already in the action list, including the ones
+   ReworkModal creates automatically. That bundled-creation path does NOT
+   go through this modal at all (see createRework) — this is only the
+   direct-create and edit/review flows. See "Quality actions" in
+   scheduler/CLAUDE.md.
+   ============================================================ */
+function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, onDelete }) {
+  const isNew = !action || action === 'new';
+  const source = isNew ? null : action;
+  const [details, setDetails] = useState(source?.details || '');
+  const [operatorId, setOperatorId] = useState(source?.operatorId || '');
+  const [category, setCategory] = useState(source?.category || '');
+  const [proposedSolution, setProposedSolution] = useState(source?.proposedSolution || '');
+  const [dueDate, setDueDate] = useState(source?.dueDate || '');
+  const [status, setStatus] = useState(source?.status || 'open');
+  const [jobId, setJobId] = useState(source?.jobId || '');
+  const canSave = details.trim().length > 0 && !!operatorId;
+
+  return (
+    <Modal title={isNew ? 'New quality action' : 'Edit quality action'} onClose={onClose}>
+      <Field label="Details">
+        <textarea
+          className={inputCls} rows={3} value={details} onChange={(e) => setDetails(e.target.value)}
+          autoFocus placeholder="What happened, and why this needs an action"
+        />
+      </Field>
+      <Field label="Operator">
+        <select className={inputCls} value={operatorId} onChange={(e) => setOperatorId(e.target.value)}>
+          <option value="">— select —</option>
+          {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          {operatorId && !staff.some((s) => s.id === operatorId) && (
+            <option value={operatorId}>Former staff member</option>
+          )}
+        </select>
+      </Field>
+      <Field label="Job this relates to (optional)">
+        <select className={inputCls} value={jobId} onChange={(e) => setJobId(e.target.value)}>
+          <option value="">Not linked to a specific job</option>
+          {jobs.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+          {jobId && !jobs.some((j) => j.id === jobId) && (
+            <option value={jobId}>Deleted job</option>
+          )}
+        </select>
+        <p className="text-xs text-slate-500 mt-1">For an issue that needs a corrective action but doesn't need the job itself reworked — use "Mark for rework" on the job instead when it does.</p>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Category (optional)">
+          <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
+            <option value="">Not yet determined</option>
+            {QUALITY_ACTION_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="Due date (optional)">
+          <input type="date" className={inputCls} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Proposed solution (optional)">
+        <textarea
+          className={inputCls} rows={2} value={proposedSolution} onChange={(e) => setProposedSolution(e.target.value)}
+          placeholder="Can be filled in once an investigation determines one"
+        />
+      </Field>
+      {/* Not offered at creation — a brand new action is open by definition,
+          nothing to mark complete yet. */}
+      {!isNew && (
+        <Field label="Status">
+          <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="open">Open</option>
+            <option value="complete">Complete</option>
+          </select>
+        </Field>
+      )}
+      <div className="flex items-center justify-between pt-2 border-t border-slate-800 mt-2">
+        {onDelete ? <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button> : <span />}
+        <div className="flex gap-2">
+          <button className={btnGhost} onClick={onClose}>Cancel</button>
+          <button
+            className={btnPrimary} disabled={!canSave}
+            onClick={() => onSave({
+              id: source?.id || uid('qa'),
+              details: details.trim(),
+              operatorId,
+              category,
+              proposedSolution,
+              dueDate,
+              jobId: jobId || null,
+              status,
+              // Stamped the moment status actually reads 'complete' — kept
+              // as-is if it already was, cleared if reopened, same
+              // completedDate-follows-status pattern as a job's own toggle.
+              completedDate: status === 'complete' ? (source?.completedDate || isoDate(new Date())) : null,
+              createdAt: source?.createdAt || new Date().toISOString(),
+            }, isNew)}
+          >
+            <Check size={14} /> Save
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================
    QUALITY VIEW
    Every rework job in the system, in one place. A rework job is an
    ordinary job (isRework/reworkOfJobId, created by "Mark for rework" on
    a completed job — see createRework in the main component) so hours
    logged and cost are computed with the exact same helpers as any other
    job (loggedHours, jobCost) — nothing rework-specific to keep in sync.
+   Also lists every quality action — see QualityActionModal above and
+   "Quality actions" in scheduler/CLAUDE.md.
    ============================================================ */
-function QualityView({ jobs, procedures = [], equipment = [], costSettings, timeLog = [], onEditJob }) {
+function QualityView({ jobs, procedures = [], equipment = [], costSettings, timeLog = [], staff = [], qualityActions = [], onEditJob, onNewAction, onEditAction }) {
   const reworks = useMemo(
     () => jobs.filter((j) => j.isRework).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
     [jobs]
@@ -4461,6 +4727,14 @@ function QualityView({ jobs, procedures = [], equipment = [], costSettings, time
   const totalHoursLogged = reworks.reduce((s, j) => s + loggedHours(timeLog, j.id), 0);
   const totalCost = reworks.reduce((s, j) => s + (jobCost(j, procedures, equipment, costSettings) || 0), 0);
   const [reportOpen, setReportOpen] = useState(false);
+
+  const sortedActions = useMemo(
+    () => [...qualityActions].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
+    [qualityActions]
+  );
+  const openActionCount = qualityActions.filter((a) => a.status !== 'complete').length;
+  const staffName = (id) => staff.find((s) => s.id === id)?.name || '—';
+  const jobName = (id) => (id ? jobs.find((j) => j.id === id)?.name || 'Deleted job' : '—');
 
   // Read-only and self-contained (nothing here is saved), so — unlike
   // BackfillTaskModal below — this doesn't need to be lifted into the main
@@ -4485,7 +4759,7 @@ function QualityView({ jobs, procedures = [], equipment = [], costSettings, time
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
           <div className="text-xs text-slate-500 uppercase tracking-wide mb-1">Rework jobs</div>
           <div className="text-xl font-bold text-slate-100">{reworks.length}</div>
@@ -4497,6 +4771,10 @@ function QualityView({ jobs, procedures = [], equipment = [], costSettings, time
         <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
           <div className="text-xs text-slate-500 uppercase tracking-wide mb-1">Total rework cost</div>
           <div className="text-xl font-bold text-amber-300">{fmtMoney(totalCost)}</div>
+        </div>
+        <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+          <div className="text-xs text-slate-500 uppercase tracking-wide mb-1">Open actions</div>
+          <div className="text-xl font-bold text-amber-300">{openActionCount}</div>
         </div>
       </div>
 
@@ -4559,6 +4837,53 @@ function QualityView({ jobs, procedures = [], equipment = [], costSettings, time
             {reworks.length === 0 && (
               <tr><td colSpan={8} className="px-3 py-8 text-center text-slate-600 text-sm">
                 No rework recorded — reworks created from a completed job's "Mark for rework" button will show up here.
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Every corrective/preventive action — bundled automatically with a
+          rework (ReworkModal's own "Quality action" section) or created
+          directly here for an issue that needs a fix but not a rework of
+          the job itself. See QualityActionModal and "Quality actions" in
+          scheduler/CLAUDE.md. */}
+      <div className="flex items-center justify-between mt-2">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">Quality actions</h2>
+        <button className={btnPrimary} onClick={onNewAction}><Plus size={15} /> New action</button>
+      </div>
+      <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase tracking-wide">
+            <tr>
+              <th className="px-3 py-2 text-left">Details</th>
+              <th className="px-3 py-2 text-left">Job</th>
+              <th className="px-3 py-2 text-left">Operator</th>
+              <th className="px-3 py-2 text-left">Category</th>
+              <th className="px-3 py-2 text-left">Proposed solution</th>
+              <th className="px-3 py-2 text-left">Due date</th>
+              <th className="px-3 py-2 text-left">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedActions.map((a) => (
+              <tr key={a.id} className="border-b border-slate-800/60 hover:bg-slate-800/40 cursor-pointer" onClick={() => onEditAction?.(a)}>
+                <td className="px-3 py-2 text-slate-200 text-xs max-w-xs truncate" title={a.details}>{a.details || '—'}</td>
+                <td className="px-3 py-2 text-slate-400 text-xs">{jobName(a.jobId)}</td>
+                <td className="px-3 py-2 text-slate-400 text-xs">{staffName(a.operatorId)}</td>
+                <td className="px-3 py-2 text-slate-400 text-xs">{a.category || '—'}</td>
+                <td className="px-3 py-2 text-slate-500 text-xs max-w-xs truncate" title={a.proposedSolution}>{a.proposedSolution || '—'}</td>
+                <td className="px-3 py-2 text-slate-400 text-xs">{a.dueDate ? fmtDate(a.dueDate) : '—'}</td>
+                <td className="px-3 py-2">
+                  <span className={a.status === 'complete' ? 'text-emerald-400' : 'text-amber-400'}>
+                    {a.status === 'complete' ? 'Complete' : 'Open'}
+                  </span>
+                </td>
+              </tr>
+            ))}
+            {sortedActions.length === 0 && (
+              <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-600 text-sm">
+                No quality actions yet — created automatically when a job is marked for rework, or add one directly for an issue that doesn't need the job itself reworked.
               </td></tr>
             )}
           </tbody>
@@ -6597,6 +6922,14 @@ const COST_SETTINGS_KEY = 'wf_costsettings';
 // out of Job Backlog, Reports, batching, WIP import) while still sharing the
 // scheduling engine (see taskToJobUnit/splitTaskUnits below).
 const TASKS_KEY = 'wf_tasks';
+
+// Corrective/preventive actions tracked from the Quality tab — see
+// "Quality actions" in scheduler/CLAUDE.md. Created two ways: bundled
+// automatically with a rework job (ReworkModal's own "Quality action"
+// section), or created directly with no job at all, for an issue that
+// needs a fix but not a rework. `jobId` links back to whichever job the
+// issue was about, when there is one — never required.
+const QUALITY_ACTIONS_KEY = 'wf_qualityactions';
 
 // Hours logged against a job so far, across every day.
 function loggedHours(timeLog, jobId) {

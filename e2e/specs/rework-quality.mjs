@@ -79,10 +79,21 @@ export default async function run({ page, check, errors, baseUrl }) {
         || (await page.locator(modalSel, { hasText: 'Creates a new job' }).count()) === 1);
 
   const reworkModal = page.locator(modalSel, { hasText: 'Creates a new job' });
-  await reworkModal.locator('textarea').fill('Porosity found on final inspection');
+  const createBtn = reworkModal.getByRole('button', { name: /Create rework job/i });
   const hoursInput = reworkModal.locator('input[type=number]');
   await hoursInput.fill('2');
-  await reworkModal.getByRole('button', { name: /Create rework job/i }).click();
+  check('Create rework job is disabled until the bundled quality action\'s Details/Operator are filled', await createBtn.isDisabled());
+
+  // The bundled Quality action's "Details" field, renamed from the old
+  // standalone "reason" field — its own textarea, not JobModal's, so
+  // targeted specifically rather than the first textarea in the modal
+  // (Proposed solution, further down, is a second one).
+  await reworkModal.locator('label:has-text("Details") textarea').fill('Porosity found on final inspection');
+  // job_orig has no assignment/staffId in this seed, so the Operator field
+  // has nothing to auto-fill from — exactly the case that requires picking
+  // one by hand rather than leaving it blank.
+  await reworkModal.locator('label:has-text("Operator") select').selectOption({ label: 'Alex' });
+  await createBtn.click();
   await page.waitForTimeout(700);
 
   const state = await page.evaluate(() => {
@@ -99,7 +110,18 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('the original job\'s completedDate is untouched', state.orig?.completedDate === '2026-07-01');
   check('the original job\'s actualHours is untouched', state.orig?.actualHours === 9);
 
-  // ---- the Quality tab lists it, with cost from the procedure ----
+  // ---- marking for rework always bundles a linked quality action too —
+  // see "Quality actions" in scheduler/CLAUDE.md ----
+  const actions = await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_qualityactions') || '[]'));
+  check('exactly one quality action was created alongside the rework', actions.length === 1, JSON.stringify(actions));
+  const qa = actions[0];
+  check('the action carries the same details text as the rework job\'s notes', qa?.details === 'Porosity found on final inspection');
+  check('the action\'s operator is the one manually picked (no assignment to auto-fill from)', qa?.operatorId === 'st_1', JSON.stringify(qa));
+  check('the action links back to the ORIGINAL job, not the new rework job', qa?.jobId === 'job_orig', qa?.jobId);
+  check('the action starts open, with category/proposed solution/due date left blank', qa?.status === 'open' && qa?.category === '' && qa?.proposedSolution === '' && qa?.dueDate === '', JSON.stringify(qa));
+
+  // ---- the Quality tab lists the rework job, with cost from the
+  // procedure, AND the bundled action in its own action list ----
   await page.click('nav >> text=Quality');
   await page.waitForTimeout(400);
   const qualityText = await page.locator('main').innerText();
@@ -110,6 +132,10 @@ export default async function run({ page, check, errors, baseUrl }) {
   // cost" in scheduler/CLAUDE.md — so 2h × $37.50/hr = $75.00, not a flat
   // 2h × $50.
   check('the Quality tab calculates cost from the procedure', qualityText.includes('75.00'), qualityText);
+  check('the Quality tab\'s action list shows the bundled action', qualityText.includes('Porosity found on final inspection'));
+  check('the action list shows the operator name, not a raw id', qualityText.includes('Alex'));
+  check('the action list shows the linked original job\'s name', /Porosity found on final inspection[\s\S]{0,40}Bracket Weld Batch 12/.test(qualityText), qualityText);
+  check('"Open actions" tile reflects the one bundled action', /OPEN ACTIONS\s*\n?1/.test(qualityText), qualityText.slice(0, 200));
 
   // ---- rework badge shows on the Backlog ----
   await page.click('nav >> text=Job Backlog');

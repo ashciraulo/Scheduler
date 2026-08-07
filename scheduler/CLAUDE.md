@@ -2016,11 +2016,13 @@ after the fact in the daily log, not here.
 For a completed job that comes back with a problem. **Mark for rework**
 (JobModal footer, offered only on a completed, non-split job) opens
 `ReworkModal`, which collects just enough to schedule the rework —
-estimated hours, ready date, due date, an optional reason — and
-`createRework` (main component) turns that into a brand new, ordinary job:
-`isRework: true`, `reworkOfJobId` pointing back at the original, its own
-`id`/schedule/staffing, inheriting the original's `process`, `procedureId`,
-`preferredEquipmentId`, tags and BC references as sensible starting points.
+estimated hours, ready date, due date — plus a mandatory "Quality action"
+section (see "Quality actions" below), and `createRework` (main component)
+turns that into a brand new, ordinary job: `isRework: true`,
+`reworkOfJobId` pointing back at the original, its own `id`/schedule/
+staffing, inheriting the original's `process`, `procedureId`,
+`preferredEquipmentId`, tags and BC references as sensible starting
+points — plus a linked `QualityAction` record, created in the same click.
 
 **Deliberately a linked record, not reopening the original** — the
 original's own `status`/`completedDate`/`actualHours` are never touched by
@@ -2112,6 +2114,85 @@ job entirely." Both use the same close-then-reopen-on-a-tick pattern
 `setTimeout(() => setEditingJob(fresh), 0)` — mutating `editingJob` in
 place wouldn't reset the modal's own `useState` fields). See
 `e2e/specs/complete-reopens-jobmodal.mjs`.
+
+### Quality actions
+
+A corrective/preventive-action list on the Quality tab, `wf_qualityactions`
+(`QUALITY_ACTIONS_KEY`), separate from — but often linked to — a job.
+Reported directly: rework tracks that a PART needs redoing, but not
+necessarily WHY it went wrong or what stops it happening again; and some
+issues need that same tracking without needing the job itself reworked at
+all. Two creation paths, one shared shape:
+
+```js
+{
+  id, details, operatorId, category, proposedSolution, dueDate,
+  status,        // 'open' | 'complete'
+  completedDate, // stamped when status flips to 'complete', cleared on reopen
+  jobId,         // the job this is about, or null
+  createdAt, updatedAt,
+}
+```
+
+**Bundled with a rework — always, not optionally.** `ReworkModal`'s own
+"Quality action" section is the old standalone "reason" field, relabelled
+**Details**, plus four new ones: **Operator**, **Category**, **Proposed
+solution**, **Due date**. `createRework` builds and saves the
+`QualityAction` directly (`jobId: original.id` — the job that actually
+needed reworking, not the new rework job itself, since the action is about
+what went wrong the first time and stays meaningful long after the rework
+is complete) in the exact same click as the rework job — there is no
+separate "review before saving" step, and no way to create a rework
+without also getting an action out of it. `action.details` is ALSO copied
+onto the rework job's own `notes` (unchanged from the old `reason`
+behaviour) so the reason is still visible directly on the job itself, not
+just in the action list.
+
+**Only Details and Operator are required at creation — Category, Proposed
+solution and Due date all start blank on purpose.** Asked of the user
+directly: an investigation may still be needed to determine the root
+cause, so forcing a category (or a fix, or a deadline) at the moment
+something is merely NOTICED would just produce guessed-at data. All three
+are freely editable later via `QualityActionModal`, once they're actually
+known.
+
+**Operator auto-fills from `primaryStaffOf(job.assignment)`** — whoever
+logged the most hours against the ORIGINAL job, the same helper this app
+already uses elsewhere to carry staff continuity forward (e.g. seeding a
+replacement placement's `staffId`). Falls back to `job.staffId` (the
+manual assignment) if the job was never broken down day by day, and to a
+blank, must-pick-by-hand select if neither exists — still just a starting
+value either way, corrected in the same field if it's wrong.
+
+**`QUALITY_ACTION_CATEGORIES`** — a fixed list, not free text, so the
+Quality tab can eventually report on *where* problems are coming from, not
+just how many there are; free text would fragment into a dozen spellings
+of the same cause. `Human error`, `Equipment error`, `Admin error`,
+`Material defect`, `Procedure error`, `Design/specification error`,
+`Other` — the first three were asked for directly, the rest added to
+round out plausible root causes for a welding/thermal-spray shop without
+the picker itself becoming a category to sift through.
+
+**Direct creation — no rework job at all.** "New action" on the Quality
+tab opens `QualityActionModal` with `action: null`, the same modal used to
+edit an existing one (`action` set) or the one a rework just created
+(clicking its row). The only structural difference from the bundled path:
+`jobId` is an ordinary optional `<select>` here (any job, or "Not linked
+to a specific job"), for an issue that needs a fix but doesn't call for
+the job itself being reworked — reported directly as the second half of
+this feature. **Status** (Open/Complete) is only shown in edit mode, never
+at creation — a brand new action is open by definition, nothing to mark
+complete yet; flipping it to Complete stamps `completedDate`, flipping
+back to Open clears it, mirroring how a job's own completion date follows
+its status.
+
+**The Quality tab's action list** (`QualityView`) is a second table below
+the existing rework table — Details, the linked job's name (or "—"),
+Operator resolved to a name, Category, Proposed solution, Due date, Status
+— clicking a row opens `QualityActionModal` in edit mode. An "Open
+actions" tile joins the existing three stat tiles at the top (Rework jobs,
+Hours logged, Total rework cost), counting `status !== 'complete'` so it
+reads useful the moment any actions exist, bundled or direct.
 
 ### Splitting a job
 
@@ -2539,7 +2620,7 @@ start.
 Data keys: `wf_equipment`, `wf_staff`, `wf_templates`, `wf_processes`,
 `wf_jobs`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`,
 `wf_wipparked`, `wf_categories`, `wf_timelog`, `wf_overrides`, `wf_projects`,
-`wf_tasks` (each a JSON blob). `wf_costcentres` is no longer read or
+`wf_tasks`, `wf_qualityactions` (each a JSON blob). `wf_costcentres` is no longer read or
 written — cost centres were folded into equipment (see "Costing: equipment
 is the cost centre") — but an existing deployment's key is left in storage
 untouched rather than deleted, orphaned but harmless.
