@@ -6106,6 +6106,35 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                 </div>
               </Field>
             )}
+
+            {/* The daily log (TimeLogModal) had nowhere this actually showed
+                up afterward — logging hours against a job produced no
+                visible confirmation anywhere the job itself was reviewed.
+                Shown for any existing job, active or complete, not hidden
+                at 0h the way the Backlog's subtext is: the point here is
+                confirming the log is working, which is exactly the case
+                where "nothing shows" is most confusing. */}
+            {!parts && !isNew && (
+              <Field label="Hours logged">
+                {(() => {
+                  const lg = loggedHours(timeLog, job.id);
+                  const usedForCost = job.status === 'complete' && Number(job.actualHours) > 0 ? Number(job.actualHours) : null;
+                  return (
+                    <div className="text-sm">
+                      <span className={`font-mono ${lg > job.hoursTotal ? 'text-amber-400' : 'text-slate-200'}`}>{lg}h</span>
+                      <span className="text-slate-500 text-xs"> logged day-by-day, against {job.hoursTotal}h estimated</span>
+                      {usedForCost != null && (
+                        <p className="text-xs text-slate-500 mt-1">
+                          This job is complete — cost below is calculated from the recorded actual hours,{' '}
+                          <span className="font-mono text-slate-300">{usedForCost}h</span>
+                          {usedForCost !== lg ? ', adjusted from the daily log total when it was marked complete' : ''}.
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+              </Field>
+            )}
           </Section>
 
           <Section title="Value & costing">
@@ -6151,12 +6180,26 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               // process time. See effectiveHourlyRate.
               const rate = effectiveHourlyRate(proc, costCentres, costSettings);
               const estHrs = Math.round((Number(quantity) || 0) * (Number(hoursPerUnit) || 0) * 100) / 100;
-              const cost = rate * estHrs;
+              // Once the job is complete, cost is (and always was, via
+              // jobCost()/jobHoursForCost() elsewhere) calculated from the
+              // recorded actual hours, not the estimate — but THIS preview
+              // used to always multiply by quantity × hoursPerUnit
+              // regardless, so a completed job's own modal kept showing
+              // "cost = rate × predicted hours" even though the real
+              // jobCost() used for Quality/Value Reports/everywhere else
+              // had already moved on to the actual figure. Reported from
+              // testing as the cost breakdown not being trustworthy.
+              const actualHrs = job?.status === 'complete' && Number(job?.actualHours) > 0 ? Number(job.actualHours) : null;
+              const hrsForCost = actualHrs != null ? actualHrs : estHrs;
+              const cost = rate * hrsForCost;
               const dep = Number(departmentValue) || 0;
               const margin = dep - cost;
               return (
                 <div className="rounded-md border border-slate-700 bg-slate-800/60 p-3 text-xs">
-                  <div className="flex justify-between text-slate-400"><span>Cost — {fmtMoney(rate)}/hr × {estHrs}h</span><span className="font-mono text-slate-200">{fmtMoney(cost)}</span></div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Cost — {fmtMoney(rate)}/hr × {hrsForCost}h{actualHrs != null ? ' (actual)' : ' (estimated)'}</span>
+                    <span className="font-mono text-slate-200">{fmtMoney(cost)}</span>
+                  </div>
                   <div className="flex justify-between text-slate-400 mt-1"><span>Your department value</span><span className="font-mono text-slate-200">{fmtMoney(dep)}</span></div>
                   <div className="flex justify-between mt-1 pt-1 border-t border-slate-700">
                     <span className="text-slate-300 font-medium">{margin >= 0 ? 'Estimated margin' : 'Estimated loss'}</span>
@@ -8159,9 +8202,14 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
 
       <div className="grid sm:grid-cols-3 gap-3 mb-4">
         <div className="border border-slate-800 bg-slate-900 rounded-lg p-4">
-          <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Estimated operating cost of these jobs</p>
+          <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Operating cost of these jobs</p>
           <p className="text-2xl font-bold text-slate-100 font-mono">{fmtMoney(totalCost)}</p>
-          <p className="text-[10px] text-slate-500 mt-1">{costedCount} of {included.length} have a costed procedure</p>
+          {/* "Estimated" used to be unconditional — misleading once a job
+              completes, since jobCost() switches to actualHours the moment
+              it does (see jobHoursForCost). The "Contributing jobs" table
+              below breaks this exact total down row by row, actual vs
+              estimated, so it isn't just an assertion. */}
+          <p className="text-[10px] text-slate-500 mt-1">{costedCount} of {included.length} have a costed procedure — actual hours where complete, estimated otherwise</p>
         </div>
         <div className={`border rounded-lg p-4 ${deptMargin >= 0 ? 'border-emerald-700/50 bg-emerald-950/20' : 'border-red-800/50 bg-red-950/20'}`}>
           <p className={`text-[11px] uppercase tracking-wide mb-1 ${deptMargin >= 0 ? 'text-emerald-400/80' : 'text-red-400/80'}`}>Department margin (value − cost)</p>
@@ -8208,6 +8256,13 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
         </div>
         <div>
           <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Contributing jobs ({included.length})</h3>
+          {/* Hours + Cost columns exist so the operating-cost/margin tiles
+              above are checkable, not just asserted — each is the same
+              jobHoursForCost()/jobCost() the tiles' own totals are summed
+              from, per row, so they add back up to exactly what's shown
+              there. "actual"/"est" makes explicit which hours a completed
+              job's own cost was actually priced against, since that's what
+              was reported as impossible to verify before this existed. */}
           <div className="border border-slate-800 bg-slate-900 rounded-lg overflow-hidden max-h-[320px] overflow-y-auto">
             <table className="w-full text-xs">
               <thead className="sticky top-0 bg-slate-900">
@@ -8215,17 +8270,28 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
                   <th className="px-3 py-2 font-medium">Job</th>
                   <th className="px-3 py-2 font-medium">Total $</th>
                   <th className="px-3 py-2 font-medium">Dept $</th>
+                  <th className="px-3 py-2 font-medium">Hours</th>
+                  <th className="px-3 py-2 font-medium">Cost</th>
                 </tr>
               </thead>
               <tbody>
-                {included.map((j) => (
-                  <tr key={j.id} className="border-b border-slate-800/60">
-                    <td className="px-3 py-1.5 text-slate-300">{j.name}</td>
-                    <td className="px-3 py-1.5 text-slate-500 font-mono">${Number(j.totalValue || 0).toLocaleString()}</td>
-                    <td className="px-3 py-1.5 text-amber-300 font-mono">${Number(j.departmentValue || 0).toLocaleString()}</td>
-                  </tr>
-                ))}
-                {included.length === 0 && <tr><td colSpan={3} className="px-3 py-6 text-center text-slate-600">Nothing here yet.</td></tr>}
+                {included.map((j) => {
+                  const hrs = jobHoursForCost(j);
+                  const isActualHrs = j.status === 'complete' && Number(j.actualHours) > 0;
+                  const cost = jobCost(j, procedures, costCentres, costSettings);
+                  return (
+                    <tr key={j.id} className="border-b border-slate-800/60">
+                      <td className="px-3 py-1.5 text-slate-300">{j.name}</td>
+                      <td className="px-3 py-1.5 text-slate-500 font-mono">${Number(j.totalValue || 0).toLocaleString()}</td>
+                      <td className="px-3 py-1.5 text-amber-300 font-mono">${Number(j.departmentValue || 0).toLocaleString()}</td>
+                      <td className="px-3 py-1.5 text-slate-400 font-mono whitespace-nowrap">
+                        {hrs}h <span className="text-slate-600">({isActualHrs ? 'actual' : 'est'})</span>
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-300 font-mono">{cost != null ? fmtMoney(cost) : '—'}</td>
+                    </tr>
+                  );
+                })}
+                {included.length === 0 && <tr><td colSpan={5} className="px-3 py-6 text-center text-slate-600">Nothing here yet.</td></tr>}
               </tbody>
             </table>
           </div>

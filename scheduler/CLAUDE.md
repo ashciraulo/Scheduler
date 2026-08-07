@@ -1435,6 +1435,54 @@ stored actual, then the estimate). The Backlog shows the running logged total
 against the estimate, amber-coloured once it exceeds it, so drift is visible
 before completion.
 
+**`JobModal` itself shows a "Hours logged" field for any existing job**
+(`loggedHours(timeLog, job.id)`, next to the % complete slider) — reported
+from testing that logging hours day-by-day had nowhere it showed up again:
+the Backlog's own subtext (above) is the only other place, easy to miss if
+that's not the screen someone's on, and TimeLogModal itself is a write-only
+form with no memory of what it already saved. Shown for any existing job
+regardless of status — not hidden at 0h the way the Backlog's subtext is,
+since confirming "yes, the log is empty/working" is exactly the case where
+"nothing shows" reads as broken rather than genuinely empty. For a
+completed job it also states outright which hours the cost below is
+actually calculated from (see the next paragraph) — `job.actualHours` when
+it differs from the day-by-day total, since that's the one that survived
+into `jobCost()`.
+
+**Cost figures that read a job directly — not just `jobCost()`'s own
+call sites — have to route through the SAME actual-vs-estimated hours
+`jobHoursForCost()` already decides, or they silently regress to pricing
+against the estimate for a job that's actually finished.** `JobModal`'s own
+margin-preview block (`Cost — $/hr × Nh`, in Value & costing) computed its
+hours as `quantity × hoursPerUnit` — the estimate — unconditionally, even
+once `job.status === 'complete'` and a real `job.actualHours` existed.
+`jobCost()`/`jobHoursForCost()` elsewhere had already been pricing
+completed jobs at their actual hours the whole time; this one preview
+simply never got updated to match, so a completed job's own modal kept
+showing "cost = rate × predicted hours" — reported from testing as the
+figures "not being correct" and, by extension, not trustworthy anywhere
+they're shown. Fixed by the same branch `jobHoursForCost` uses
+(`job?.status === 'complete' && Number(job?.actualHours) > 0 ? actualHours
+: estimate`), with the preview's own `Nh` label now suffixed `(actual)` or
+`(estimated)` so which one is in effect is never ambiguous again.
+
+**`ReportsView` ("Value Reports") had no per-job breakdown at all** — the
+operating-cost/margin tiles at the top were pure totals with nothing
+underneath to check them against, which is what made them impossible to
+verify (reported from testing directly: "I can't see any of this and can't
+verify it, so the ... figures can't be trusted"). The existing "Contributing
+jobs" table (already listed every job the current basis/date-range
+includes) gained two more columns — Hours (`jobHoursForCost(j)`, labelled
+`actual`/`est`) and Cost (`jobCost(j, ...)`) — the exact same per-job
+figures the tiles above are summed from, so the tiles are now checkable by
+adding the column up, not just asserted. The operating-cost tile's own
+label dropped the unconditional "Estimated" (misleading the moment any
+included job is complete, since its own row is priced at actual hours) for
+a caption spelling out "actual hours where complete, estimated otherwise."
+See `e2e/specs/actual-hours-cost-visibility.mjs` for a worked example (a
+10h-estimated, 6h-actual job) proving the tile total and the row's own
+cost agree.
+
 `TimeLogModal` opens on a date and lists the jobs the schedule expected that
 day, so the common case is confirming numbers rather than hunting for jobs;
 any other active job can be added for when reality differed from the plan.

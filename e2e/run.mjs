@@ -42,6 +42,7 @@ import scheduleZoomAndDueHighlight from './specs/schedule-zoom-and-due-highlight
 import procedureWireFeedstock from './specs/procedure-wire-feedstock.mjs';
 import duplicateProcedureCostcentre from './specs/duplicate-procedure-costcentre.mjs';
 import completeReopensJobmodal from './specs/complete-reopens-jobmodal.mjs';
+import actualHoursCostVisibility from './specs/actual-hours-cost-visibility.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -83,6 +84,7 @@ const SUITES = [
   ['procedure editor — wire feedstock alongside powder', procedureWireFeedstock],
   ['duplicate a procedure or cost centre from an existing one', duplicateProcedureCostcentre],
   ['completing a job from inside JobModal reopens it (Mark for rework visible)', completeReopensJobmodal],
+  ['actual hours visibility + cost calculated from actual hours once complete', actualHoursCostVisibility],
 ];
 
 const only = process.argv[2]; // optional substring filter
