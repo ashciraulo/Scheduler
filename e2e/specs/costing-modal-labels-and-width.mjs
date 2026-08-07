@@ -5,10 +5,12 @@
      disappears the instant a value is typed, and never showed at all for
      the numeric columns, since they default to a real 0, not an empty
      string. Every section now has a persistent header row above it.
-   - CostCentreEditor's modal used the default (448px) width even though
-     its capital-assets table has 4 real columns plus a delete button —
-     cramped next to the rest of the Costing view's available space. Now
-     opens at the same "wide" (1024px) size as the procedure modal. */
+   - The capital-assets editor (originally CostCentreEditor's own modal,
+     now folded into EquipmentModal — see "Costing: equipment is the cost
+     centre" in scheduler/CLAUDE.md) used the default (448px) width even
+     though its table has 4 real columns plus a delete button — cramped
+     next to the rest of the Costing view's available space. EquipmentModal
+     now opens at the same "wide" (1024px) size as the procedure modal. */
 
 export default async function run({ page, check, errors, baseUrl }) {
   await page.goto(baseUrl, { waitUntil: 'load' });
@@ -21,23 +23,23 @@ export default async function run({ page, check, errors, baseUrl }) {
 
   const modal = () => page.locator('div.fixed.inset-0 > div').first();
 
-  // ---- Cost centre modal is wide, not the cramped default ----
-  // "New cost centre" now opens CreateChoiceModal first (blank vs. copy an
-  // existing one) rather than the editor directly — "Create new" reaches
-  // the same blank editor this test already expects.
-  await page.locator('button', { hasText: /new cost centre/i }).first().click();
+  // ---- Equipment modal (carries the old cost centre's capital-assets
+  // editor) is wide, not the cramped default ----
+  await page.locator('h2', { hasText: 'Equipment' }).locator('xpath=..').locator('button', { hasText: /Add/ }).click();
   await page.waitForSelector('div.fixed.inset-0');
-  await page.waitForTimeout(200);
-  await page.locator('text=Create new').click();
   await page.waitForTimeout(300);
-  const ccBox = await modal().boundingBox();
-  check('#61 the cost centre modal is wider than the old cramped default (448px)', ccBox.width > 900, ccBox.width);
+  check('#61 the equipment modal (capital assets editor) is wider than the old cramped default (448px)',
+        (await modal().boundingBox()).width > 900, (await modal().boundingBox()).width);
+  const eqModalText = await modal().innerText();
+  check('the capital-assets fields (moved from the old cost centre editor) are present', /Interest rate|Annual operating hours|Capital assets/i.test(eqModalText), eqModalText.slice(0, 300));
   await page.locator('div.fixed.inset-0 > div > div:first-child button').first().click();
   await page.waitForTimeout(300);
 
   // ---- Procedure modal: every column has a persistent header, not just
   // a placeholder that vanishes once a prefilled 0 is sitting in the field ----
-  // Same CreateChoiceModal detour as cost centres above.
+  // "New procedure" opens CreateChoiceModal first (blank vs. copy an
+  // existing one) — "Create new" reaches the same blank editor this test
+  // already expects.
   await page.locator('button', { hasText: /new procedure/i }).first().click();
   await page.waitForSelector('div.fixed.inset-0');
   await page.waitForTimeout(200);
@@ -49,6 +51,7 @@ export default async function run({ page, check, errors, baseUrl }) {
         /MATERIAL/.test(bodyText) && /\$\/KG/.test(bodyText) && /G\/MIN/.test(bodyText), bodyText.slice(0, 400));
   check('#61 the Electricity section has visible column headers',
         /\bKW\b/.test(bodyText) && /\$\/KWH/.test(bodyText), bodyText.slice(0, 600));
+  check('#61 no "Cost centre" field remains — procedures are equipment-independent now', !/Cost centre/i.test(bodyText));
 
   // Add a row to each remaining section and confirm its header row rendered
   // (present even with zero rows, but this also proves it lines up with a

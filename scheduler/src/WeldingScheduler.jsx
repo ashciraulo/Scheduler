@@ -106,14 +106,32 @@ const DEFAULT_PROCESSES = [
 
 const EQUIP_TYPES = ['Welding Robot', 'Thermal Spray Robot'];
 
+// interestRate/annualHours/assets — a machine's own depreciation+interest
+// profile, what used to live on a separate "cost centre" record with no
+// link back to the equipment that actually runs on. Equipment IS the cost
+// centre now (see "Costing: equipment is the cost centre" in
+// scheduler/CLAUDE.md) — welding robots start with no capital assets
+// entered (nothing physical was ever costed for them before this existed),
+// the two thermal spray cells carry over roughly what their old cost
+// centres described, combined onto the one machine that actually runs
+// those processes rather than split across several same-machine records.
 function seedEquipment() {
   return [
-    { id: 'eq_1', name: 'Weld Robot 1', type: 'Welding Robot', tags: ['1T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
-    { id: 'eq_2', name: 'Weld Robot 2', type: 'Welding Robot', tags: ['5T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
-    { id: 'eq_3', name: 'Weld Robot 3', type: 'Welding Robot', tags: ['1T Positioner'], processes: ['Robotic MIG Welding'], unavailableDates: [], bcResourceNo: '' },
-    { id: 'eq_4', name: 'Weld Robot 4', type: 'Welding Robot', tags: ['5T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '' },
-    { id: 'eq_5', name: 'Thermal Spray Cell 1', type: 'Thermal Spray Robot', processes: ['Thermal Spray - HVOF', 'Thermal Spray - Plasma Spray'], unavailableDates: [], bcResourceNo: '' },
-    { id: 'eq_6', name: 'Thermal Spray Cell 2', type: 'Thermal Spray Robot', processes: ['Thermal Spray - HVOF', 'Thermal Spray - Arc Spray'], unavailableDates: [], bcResourceNo: '' },
+    { id: 'eq_1', name: 'Weld Robot 1', type: 'Welding Robot', tags: ['1T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '', interestRate: 10, annualHours: 3800, assets: [] },
+    { id: 'eq_2', name: 'Weld Robot 2', type: 'Welding Robot', tags: ['5T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '', interestRate: 10, annualHours: 3800, assets: [] },
+    { id: 'eq_3', name: 'Weld Robot 3', type: 'Welding Robot', tags: ['1T Positioner'], processes: ['Robotic MIG Welding'], unavailableDates: [], bcResourceNo: '', interestRate: 10, annualHours: 3800, assets: [] },
+    { id: 'eq_4', name: 'Weld Robot 4', type: 'Welding Robot', tags: ['5T Positioner'], processes: ['Robotic MIG Welding', 'Robotic TIG Welding'], unavailableDates: [], bcResourceNo: '', interestRate: 10, annualHours: 3800, assets: [] },
+    { id: 'eq_5', name: 'Thermal Spray Cell 1', type: 'Thermal Spray Robot', processes: ['Thermal Spray - HVOF', 'Thermal Spray - Plasma Spray'], unavailableDates: [], bcResourceNo: '', interestRate: 10, annualHours: 3800, assets: [
+      { name: 'HVOF gun system', capital: 180000, salvage: 15000, life: 20000 },
+      { name: 'Plasma gun + power supply', capital: 150000, salvage: 12000, life: 25000 },
+      { name: 'Robot cell', capital: 220000, salvage: 20000, life: 40000 },
+      { name: 'Dust extraction', capital: 45000, salvage: 0, life: 30000 },
+    ] },
+    { id: 'eq_6', name: 'Thermal Spray Cell 2', type: 'Thermal Spray Robot', processes: ['Thermal Spray - HVOF', 'Thermal Spray - Arc Spray'], unavailableDates: [], bcResourceNo: '', interestRate: 10, annualHours: 3800, assets: [
+      { name: 'HVOF gun system', capital: 195000, salvage: 15000, life: 20000 },
+      { name: 'Robot cell', capital: 220000, salvage: 20000, life: 40000 },
+      { name: 'Dust extraction', capital: 45000, salvage: 0, life: 30000 },
+    ] },
   ];
 }
 
@@ -199,30 +217,10 @@ function mkJob({ name, process, quantity, hoursPerUnit, dueDate, departmentDueDa
    cost = procedure $/hr × hours (actual once complete, else est).
    ============================================================ */
 
-function seedCostCentres() {
-  return [
-    { id: 'cc_hvof_gas', name: 'HVOF (gas-fuel)', interestRate: 10, annualHours: 3800, assets: [
-      { name: 'HVOF gun system', capital: 180000, salvage: 15000, life: 20000 },
-      { name: 'Robot cell', capital: 220000, salvage: 20000, life: 40000 },
-      { name: 'Dust extraction', capital: 45000, salvage: 0, life: 30000 },
-    ] },
-    { id: 'cc_hvof_kero', name: 'HVOF (kerosene)', interestRate: 10, annualHours: 3800, assets: [
-      { name: 'HVOF gun system', capital: 195000, salvage: 15000, life: 20000 },
-      { name: 'Robot cell', capital: 220000, salvage: 20000, life: 40000 },
-      { name: 'Dust extraction', capital: 45000, salvage: 0, life: 30000 },
-    ] },
-    { id: 'cc_plasma', name: 'Atmospheric plasma', interestRate: 10, annualHours: 3800, assets: [
-      { name: 'Plasma gun + power supply', capital: 150000, salvage: 12000, life: 25000 },
-      { name: 'Robot cell', capital: 220000, salvage: 20000, life: 40000 },
-      { name: 'Dust extraction', capital: 45000, salvage: 0, life: 30000 },
-    ] },
-  ];
-}
-
 function seedProcedures() {
   const note = 'Placeholder from cost calculator — edit or re-import with your real values.';
   return [
-    { id: 'proc_wccocr', name: 'WC-CoCr 86/10/4 — hydraulic rod', process: 'Thermal Spray - HVOF', costCentreId: 'cc_hvof_gas', substrate: '17-4PH stainless', notes: note,
+    { id: 'proc_wccocr', name: 'WC-CoCr 86/10/4 — hydraulic rod', process: 'Thermal Spray - HVOF', substrate: '17-4PH stainless', notes: note,
       materialMode: 'powder', powder: { material: 'WC-CoCr 86/10/4', pricePerKg: 82, gPerMin: 83.33 },
       gases: [
         { name: 'Hydrogen (fuel)', role: 'primary', unit: 'm³', pricePerUnit: 8.5, lPerMin: 750 },
@@ -236,7 +234,7 @@ function seedProcedures() {
       labour: [{ name: 'Spray technician', rate: 55, count: 1 }, { name: 'Cell supervisor', rate: 72, count: 0.3 }],
       qa: [{ name: 'Metallurgical coupon', costPerHour: 18 }, { name: 'CMM inspection', costPerHour: 9 }, { name: 'Documentation / cert', costPerHour: 6 }],
     },
-    { id: 'proc_cr3c2', name: 'Cr₃C₂-NiCr — turbine shroud', process: 'Thermal Spray - HVOF', costCentreId: 'cc_hvof_kero', substrate: 'Inconel 718', notes: note,
+    { id: 'proc_cr3c2', name: 'Cr₃C₂-NiCr — turbine shroud', process: 'Thermal Spray - HVOF', substrate: 'Inconel 718', notes: note,
       materialMode: 'powder', powder: { material: 'Cr₃C₂-NiCr (WOKA 7202)', pricePerKg: 95, gPerMin: 75 },
       gases: [
         { name: 'Kerosene (fuel)', role: 'primary', unit: 'L', pricePerUnit: 1.6, lPerMin: 0.37 },
@@ -250,7 +248,7 @@ function seedProcedures() {
       labour: [{ name: 'Spray technician', rate: 55, count: 1 }, { name: 'Cell supervisor', rate: 72, count: 0.3 }],
       qa: [{ name: 'Metallurgical coupon', costPerHour: 22 }, { name: 'CMM inspection', costPerHour: 9 }, { name: 'Documentation / cert', costPerHour: 6 }],
     },
-    { id: 'proc_nicraly', name: 'NiCrAlY bond coat — APS', process: 'Thermal Spray - Plasma Spray', costCentreId: 'cc_plasma', substrate: 'Various', notes: note,
+    { id: 'proc_nicraly', name: 'NiCrAlY bond coat — APS', process: 'Thermal Spray - Plasma Spray', substrate: 'Various', notes: note,
       materialMode: 'powder', powder: { material: 'NiCrAlY', pricePerKg: 120, gPerMin: 63.33 },
       gases: [
         { name: 'Argon', role: 'primary', unit: 'm³', pricePerUnit: 3.8, lPerMin: 60 },
@@ -275,12 +273,23 @@ function gasUnitsHr(g) {
   return String((g && g.unit) || '').trim().toUpperCase() === 'L' ? (Number(g.lPerMin) || 0) * 60 : (Number(g.lPerMin) || 0) * 0.06;
 }
 // Cost centre → $/hr: straight-line depreciation + interest on average capital.
-function costCentrePerHr(cc) {
-  if (!cc) return 0;
-  const hrs = Number(cc.annualHours) || 0;
-  return (cc.assets || []).reduce((s, r) => {
+// Equipment's own hourly depreciation+interest cost. Used to live on a
+// separate "cost centre" record with no link back to any specific piece
+// of equipment — a procedure picked ONE cost centre, which meant the same
+// procedure running on two different machines (or one machine's
+// depreciation applying to several procedures) had no honest way to be
+// represented; you ended up either duplicating the procedure per machine
+// or pretending every machine that could run a process cost the same to
+// own. Equipment IS the cost centre now: this is the same formula
+// `costCentrePerHr` always used, just reading straight off the equipment
+// record instead of a separate one. See "Costing: equipment is the cost
+// centre" in scheduler/CLAUDE.md.
+function equipmentDepreciationPerHr(equipment) {
+  if (!equipment) return 0;
+  const hrs = Number(equipment.annualHours) || 0;
+  return (equipment.assets || []).reduce((s, r) => {
     const dep = Number(r.life) > 0 ? ((Number(r.capital) || 0) - (Number(r.salvage) || 0)) / Number(r.life) : 0;
-    const interest = hrs > 0 ? ((Number(cc.interestRate) || 0) / 100) * ((Number(r.capital) || 0) + (Number(r.salvage) || 0)) / 2 / hrs : 0;
+    const interest = hrs > 0 ? ((Number(equipment.interestRate) || 0) / 100) * ((Number(r.capital) || 0) + (Number(r.salvage) || 0)) / 2 / hrs : 0;
     return s + dep + interest;
   }, 0);
 }
@@ -312,11 +321,16 @@ function wireConsumptionGPerMin(wire) {
   const areaMm2 = Math.PI * (diameterMm / 2) ** 2;
   return areaMm2 * density * feedSpeedMPerMin;
 }
-// Procedure → per-category and total $/hr.
-function procedureParts(p, costCentres) {
-  if (!p) return { material: 0, gas: 0, electricity: 0, spares: 0, maintenance: 0, consumables: 0, depreciation: 0, labour: 0, qa: 0, total: 0 };
+// Procedure → per-category and total $/hr — deliberately EQUIPMENT-FREE.
+// A procedure describes a repeatable process (powder/wire, gas, spares,
+// labour...), and the same one is often run on more than one compatible
+// machine — this total is what it costs regardless of which. Equipment
+// depreciation is a separate, per-machine number added on top wherever a
+// procedure actually meets a specific piece of equipment (see
+// effectiveHourlyRate) — never baked into the procedure itself.
+function procedureParts(p) {
+  if (!p) return { material: 0, gas: 0, electricity: 0, spares: 0, maintenance: 0, consumables: 0, labour: 0, qa: 0, total: 0 };
   const pw = p.powder || {}, el = p.electricity || {};
-  const cc = (costCentres || []).find((c) => c.id === p.costCentreId);
   const t = {};
   // `materialMode` — 'wire' or 'powder' (default) — is a manual per-procedure
   // choice, not inferred from `process`: Thermal Spray - Arc Spray is
@@ -334,13 +348,12 @@ function procedureParts(p, costCentres) {
   t.spares = (p.spares || []).reduce((s, r) => s + (Number(r.life) > 0 ? (Number(r.cost) || 0) / Number(r.life) : 0), 0);
   t.maintenance = (p.maintenance || []).reduce((s, r) => s + (Number(r.interval) > 0 ? (Number(r.cost) || 0) / Number(r.interval) : 0), 0);
   t.consumables = (p.consumables || []).reduce((s, r) => s + (Number(r.costPerHour) || 0), 0);
-  t.depreciation = costCentrePerHr(cc);
   t.labour = (p.labour || []).reduce((s, r) => s + (Number(r.rate) || 0) * (Number(r.count) || 0), 0);
   t.qa = (p.qa || []).reduce((s, r) => s + (Number(r.costPerHour) || 0), 0);
-  t.total = t.material + t.gas + t.electricity + t.spares + t.maintenance + t.consumables + t.depreciation + t.labour + t.qa;
+  t.total = t.material + t.gas + t.electricity + t.spares + t.maintenance + t.consumables + t.labour + t.qa;
   return t;
 }
-const procedureCost = (p, costCentres) => procedureParts(p, costCentres).total;
+const procedureCost = (p) => procedureParts(p).total;
 // Hours used to cost a job: actual once complete, otherwise the estimate.
 const jobHoursForCost = (j) => (j && j.status === 'complete' && Number(j.actualHours) > 0 ? Number(j.actualHours) : Number((j && j.hoursTotal) || 0));
 // `job.completedDate` is when someone clicked "Mark complete" in the app —
@@ -411,17 +424,43 @@ function effectiveCompletionDate(job) {
 // lets jobCost() (whole-item totals) and hourlyRate() (report rows, which
 // can be a single day's partial hours) share this one function instead of
 // each needing their own two-bucket split.
-function effectiveHourlyRate(procedure, costCentres, costSettings) {
-  const full = procedureCost(procedure, costCentres);
+// `equipment` here is the ONE specific machine a job/task/report-row is
+// actually priced against (see resolveJobEquipment) — its own depreciation
+// rate is folded into the procedure's own rate BEFORE the efficiency
+// blend, same treatment materials/gas already got, so a machine tied up
+// for the whole scheduled span (setup and breakdown included, not just
+// the productive share) still gets charged for all of it: `full` blends
+// at `eff`%, `avgLabourRate` picks up the rest — moving where the
+// depreciation number comes from didn't need to change that formula, only
+// which record it reads. `equipment` may be null (nothing assigned yet,
+// or no capital assets entered on it) — depreciation is simply $0 in that
+// case, same as a procedure with no material cost entered.
+function effectiveHourlyRate(procedure, equipment, costSettings) {
+  const full = procedureCost(procedure) + equipmentDepreciationPerHr(equipment);
   const eff = Math.max(0, Math.min(100, Number(costSettings?.efficiency ?? 75))) / 100;
   const labour = Number(costSettings?.avgLabourRate) || 0;
   return full * eff + labour * (1 - eff);
 }
-function jobCost(j, procedures, costCentres, costSettings) {
+// Which equipment a job/task is actually priced against: wherever it's
+// CURRENTLY placed (assignment.equipmentId), never preferredEquipmentId/
+// lockedEquipmentId — those are constraints on where it MIGHT land, not a
+// confirmed placement, and pricing against a machine it hasn't actually
+// been put on would misrepresent the cost the moment it lands somewhere
+// else. Null (no depreciation contribution) for anything not yet
+// scheduled, and for a split job's own top-level record — a split job's
+// `assignment` is always null (see "Splitting a job"); its parts each
+// have their own, but jobCost()/hourlyRate() price the job as a whole, so
+// per-part equipment isn't consulted here — a known, accepted limitation,
+// not an oversight.
+function resolveJobEquipment(item, equipmentList) {
+  const id = item?.assignment?.equipmentId;
+  return id ? (equipmentList || []).find((e) => e.id === id) || null : null;
+}
+function jobCost(j, procedures, equipmentList, costSettings) {
   if (!j || !j.procedureId) return null;
   const p = (procedures || []).find((x) => x.id === j.procedureId);
   if (!p) return null;
-  return effectiveHourlyRate(p, costCentres, costSettings) * jobHoursForCost(j);
+  return effectiveHourlyRate(p, resolveJobEquipment(j, equipmentList), costSettings) * jobHoursForCost(j);
 }
 // Map a cost-calculator spec's process string onto one of the scheduler's processes.
 function mapImportProcess(str, schedProcesses) {
@@ -435,16 +474,20 @@ function mapImportProcess(str, schedProcesses) {
   return '';
 }
 // Parse the cost calculator's "Export specs" JSON ({format,version,processes,specs}).
+// The "processes" half of this format is cost-centre-shaped (interestRate/
+// annualHours/assets) — that's no longer a concept this app has on its own
+// (see "Costing: equipment is the cost centre" in scheduler/CLAUDE.md), and
+// there's no reliable way to match one of those entries to a SPECIFIC piece
+// of equipment automatically (a cost centre here was never linked to one
+// machine to begin with, which is exactly the problem being fixed). Rather
+// than guess, this import now only ever produces procedures — equipment
+// depreciation/interest/capital assets go in directly on each Equipment
+// record instead, using the old export's figures as a manual reference.
 function parseCostingImport(data, schedProcesses) {
   const rawSpecs = Array.isArray(data) ? data : (data && Array.isArray(data.specs) ? data.specs : null);
   if (!rawSpecs) return null;
-  const rawProcs = (data && Array.isArray(data.processes)) ? data.processes : [];
-  const costCentres = rawProcs.map((p) => ({
-    id: p.id || uid('cc'), name: p.name || '', interestRate: Number(p.interestRate) || 0, annualHours: Number(p.annualHours) || 0,
-    assets: (Array.isArray(p.assets) ? p.assets : (Array.isArray(p.depreciation) ? p.depreciation : [])).map((r) => ({ name: r.name || '', capital: Number(r.capital) || 0, salvage: Number(r.salvage) || 0, life: Number(r.life) || 0 })),
-  }));
   const procedures = rawSpecs.map((s) => ({
-    id: s.id || uid('proc'), name: s.name || '', process: mapImportProcess(s.process || s.name, schedProcesses), costCentreId: s.processId || s.costCentreId || '', substrate: s.substrate || '', notes: s.notes || '',
+    id: s.id || uid('proc'), name: s.name || '', process: mapImportProcess(s.process || s.name, schedProcesses), substrate: s.substrate || '', notes: s.notes || '',
     // The external cost calculator this format comes from only ever exported
     // powder specs, so an import with no materialMode/wire at all defaults
     // to powder — same fallback ProcedureEditor and procedureParts use for
@@ -457,7 +500,7 @@ function parseCostingImport(data, schedProcesses) {
     spares: Array.isArray(s.spares) ? s.spares : [], maintenance: Array.isArray(s.maintenance) ? s.maintenance : [], consumables: Array.isArray(s.consumables) ? s.consumables : [],
     labour: Array.isArray(s.labour) ? s.labour : [], qa: Array.isArray(s.qa) ? s.qa : [],
   }));
-  return { costCentres, procedures };
+  return { procedures };
 }
 
 function uid(prefix = 'id') {
@@ -740,21 +783,21 @@ const EQUIP_COLOR = {
    ============================================================ */
 
 /* ============================================================
-   COSTING VIEW — cost centres + procedures with $/hr breakdown
+   COSTING VIEW — procedures ($/hr, excl. equipment) + equipment
+   (which now also carries capital assets/depreciation — see
+   "Costing: equipment is the cost centre" in scheduler/CLAUDE.md)
    ============================================================ */
 
-// Shown before ProcedureEditor/CostCentreEditor ever open, in front of both
-// "New procedure" and "New cost centre" — some pieces of equipment/
-// procedures are close enough to an existing one that retyping every field
-// by hand is wasted effort. `onCreateBlank` mirrors the old direct
+// Shown before ProcedureEditor ever opens, in front of "New procedure" —
+// some procedures are close enough to an existing one that retyping every
+// field by hand is wasted effort. `onCreateBlank` mirrors the old direct
 // behaviour (skip straight to an empty editor); `children` is the picker
-// for "Create from existing" — a flat list for cost centres, a grouped one
-// for procedures (see CostingView) — rendered only once that option is
-// chosen, not built up front, since it's plain JSX from the caller either
-// way. Deliberately generic over both record types rather than two
-// near-identical modals: the choice itself (blank vs. copy) and the
-// back-and-forth between the two states is exactly the same regardless of
-// what's being created.
+// for "Create from existing" — a grouped list for procedures (see
+// CostingView) — rendered only once that option is chosen, not built up
+// front, since it's plain JSX from the caller either way. Kept generic
+// (title/onClose/onCreateBlank/children) rather than baked to procedures
+// specifically, on the chance another record type wants the same
+// blank-vs-copy choice later.
 function CreateChoiceModal({ title, onClose, onCreateBlank, children }) {
   const [showExisting, setShowExisting] = useState(false);
   return (
@@ -794,32 +837,11 @@ function CreateChoiceModal({ title, onClose, onCreateBlank, children }) {
   );
 }
 
-// CreateChoiceModal's "Create from existing" content for cost centres —
-// a flat list, since there are only ever expected to be a handful of these
-// (unlike procedures below, which get grouped).
-function CostCentreCopyPicker({ costCentres, onPick }) {
-  if (!costCentres?.length) return <p className="text-xs text-slate-600">No cost centres yet to copy from.</p>;
-  return (
-    <div className="space-y-1 max-h-[50vh] overflow-y-auto">
-      {costCentres.map((c) => (
-        <button
-          key={c.id} type="button"
-          className="w-full text-left text-sm text-slate-300 hover:text-amber-300 hover:bg-slate-800/60 px-2.5 py-1.5 rounded flex items-center justify-between gap-2"
-          onClick={() => onPick(c)}
-        >
-          <span className="truncate">{c.name || '(unnamed)'}</span>
-          <span className="text-[11px] text-slate-500 font-mono shrink-0">{fmtMoney(costCentrePerHr(c))} /hr</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
 // CreateChoiceModal's "Create from existing" content for procedures —
 // grouped by process, each a collapsed-by-default Section, mirroring
 // CostingView's own listing further down (same "one really long page"
 // problem, just inside a modal instead of the tab itself).
-function ProcedureCopyPicker({ procedures, costCentres, onPick }) {
+function ProcedureCopyPicker({ procedures, onPick }) {
   const byProcess = {};
   (procedures || []).forEach((p) => {
     const key = p.process || '(no process assigned)';
@@ -839,7 +861,7 @@ function ProcedureCopyPicker({ procedures, costCentres, onPick }) {
                 onClick={() => onPick(p)}
               >
                 <span className="truncate">{p.name || '(unnamed)'}</span>
-                <span className="text-[11px] text-slate-500 font-mono shrink-0">{fmtMoney(procedureCost(p, costCentres))} /hr</span>
+                <span className="text-[11px] text-slate-500 font-mono shrink-0">{fmtMoney(procedureCost(p))} /hr</span>
               </button>
             ))}
           </div>
@@ -848,68 +870,12 @@ function ProcedureCopyPicker({ procedures, costCentres, onPick }) {
     </div>
   );
 }
-
-// `seedFrom` — an existing cost centre to copy data from, offered via
-// CreateChoiceModal — only ever applies when `centre` itself is absent
-// (i.e. genuinely creating new, not editing one that already exists): it
-// prefills `d`, but `isNew` still derives from `centre` alone, so the
-// result reads and behaves as a brand new, unsaved record (title, no
-// Delete button, a fresh id) rather than as an edit of the source.
-function CostCentreEditor({ centre, seedFrom, onClose, onSave, onDelete }) {
-  const isNew = !centre;
-  const [d, setD] = useState(() => {
-    if (centre) return JSON.parse(JSON.stringify(centre));
-    if (seedFrom) return { ...JSON.parse(JSON.stringify(seedFrom)), id: uid('cc'), name: `${seedFrom.name || 'Untitled cost centre'} (copy)` };
-    return { id: uid('cc'), name: '', interestRate: 10, annualHours: 3800, assets: [{ name: '', capital: 0, salvage: 0, life: 0 }] };
-  });
-  const set = (patch) => setD((x) => ({ ...x, ...patch }));
-  const setAsset = (i, k, v, text) => setD((x) => { const a = x.assets.slice(); a[i] = { ...a[i], [k]: text ? v : (Number(v) || 0) }; return { ...x, assets: a }; });
-  const addAsset = () => setD((x) => ({ ...x, assets: [...x.assets, { name: '', capital: 0, salvage: 0, life: 0 }] }));
-  const delAsset = (i) => setD((x) => ({ ...x, assets: x.assets.filter((_, j) => j !== i) }));
-  const grid = 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 20px';
-  return (
-    <Modal title={isNew ? 'New cost centre' : 'Edit cost centre'} onClose={onClose} wide>
-      <Field label="Name"><input className={inputCls} value={d.name} onChange={(e) => set({ name: e.target.value })} /></Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Interest rate (%)"><input type="number" step="any" className={inputCls} value={d.interestRate} onChange={(e) => set({ interestRate: Number(e.target.value) || 0 })} /></Field>
-        <Field label="Annual operating hours"><input type="number" step="any" className={inputCls} value={d.annualHours} onChange={(e) => set({ annualHours: Number(e.target.value) || 0 })} /></Field>
-      </div>
-      <div className="mb-3">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Capital assets</span>
-          <span className="text-[11px] text-amber-300 font-mono">{fmtMoney(costCentrePerHr(d))} /hr dep+interest</span>
-        </div>
-        <div className="grid gap-1 mb-1" style={{ gridTemplateColumns: grid }}>
-          <span className="text-[10px] text-slate-500 uppercase">Asset</span><span className="text-[10px] text-slate-500 uppercase">Capital</span><span className="text-[10px] text-slate-500 uppercase">Salvage</span><span className="text-[10px] text-slate-500 uppercase">Life hr</span><span />
-        </div>
-        {d.assets.map((r, i) => (
-          <div key={i} className="grid gap-1 mb-1 items-center" style={{ gridTemplateColumns: grid }}>
-            <input className={smallInput} value={r.name} placeholder="Asset" onChange={(e) => setAsset(i, 'name', e.target.value, true)} />
-            <input className={smallInput} type="number" step="any" value={r.capital} onChange={(e) => setAsset(i, 'capital', e.target.value)} />
-            <input className={smallInput} type="number" step="any" value={r.salvage} onChange={(e) => setAsset(i, 'salvage', e.target.value)} />
-            <input className={smallInput} type="number" step="any" value={r.life} onChange={(e) => setAsset(i, 'life', e.target.value)} />
-            <button type="button" className="text-slate-500 hover:text-red-400" onClick={() => delAsset(i)}>×</button>
-          </div>
-        ))}
-        <button type="button" className="text-[11px] text-amber-400 hover:underline mt-0.5" onClick={addAsset}>+ Add asset</button>
-      </div>
-      <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800 mt-2">
-        {isNew ? <span /> : <button className={btnDanger} onClick={() => onDelete(d.id)}>Delete</button>}
-        <div className="flex gap-2">
-          <button className={btnGhost} onClick={onClose}>Cancel</button>
-          <button className={btnPrimary} onClick={() => onSave({ ...d, name: (d.name || '').trim() || 'Untitled cost centre' })}>Save</button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-// `seedFrom` — same idea as CostCentreEditor's: an existing procedure to
-// copy from, only ever consulted when `procedure` itself is absent, so
-// `isNew`/title/Delete-visibility all still derive from `procedure` alone
-// and the result is a genuinely new record (fresh id), not an edit of the
-// source.
-function ProcedureEditor({ procedure, seedFrom, processes, costCentres, onClose, onSave, onDelete }) {
+// `seedFrom` — an existing procedure to copy data from, offered via
+// CreateChoiceModal — only ever consulted when `procedure` itself is
+// absent, so `isNew`/title/Delete-visibility all still derive from
+// `procedure` alone and the result is a genuinely new record (fresh id),
+// not an edit of the source.
+function ProcedureEditor({ procedure, seedFrom, processes, onClose, onSave, onDelete }) {
   const isNew = !procedure;
   const [d, setD] = useState(() => {
     // `materialMode`/`wire` post-date this shape — a procedure saved before
@@ -920,7 +886,7 @@ function ProcedureEditor({ procedure, seedFrom, processes, costCentres, onClose,
     // component working off the same "undefined means powder" convention.
     const source = procedure || seedFrom;
     const base = source ? JSON.parse(JSON.stringify(source)) : {
-      id: uid('proc'), name: '', process: processes[0] || '', costCentreId: (costCentres[0] && costCentres[0].id) || '', substrate: '', notes: '',
+      id: uid('proc'), name: '', process: processes[0] || '', substrate: '', notes: '',
       gases: [], electricity: { kw: 0, tariff: 0.28 }, spares: [], maintenance: [], consumables: [], labour: [], qa: [],
     };
     if (!procedure && seedFrom) {
@@ -942,7 +908,7 @@ function ProcedureEditor({ procedure, seedFrom, processes, costCentres, onClose,
   // `x.powder` — see the materialMode comment on procedureParts.
   const setWire = (f, v, text) => setD((x) => ({ ...x, wire: { ...x.wire, [f]: text ? v : (Number(v) || 0) } }));
   const setEl = (f, v) => setD((x) => ({ ...x, electricity: { ...x.electricity, [f]: Number(v) || 0 } }));
-  const parts = procedureParts(d, costCentres);
+  const parts = procedureParts(d);
   // Plain function (not a nested component) so inputs keep focus across renders.
   const sec = (k, legend, grid, cols, tpl, subKey) => (
     <div className="mb-3">
@@ -976,10 +942,16 @@ function ProcedureEditor({ procedure, seedFrom, processes, costCentres, onClose,
         <Field label="Procedure name"><input className={inputCls} value={d.name} onChange={(e) => set({ name: e.target.value })} /></Field>
         <Field label="Substrate (optional)"><input className={inputCls} value={d.substrate} onChange={(e) => set({ substrate: e.target.value })} /></Field>
         <Field label="Process"><select className={inputCls} value={d.process} onChange={(e) => set({ process: e.target.value })}>{processes.map((p) => <option key={p} value={p}>{p}</option>)}</select></Field>
-        <Field label="Cost centre"><select className={inputCls} value={d.costCentreId} onChange={(e) => set({ costCentreId: e.target.value })}><option value="">— none —</option>{costCentres.map((c) => <option key={c.id} value={c.id}>{c.name || '(unnamed)'}</option>)}</select></Field>
       </div>
+      {/* No "equipment" or "cost centre" picker here on purpose — a
+          procedure is independent of which machine runs it (the same
+          procedure can run on several compatible ones), so this total
+          deliberately excludes equipment depreciation. That gets added on
+          top wherever a job actually meets a specific piece of equipment
+          — see "Costing: equipment is the cost centre" in
+          scheduler/CLAUDE.md. */}
       <div className="flex items-center justify-between rounded-md bg-slate-800/60 border border-slate-700 px-3 py-2 my-3">
-        <span className="text-xs text-slate-400 uppercase tracking-wide">Total hourly operating cost</span>
+        <span className="text-xs text-slate-400 uppercase tracking-wide">Process cost (excl. equipment)</span>
         <span className="text-lg font-bold font-mono text-amber-300">{fmtMoney(parts.total)} /hr</span>
       </div>
       {/* Not every process feeds the same way — Thermal Spray HVOF/Plasma
@@ -1387,7 +1359,7 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
 }
 
 function CostingView({
-  procedures, costCentres, costSettings, onSaveCostSettings, processes, readOnly, onImport, onNewProcedure, onEditProcedure, onNewCentre, onEditCentre,
+  procedures, costSettings, onSaveCostSettings, processes, readOnly, onImport, onNewProcedure, onEditProcedure,
   equipment, onAddEquip, onEditEquip, onDeleteEquip,
 }) {
   const efficiency = costSettings?.efficiency ?? 75;
@@ -1403,10 +1375,14 @@ function CostingView({
   const groups = Object.keys(byProcess).sort();
   return (
     <div>
-      {/* Equipment used to have its own "Equipment & Staff" tab. Moved here
-          (#20) — it has no data-model link to cost centres or procedures
-          (equipment carries no $ fields), this is purely giving it a home now
-          that Staff absorbed the other half of that old tab. */}
+      {/* Equipment is also the cost centre now — its own depreciation+
+          interest rate lives right here on the card (equipmentDepreciationPerHr),
+          not on a separate record picked per-procedure. See "Costing:
+          equipment is the cost centre" in scheduler/CLAUDE.md: a procedure
+          can run on more than one compatible machine, so tying its cost to
+          ONE specific machine meant duplicating the whole procedure per
+          machine to represent that. A job picks this up automatically the
+          moment it's actually placed on a piece of equipment. */}
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2"><Wrench size={17} /> Equipment</h2>
         {!readOnly && <button className={btnPrimary} onClick={onAddEquip}><Plus size={15} /> Add</button>}
@@ -1414,8 +1390,13 @@ function CostingView({
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-8">
         {(equipment || []).map((e) => {
           const color = EQUIP_COLOR[e.type] || EQUIP_COLOR['Welding Robot'];
+          const depPerHr = equipmentDepreciationPerHr(e);
           return (
-            <div key={e.id} className={`border border-slate-800 bg-slate-900 rounded-lg p-3 border-l-[3px] ${color.border}`}>
+            <div
+              key={e.id}
+              className={`border border-slate-800 bg-slate-900 rounded-lg p-3 border-l-[3px] ${color.border} ${!readOnly ? 'cursor-pointer hover:border-slate-600' : ''}`}
+              onClick={() => !readOnly && onEditEquip(e)}
+            >
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <h3 className="font-semibold text-slate-100 text-sm">{e.name}</h3>
@@ -1423,15 +1404,20 @@ function CostingView({
                 </div>
                 {!readOnly && (
                   <div className="flex gap-1 shrink-0">
-                    <button onClick={() => onEditEquip(e)} className="p-1 rounded hover:bg-slate-700 text-slate-400"><Pencil size={13} /></button>
-                    <button onClick={() => onDeleteEquip(e)} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
+                    <button onClick={(ev) => { ev.stopPropagation(); onEditEquip(e); }} className="p-1 rounded hover:bg-slate-700 text-slate-400"><Pencil size={13} /></button>
+                    <button onClick={(ev) => { ev.stopPropagation(); onDeleteEquip(e); }} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"><Trash2 size={13} /></button>
                   </div>
                 )}
               </div>
               <div className="flex flex-wrap gap-1 mt-2">
                 {e.processes.map((p) => <span key={p} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{p}</span>)}
               </div>
-              {e.unavailableDates?.length > 0 && <p className="text-[10px] text-slate-600 mt-2">{e.unavailableDates.length} day(s) marked unavailable</p>}
+              {depPerHr > 0 ? (
+                <div className="text-amber-300 font-mono text-sm mt-2">{fmtMoney(depPerHr)} /hr dep+interest</div>
+              ) : (
+                <p className="text-[10px] text-slate-600 mt-2">No capital assets entered yet.</p>
+              )}
+              {e.unavailableDates?.length > 0 && <p className="text-[10px] text-slate-600 mt-1">{e.unavailableDates.length} day(s) marked unavailable</p>}
             </div>
           );
         })}
@@ -1440,12 +1426,11 @@ function CostingView({
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
           <h2 className="text-lg font-bold text-slate-100">Costing</h2>
-          <p className="text-xs text-slate-500 mt-0.5">Hourly operating cost per procedure, built from your cost calculator. A template's procedure sets the $/hr used to cost its jobs.</p>
+          <p className="text-xs text-slate-500 mt-0.5">Hourly process cost per procedure, built from your cost calculator — independent of equipment, since the same procedure can run on more than one compatible machine. A job's full cost adds in whichever equipment it's actually placed on.</p>
         </div>
         {!readOnly && (
           <div className="flex items-center gap-2">
             <button className={btnPrimary} onClick={onNewProcedure}><Plus size={15} /> New procedure</button>
-            <button className={btnGhost} onClick={onNewCentre}><Plus size={14} /> New cost centre</button>
             <input
               ref={fileRef}
               type="file"
@@ -1490,30 +1475,6 @@ function CostingView({
         </div>
       </div>
 
-      <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Cost centres (shared capital)</h3>
-      {(costCentres || []).length === 0 && <p className="text-xs text-slate-600 mb-4">No cost centres yet.</p>}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
-        {(costCentres || []).map((c) => (
-          <div
-            key={c.id}
-            className={`border border-slate-800 bg-slate-900 rounded-lg p-3 ${!readOnly ? 'cursor-pointer hover:border-slate-600' : ''}`}
-            onClick={() => !readOnly && onEditCentre(c)}
-          >
-            <div className="font-semibold text-slate-100 text-sm">{c.name || '(unnamed)'}</div>
-            <div className="text-[11px] text-slate-500 mt-0.5">{c.interestRate}% interest · {(Number(c.annualHours) || 0).toLocaleString()} hr/yr</div>
-            <div className="text-amber-300 font-mono text-sm mt-1">{fmtMoney(costCentrePerHr(c))} /hr dep+interest</div>
-            <div className="mt-2 space-y-0.5">
-              {(c.assets || []).map((r, i) => (
-                <div key={i} className="text-[11px] text-slate-400 flex justify-between gap-2">
-                  <span className="truncate">{r.name || '—'}</span>
-                  <span className="font-mono shrink-0">${(Number(r.capital) || 0).toLocaleString()}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-
       <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Procedures</h3>
       {groups.length === 0 && <p className="text-xs text-slate-600">No procedures yet — import from your cost calculator.</p>}
       {/* Collapsed by default, same reasoning as ProcedureCopyPicker's
@@ -1526,12 +1487,11 @@ function CostingView({
         <Section key={gk} title={`${gk} (${byProcess[gk].length})`} defaultOpen={false}>
           <div className="grid lg:grid-cols-2 gap-3">
             {byProcess[gk].map((p) => {
-              const parts = procedureParts(p, costCentres);
-              const cc = (costCentres || []).find((c) => c.id === p.costCentreId);
+              const parts = procedureParts(p);
               const rows = [
                 [p.materialMode === 'wire' ? 'Wire' : 'Powder', parts.material], ['Process gas', parts.gas], ['Electricity', parts.electricity],
                 ['Spares', parts.spares], ['Maintenance', parts.maintenance], ['Consumables', parts.consumables],
-                ['Depreciation + interest', parts.depreciation], ['Labour', parts.labour], ['QA', parts.qa],
+                ['Labour', parts.labour], ['QA', parts.qa],
               ];
               return (
                 <div
@@ -1542,11 +1502,11 @@ function CostingView({
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="font-semibold text-slate-100 text-sm truncate">{p.name || '(unnamed)'}</div>
-                      <div className="text-[11px] text-slate-500">{cc ? cc.name : 'no cost centre'}{p.substrate ? ` · ${p.substrate}` : ''}</div>
+                      {p.substrate && <div className="text-[11px] text-slate-500">{p.substrate}</div>}
                     </div>
                     <div className="text-right shrink-0">
                       <div className="text-amber-300 font-mono text-lg font-semibold">{fmtMoney(parts.total)}</div>
-                      <div className="text-[10px] text-slate-500">per hour</div>
+                      <div className="text-[10px] text-slate-500">per hour, excl. equipment</div>
                     </div>
                   </div>
                   <div className="mt-2 space-y-0.5">
@@ -1574,7 +1534,6 @@ export default function WeldingScheduler() {
   const [templates, setTemplates] = useState([]);
   const [processes, setProcesses] = useState(DEFAULT_PROCESSES);
   const [jobs, setJobs] = useState([]);
-  const [costCentres, setCostCentres] = useState([]);
   const [procedures, setProcedures] = useState([]);
   // Scheduled hours aren't 100% productive process time — some of every job/
   // task is setup and breakdown, which doesn't burn materials/gas/machine
@@ -1620,17 +1579,13 @@ export default function WeldingScheduler() {
   const [editingEquipment, setEditingEquipment] = useState(null);
   const [editingStaff, setEditingStaff] = useState(null);
   const [editingProcedure, setEditingProcedure] = useState(null); // procedure object or 'new' or null
-  const [editingCentre, setEditingCentre] = useState(null);       // cost-centre object or 'new' or null
-  // "New procedure"/"New cost centre" open one of these first (CreateChoiceModal)
-  // instead of editingProcedure/editingCentre directly — Create new still
-  // lands on the same blank editor as before; Create from existing sets the
-  // matching *Seed state below and THEN opens the same 'new' editor, which
-  // prefills from the seed without treating it as an edit of the source
-  // (see ProcedureEditor/CostCentreEditor's seedFrom prop).
+  // "New procedure" opens this first (CreateChoiceModal) instead of
+  // editingProcedure directly — Create new still lands on the same blank
+  // editor as before; Create from existing sets procedureSeed below and
+  // THEN opens the same 'new' editor, which prefills from the seed without
+  // treating it as an edit of the source (see ProcedureEditor's seedFrom prop).
   const [procedureChoiceOpen, setProcedureChoiceOpen] = useState(false);
-  const [costCentreChoiceOpen, setCostCentreChoiceOpen] = useState(false);
   const [procedureSeed, setProcedureSeed] = useState(null);
-  const [costCentreSeed, setCostCentreSeed] = useState(null);
   const [editingTask, setEditingTask] = useState(null);           // task object or 'new' or null
   const [editingProject, setEditingProject] = useState(null);     // project object or 'new' or null
   // A task backfilled via "Log past work" (BackfillTaskModal) — a task
@@ -1731,13 +1686,12 @@ export default function WeldingScheduler() {
   // ---------- initial load ----------
   useEffect(() => {
     (async () => {
-      const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov, pj, tk, cs] = await Promise.all([
+      const [eq, st, tp, pr, jb, pc, pk, ct, tl, ov, pj, tk, cs] = await Promise.all([
         loadKey('wf_equipment', null),
         loadKey('wf_staff', null),
         loadKey('wf_templates', null),
         loadKey('wf_processes', null),
         loadKey('wf_jobs', null),
-        loadKey('wf_costcentres', null),
         loadKey('wf_procedures', null),
         loadKey(PARKED_KEY, null),
         loadKey('wf_categories', null),
@@ -1755,7 +1709,6 @@ export default function WeldingScheduler() {
       const finalTp = tp || seedTemplates();
       const finalPr = pr || DEFAULT_PROCESSES;
       const finalJb = jb || seedJobs();
-      const finalCc = cc || seedCostCentres();
       const finalPc = pc || seedProcedures();
       const finalPj = pj || [];
       const finalTk = tk || [];
@@ -1765,7 +1718,6 @@ export default function WeldingScheduler() {
       setStaff(finalSt);
       setTemplates(finalTp);
       setProcesses(finalPr);
-      setCostCentres(finalCc);
       setProcedures(finalPc);
       setProjects(finalPj);
       setCostSettings(finalCs);
@@ -1786,7 +1738,6 @@ export default function WeldingScheduler() {
       if (!pr) saveKey('wf_processes', finalPr);
       saveKey('wf_jobs', scheduled);
       saveKey(TASKS_KEY, scheduledTasks);
-      if (!cc) saveKey('wf_costcentres', finalCc);
       if (!pc) saveKey('wf_procedures', finalPc);
       if (!ct) saveKey('wf_categories', finalCt);
       if (!pj) saveKey(PROJECTS_KEY, finalPj);
@@ -1806,13 +1757,12 @@ export default function WeldingScheduler() {
   // write anything back: a save would bump the server's version and every
   // other screen would see *that* as a change, and so on around the loop.
   const reloadFromStore = useCallback(async () => {
-    const [eq, st, tp, pr, jb, cc, pc, pk, ct, tl, ov, pj, tk, cs] = await Promise.all([
+    const [eq, st, tp, pr, jb, pc, pk, ct, tl, ov, pj, tk, cs] = await Promise.all([
       loadKey('wf_equipment', null),
       loadKey('wf_staff', null),
       loadKey('wf_templates', null),
       loadKey('wf_processes', null),
       loadKey('wf_jobs', null),
-      loadKey('wf_costcentres', null),
       loadKey('wf_procedures', null),
       loadKey(PARKED_KEY, null),
       loadKey('wf_categories', null),
@@ -1833,7 +1783,6 @@ export default function WeldingScheduler() {
     if (st) setStaff(nextSt);
     if (tp) setTemplates(tp);
     if (pr) setProcesses(pr);
-    if (cc) setCostCentres(cc);
     if (pc) setProcedures(pc);
     // Either side recomputing has to carry the other along, same reason as
     // `recompute` above — they share one capacity pool. Only actually
@@ -1858,7 +1807,7 @@ export default function WeldingScheduler() {
   // would jump under the cursor. It applies as soon as they're done.
   const busyEditing = !!(
     editingJob || importOpen || editingTemplate || editingEquipment || editingStaff
-    || editingProcedure || editingCentre || procedureChoiceOpen || costCentreChoiceOpen
+    || editingProcedure || procedureChoiceOpen
     || pendingComplete || confirmDelete || dragJobId
     || timeLogDate || parallelConflict || manualAssignConflict || equipmentLockConflict
     || confirmClearPatterns || reworkOf || editingTask || editingProject || pendingTaskComplete || dragTaskId
@@ -2788,19 +2737,10 @@ export default function WeldingScheduler() {
     showToast(`Renamed "${oldName}" to "${trimmed}" everywhere it's used.`);
   }
 
-  // ---------- costing: cost centres + procedures ----------
-  function saveCostCentres(list) { setCostCentres(list); saveKey('wf_costcentres', list); }
+  // ---------- costing: procedures (equipment IS the cost centre — see
+  // "Costing: equipment is the cost centre" in scheduler/CLAUDE.md) ----------
   function saveProceduresList(list) { setProcedures(list); saveKey('wf_procedures', list); }
   function saveCostSettings(next) { setCostSettings(next); saveKey(COST_SETTINGS_KEY, next); }
-  function saveCentre(cc) {
-    const map = Object.fromEntries(costCentres.map((x) => [x.id, x]));
-    map[cc.id] = cc;
-    saveCostCentres(Object.values(map));
-    setEditingCentre(null);
-    setCostCentreSeed(null);
-    showToast(`Saved cost centre ${cc.name}.`);
-  }
-  function deleteCentre(id) { saveCostCentres(costCentres.filter((x) => x.id !== id)); setEditingCentre(null); setCostCentreSeed(null); }
   function saveProcedure(p) {
     const map = Object.fromEntries(procedures.map((x) => [x.id, x]));
     map[p.id] = p;
@@ -2813,13 +2753,10 @@ export default function WeldingScheduler() {
   function importCosting(data) {
     const parsed = parseCostingImport(data, processes);
     if (!parsed) { showToast("That file doesn't look like a cost-calculator export."); return; }
-    const ccMap = Object.fromEntries(costCentres.map((x) => [x.id, x]));
-    parsed.costCentres.forEach((c) => { ccMap[c.id] = c; });
     const pMap = Object.fromEntries(procedures.map((x) => [x.id, x]));
     parsed.procedures.forEach((p) => { pMap[p.id] = p; });
-    saveCostCentres(Object.values(ccMap));
     saveProceduresList(Object.values(pMap));
-    showToast(`Imported ${parsed.procedures.length} procedure(s) and ${parsed.costCentres.length} cost centre(s).`);
+    showToast(`Imported ${parsed.procedures.length} procedure(s).`);
   }
 
   const staffById = useMemo(() => Object.fromEntries(staff.map((s) => [s.id, s])), [staff]);
@@ -3050,7 +2987,6 @@ export default function WeldingScheduler() {
         {tab === 'costing' && !displayMode && (
           <CostingView
             procedures={procedures}
-            costCentres={costCentres}
             costSettings={costSettings}
             onSaveCostSettings={saveCostSettings}
             processes={processes}
@@ -3058,8 +2994,6 @@ export default function WeldingScheduler() {
             onImport={importCosting}
             onNewProcedure={() => setProcedureChoiceOpen(true)}
             onEditProcedure={(p) => { setProcedureSeed(null); setEditingProcedure(p); }}
-            onNewCentre={() => setCostCentreChoiceOpen(true)}
-            onEditCentre={(c) => { setCostCentreSeed(null); setEditingCentre(c); }}
             equipment={equipment}
             onAddEquip={() => setEditingEquipment('new')}
             onEditEquip={(e) => setEditingEquipment(e)}
@@ -3068,13 +3002,13 @@ export default function WeldingScheduler() {
         )}
 
         {tab === 'reports' && !displayMode && (
-          <ReportsView jobs={jobs} equipment={equipment} staff={staff} procedures={procedures} costCentres={costCentres} costSettings={costSettings} />
+          <ReportsView jobs={jobs} equipment={equipment} staff={staff} procedures={procedures} costSettings={costSettings} />
         )}
         {tab === 'quality' && !displayMode && (
           <QualityView
             jobs={jobs}
             procedures={procedures}
-            costCentres={costCentres}
+            equipment={equipment}
             costSettings={costSettings}
             timeLog={timeLog}
             onEditJob={(j) => !readOnly && setEditingJob(j)}
@@ -3086,7 +3020,7 @@ export default function WeldingScheduler() {
             tasks={tasks}
             timeLog={timeLog}
             procedures={procedures}
-            costCentres={costCentres}
+            equipment={equipment}
             costSettings={costSettings}
             staff={staff}
             readOnly={readOnly}
@@ -3127,7 +3061,6 @@ export default function WeldingScheduler() {
           staff={staff}
           equipment={equipment}
           procedures={procedures}
-          costCentres={costCentres}
           costSettings={costSettings}
           jobs={jobs}
           timeLog={timeLog}
@@ -3244,7 +3177,6 @@ export default function WeldingScheduler() {
           equipment={equipment}
           processes={processes}
           procedures={procedures}
-          costCentres={costCentres}
           allTags={allTags}
           categorySuggestions={categories}
           onClose={() => setEditingTemplate(null)}
@@ -3279,21 +3211,7 @@ export default function WeldingScheduler() {
         >
           <ProcedureCopyPicker
             procedures={procedures}
-            costCentres={costCentres}
             onPick={(p) => { setProcedureChoiceOpen(false); setProcedureSeed(p); setEditingProcedure('new'); }}
-          />
-        </CreateChoiceModal>
-      )}
-
-      {costCentreChoiceOpen && (
-        <CreateChoiceModal
-          title="New cost centre"
-          onClose={() => setCostCentreChoiceOpen(false)}
-          onCreateBlank={() => { setCostCentreChoiceOpen(false); setCostCentreSeed(null); setEditingCentre('new'); }}
-        >
-          <CostCentreCopyPicker
-            costCentres={costCentres}
-            onPick={(c) => { setCostCentreChoiceOpen(false); setCostCentreSeed(c); setEditingCentre('new'); }}
           />
         </CreateChoiceModal>
       )}
@@ -3303,20 +3221,9 @@ export default function WeldingScheduler() {
           procedure={editingProcedure === 'new' ? null : editingProcedure}
           seedFrom={editingProcedure === 'new' ? procedureSeed : null}
           processes={processes}
-          costCentres={costCentres}
           onClose={() => { setEditingProcedure(null); setProcedureSeed(null); }}
           onSave={saveProcedure}
           onDelete={deleteProcedure}
-        />
-      )}
-
-      {editingCentre && (
-        <CostCentreEditor
-          centre={editingCentre === 'new' ? null : editingCentre}
-          seedFrom={editingCentre === 'new' ? costCentreSeed : null}
-          onClose={() => { setEditingCentre(null); setCostCentreSeed(null); }}
-          onSave={saveCentre}
-          onDelete={deleteCentre}
         />
       )}
 
@@ -4500,13 +4407,13 @@ function BacklogView({ jobs, equipment, staff, timeLog = [], readOnly, onAdd, on
    logged and cost are computed with the exact same helpers as any other
    job (loggedHours, jobCost) — nothing rework-specific to keep in sync.
    ============================================================ */
-function QualityView({ jobs, procedures = [], costCentres = [], costSettings, timeLog = [], onEditJob }) {
+function QualityView({ jobs, procedures = [], equipment = [], costSettings, timeLog = [], onEditJob }) {
   const reworks = useMemo(
     () => jobs.filter((j) => j.isRework).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')),
     [jobs]
   );
   const totalHoursLogged = reworks.reduce((s, j) => s + loggedHours(timeLog, j.id), 0);
-  const totalCost = reworks.reduce((s, j) => s + (jobCost(j, procedures, costCentres, costSettings) || 0), 0);
+  const totalCost = reworks.reduce((s, j) => s + (jobCost(j, procedures, equipment, costSettings) || 0), 0);
   const [reportOpen, setReportOpen] = useState(false);
 
   // Read-only and self-contained (nothing here is saved), so — unlike
@@ -4519,8 +4426,8 @@ function QualityView({ jobs, procedures = [], costCentres = [], costSettings, ti
     name: e.item.name,
     reason: e.item.notes || '—',
     hours: e.hours,
-    cost: hourlyRate(e.item, procedures, costCentres, costSettings) * e.hours,
-  })), [reworks, timeLog, jobs, procedures, costCentres, costSettings]);
+    cost: hourlyRate(e.item, procedures, equipment, costSettings) * e.hours,
+  })), [reworks, timeLog, jobs, procedures, equipment, costSettings]);
   const qualityColumns = [
     { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
     { key: 'job', label: 'Job', value: (r) => r.job },
@@ -4580,7 +4487,7 @@ function QualityView({ jobs, procedures = [], costCentres = [], costSettings, ti
             {reworks.map((j) => {
               const original = jobs.find((o) => o.id === j.reworkOfJobId);
               const hours = loggedHours(timeLog, j.id);
-              const cost = jobCost(j, procedures, costCentres, costSettings);
+              const cost = jobCost(j, procedures, equipment, costSettings);
               const status = j.status === 'complete' ? 'Complete' : j.assignment ? 'Scheduled' : 'Unscheduled';
               return (
                 <tr key={j.id} className="border-b border-slate-800/60 hover:bg-slate-800/40">
@@ -4941,14 +4848,14 @@ function BackfillTaskModal({ task, processes, staff, procedures = [], projects =
 // same loggedHours() any job uses, cost from the same jobCost() (task field
 // names deliberately match: procedureId/status/actualHours/hoursTotal), so
 // nothing project-specific had to be built for either number.
-function projectRollup(project, tasks, timeLog, procedures, costCentres, costSettings) {
+function projectRollup(project, tasks, timeLog, procedures, equipment, costSettings) {
   const own = tasks.filter((t) => t.projectId === project.id);
   const hours = own.reduce((s, t) => s + loggedHours(timeLog, t.id), 0);
-  const cost = own.reduce((s, t) => s + (jobCost(t, procedures, costCentres, costSettings) || 0), 0);
+  const cost = own.reduce((s, t) => s + (jobCost(t, procedures, equipment, costSettings) || 0), 0);
   return { taskCount: own.length, hours: Math.round(hours * 100) / 100, cost };
 }
 
-function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, costSettings, staff, readOnly, onAddProject, onEditProject, onAddTask, onEditTask, onAddBackfillTask }) {
+function ProjectsView({ projects, tasks, timeLog, procedures, equipment, costSettings, staff, readOnly, onAddProject, onEditProject, onAddTask, onEditTask, onAddBackfillTask }) {
   const [projectFilter, setProjectFilter] = useState('all');
   const [reportOpen, setReportOpen] = useState(false);
   const sortedProjects = [...projects].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
@@ -4966,9 +4873,9 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, costS
       project: project ? project.name : '—',
       task: e.item.name,
       hours: e.hours,
-      cost: hourlyRate(e.item, procedures, costCentres, costSettings) * e.hours,
+      cost: hourlyRate(e.item, procedures, equipment, costSettings) * e.hours,
     };
-  }), [tasks, timeLog, projects, staff, procedures, costCentres, costSettings]);
+  }), [tasks, timeLog, projects, staff, procedures, equipment, costSettings]);
   const rdColumns = [
     { key: 'date', label: 'Date', value: (r) => fmtDate(r.date) },
     { key: 'person', label: 'Person', value: (r) => r.person },
@@ -4995,7 +4902,7 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, costS
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {sortedProjects.map((p) => {
-              const roll = projectRollup(p, tasks, timeLog, procedures, costCentres, costSettings);
+              const roll = projectRollup(p, tasks, timeLog, procedures, equipment, costSettings);
               return (
                 <button
                   key={p.id} type="button"
@@ -5069,7 +4976,7 @@ function ProjectsView({ projects, tasks, timeLog, procedures, costCentres, costS
                 const project = projects.find((p) => p.id === t.projectId);
                 const person = staff.find((s) => s.id === t.staffId);
                 const hours = loggedHours(timeLog, t.id);
-                const cost = jobCost(t, procedures, costCentres, costSettings);
+                const cost = jobCost(t, procedures, equipment, costSettings);
                 const status = t.status === 'complete' ? 'Complete' : t.assignment?.conflict ? 'Over capacity' : 'Scheduled';
                 return (
                   <tr key={t.id} className="border-b border-slate-800/60 hover:bg-slate-800/40 cursor-pointer" onClick={() => onEditTask(t)}>
@@ -5530,7 +5437,7 @@ function StaffView({ staff, readOnly, onAddStaff, onEditStaff, onDeleteStaff, on
    JOB MODAL
    ============================================================ */
 
-function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costCentres = [], costSettings, jobs = [], timeLog = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart, onMarkForRework, onOpenRelatedJob }) {
+function JobModal({ job, templates, processes, staff, equipment = [], procedures = [], costSettings, jobs = [], timeLog = [], onClose, onSave, onDelete, onToggleComplete, onUnpin, onSplit, onMerge, onUnpinPart, onMarkForRework, onOpenRelatedJob }) {
   const isNew = !job;
   // Each part carries its own manual staff assignment and equipment lock,
   // independent of the other part's and of the (now unused, for a split job)
@@ -6203,7 +6110,7 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
             <Field label="Procedure — for cost (optional)">
               <select className={inputCls} value={procedureId} onChange={(e) => setProcedureId(e.target.value)} disabled={!process}>
                 <option value="">None</option>
-                {procedures.filter((p) => p.process === process).map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p, costCentres))}/hr</option>)}
+                {procedures.filter((p) => p.process === process).map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p))}/hr</option>)}
               </select>
               {!process && <p className="text-xs text-slate-500 mt-1">Pick a process first — a procedure is specific to one.</p>}
             </Field>
@@ -6230,8 +6137,14 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
               if (!proc) return null;
               // Blended, not the procedure's raw $/hr — matches jobCost()
               // elsewhere, since scheduled hours aren't all productive
-              // process time. See effectiveHourlyRate.
-              const rate = effectiveHourlyRate(proc, costCentres, costSettings);
+              // process time. See effectiveHourlyRate. Equipment comes from
+              // manualEquipId (the modal's own Equipment field — whatever's
+              // pinned/about to be pinned here), the same "actually placed
+              // on" resolution jobCost()/resolveJobEquipment use elsewhere,
+              // just read live from the field instead of a saved job record
+              // so the preview updates as the user picks equipment.
+              const eq = equipment.find((e) => e.id === manualEquipId) || null;
+              const rate = effectiveHourlyRate(proc, eq, costSettings);
               const estHrs = Math.round((Number(quantity) || 0) * (Number(hoursPerUnit) || 0) * 100) / 100;
               // Once the job is complete, cost is (and always was, via
               // jobCost()/jobHoursForCost() elsewhere) calculated from the
@@ -6625,10 +6538,10 @@ function loggedHours(timeLog, jobId) {
 // since the blend is linear (see effectiveHourlyRate's comment). Returns
 // 0, not null, so a report row's cost column is always summable — no
 // procedure just means no cost, not missing data.
-function hourlyRate(item, procedures, costCentres, costSettings) {
+function hourlyRate(item, procedures, equipmentList, costSettings) {
   if (!item || !item.procedureId) return 0;
   const p = (procedures || []).find((x) => x.id === item.procedureId);
-  return p ? effectiveHourlyRate(p, costCentres, costSettings) : 0;
+  return p ? effectiveHourlyRate(p, resolveJobEquipment(item, equipmentList), costSettings) : 0;
 }
 
 // One row per unit of logged work, for a report over [dateFrom, dateTo].
@@ -7736,7 +7649,7 @@ function TagEditor({ value, onChange, suggestions }) {
   );
 }
 
-function TemplateModal({ template, equipment, processes, procedures = [], costCentres = [], allTags = [], categorySuggestions = [], onClose, onSave }) {
+function TemplateModal({ template, equipment, processes, procedures = [], allTags = [], categorySuggestions = [], onClose, onSave }) {
   const isNew = !template;
   const [name, setName] = useState(template?.name || '');
   const [category, setCategory] = useState(template?.category || '');
@@ -7786,7 +7699,7 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
       <Field label="Procedure (sets hourly cost)">
         <select className={inputCls} value={procedureId} onChange={(e) => setProcedureId(e.target.value)}>
           <option value="">— none —</option>
-          {procsForProcess.map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p, costCentres))}/hr</option>)}
+          {procsForProcess.map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p))}/hr</option>)}
         </select>
       </Field>
       <Field label="Capability requirements (optional)">
@@ -7859,6 +7772,15 @@ function TemplateModal({ template, equipment, processes, procedures = [], costCe
    EQUIPMENT MODAL
    ============================================================ */
 
+// Interest rate / annual hours / capital assets used to live on a separate
+// "cost centre" record with no link back to any specific piece of
+// equipment — this is that same section, moved here, because equipment IS
+// the cost centre now: one machine, one depreciation profile, no more
+// picking a cost centre "for" a procedure that might run on several
+// machines. See "Costing: equipment is the cost centre" in
+// scheduler/CLAUDE.md. Opens `wide` (1024px), same reason CostCentreEditor
+// used to — the capital-assets table is 4 real columns plus a delete
+// button, cramped in the plain default width.
 function EquipmentModal({ item, processes, allTags = [], onClose, onSave }) {
   const isNew = !item;
   const [name, setName] = useState(item?.name || '');
@@ -7866,15 +7788,25 @@ function EquipmentModal({ item, processes, allTags = [], onClose, onSave }) {
   const [procs, setProcs] = useState(item?.processes || []);
   const [tags, setTags] = useState(item?.tags || []);
   const [bcResourceNo, setBcResourceNo] = useState(item?.bcResourceNo || '');
+  const [interestRate, setInterestRate] = useState(item?.interestRate ?? 10);
+  const [annualHours, setAnnualHours] = useState(item?.annualHours ?? 3800);
+  const [assets, setAssets] = useState(item?.assets || []);
+  const setAsset = (i, k, v, text) => setAssets((a) => { const next = a.slice(); next[i] = { ...next[i], [k]: text ? v : (Number(v) || 0) }; return next; });
+  const addAsset = () => setAssets((a) => [...a, { name: '', capital: 0, salvage: 0, life: 0 }]);
+  const delAsset = (i) => setAssets((a) => a.filter((_, j) => j !== i));
+  const assetGrid = 'minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 20px';
+  const depPerHr = equipmentDepreciationPerHr({ interestRate, annualHours, assets });
 
   return (
-    <Modal title={isNew ? 'Add equipment' : 'Edit equipment'} onClose={onClose}>
-      <Field label="Name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
-      <Field label="Type">
-        <select className={inputCls} value={type} onChange={(e) => setType(e.target.value)}>
-          {EQUIP_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
-      </Field>
+    <Modal title={isNew ? 'Add equipment' : 'Edit equipment'} onClose={onClose} wide>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field label="Type">
+          <select className={inputCls} value={type} onChange={(e) => setType(e.target.value)}>
+            {EQUIP_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </Field>
+      </div>
       <Field label="Processes it can run">
         <MultiCheck options={processes} value={procs} onChange={setProcs} showOrphans />
       </Field>
@@ -7885,11 +7817,42 @@ function EquipmentModal({ item, processes, allTags = [], onClose, onSave }) {
       <Field label="Business Central Resource No. (optional)">
         <input className={inputCls} value={bcResourceNo} onChange={(e) => setBcResourceNo(e.target.value)} placeholder="e.g. EQ-ROBOT-01" />
       </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Interest rate (%)"><input type="number" step="any" className={inputCls} value={interestRate} onChange={(e) => setInterestRate(Number(e.target.value) || 0)} /></Field>
+        <Field label="Annual operating hours"><input type="number" step="any" className={inputCls} value={annualHours} onChange={(e) => setAnnualHours(Number(e.target.value) || 0)} /></Field>
+      </div>
+      <div className="mb-3">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Capital assets</span>
+          <span className="text-[11px] text-amber-300 font-mono">{fmtMoney(depPerHr)} /hr dep+interest</span>
+        </div>
+        {/* This is the number a job's cost picks up automatically once it's
+            actually placed on this equipment — added on top of whichever
+            procedure it's running, not baked into the procedure itself.
+            See jobCost/effectiveHourlyRate. */}
+        <div className="grid gap-1 mb-1" style={{ gridTemplateColumns: assetGrid }}>
+          <span className="text-[10px] text-slate-500 uppercase">Asset</span><span className="text-[10px] text-slate-500 uppercase">Capital</span><span className="text-[10px] text-slate-500 uppercase">Salvage</span><span className="text-[10px] text-slate-500 uppercase">Life hr</span><span />
+        </div>
+        {assets.map((r, i) => (
+          <div key={i} className="grid gap-1 mb-1 items-center" style={{ gridTemplateColumns: assetGrid }}>
+            <input className={smallInput} value={r.name} placeholder="Asset" onChange={(e) => setAsset(i, 'name', e.target.value, true)} />
+            <input className={smallInput} type="number" step="any" value={r.capital} onChange={(e) => setAsset(i, 'capital', e.target.value)} />
+            <input className={smallInput} type="number" step="any" value={r.salvage} onChange={(e) => setAsset(i, 'salvage', e.target.value)} />
+            <input className={smallInput} type="number" step="any" value={r.life} onChange={(e) => setAsset(i, 'life', e.target.value)} />
+            <button type="button" className="text-slate-500 hover:text-red-400" onClick={() => delAsset(i)}>×</button>
+          </div>
+        ))}
+        <button type="button" className="text-[11px] text-amber-400 hover:underline mt-0.5" onClick={addAsset}>+ Add asset</button>
+      </div>
       <div className="flex justify-end gap-2 pt-2 border-t border-slate-800 mt-3">
         <button className={btnGhost} onClick={onClose}>Cancel</button>
         <button
           className={btnPrimary}
-          onClick={() => onSave({ id: item?.id || uid('eq'), name: name.trim() || 'Untitled', type, tags, processes: procs, unavailableDates: item?.unavailableDates || [], bcResourceNo: bcResourceNo.trim() })}
+          onClick={() => onSave({
+            id: item?.id || uid('eq'), name: name.trim() || 'Untitled', type, tags, processes: procs,
+            unavailableDates: item?.unavailableDates || [], bcResourceNo: bcResourceNo.trim(),
+            interestRate: Number(interestRate) || 0, annualHours: Number(annualHours) || 0, assets,
+          })}
         ><Check size={14} /> Save</button>
       </div>
     </Modal>
@@ -8155,7 +8118,7 @@ function PatternsView({ overrides, equipment, templates, procedures, onOpenTempl
   );
 }
 
-function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = [], costSettings }) {
+function ReportsView({ jobs, equipment, staff, procedures = [], costSettings }) {
   const today = new Date();
   const [basis, setBasis] = useState('completed'); // completed | scheduled | due
   const [rangeStart, setRangeStart] = useState(isoDate(startOfMonth(today)));
@@ -8201,10 +8164,10 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
   const totalCompanyValue = included.reduce((s, j) => s + Number(j.totalValue || 0), 0);
   const totalDeptValue = included.reduce((s, j) => s + Number(j.departmentValue || 0), 0);
   const sharePct = totalCompanyValue > 0 ? Math.round((totalDeptValue / totalCompanyValue) * 1000) / 10 : 0;
-  const totalCost = included.reduce((s, j) => s + (jobCost(j, procedures, costCentres, costSettings) || 0), 0);
+  const totalCost = included.reduce((s, j) => s + (jobCost(j, procedures, equipment, costSettings) || 0), 0);
   const deptMargin = totalDeptValue - totalCost;
   const marginPct = totalDeptValue > 0 ? Math.round((deptMargin / totalDeptValue) * 1000) / 10 : 0;
-  const costedCount = included.filter((j) => jobCost(j, procedures, costCentres, costSettings) != null).length;
+  const costedCount = included.filter((j) => jobCost(j, procedures, equipment, costSettings) != null).length;
 
   const byProcess = useMemo(() => {
     const map = {};
@@ -8341,7 +8304,7 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
                 {included.map((j) => {
                   const hrs = jobHoursForCost(j);
                   const isActualHrs = j.status === 'complete' && Number(j.actualHours) > 0;
-                  const cost = jobCost(j, procedures, costCentres, costSettings);
+                  const cost = jobCost(j, procedures, equipment, costSettings);
                   const ecd = basis === 'completed' ? effectiveCompletionDate(j) : null;
                   return (
                     <tr key={j.id} className="border-b border-slate-800/60">

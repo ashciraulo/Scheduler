@@ -125,12 +125,13 @@ Top-to-bottom, the single component file contains:
 8. **Views** — ScheduleView (the gantt/drag-drop grid), BacklogView, StaffView
    (staff identity, capabilities and weekly roster/leave — merged from the
    former separate "Roster" and "Equipment & Staff" tabs, #20), TemplatesView,
-   CostingView (also carries an Equipment section, since equipment ended up
-   without a tab of its own once StaffView absorbed the rest of the old
-   "Equipment & Staff" tab — it has no data-model link to cost centres or
-   procedures, so the placement is purely a home for it, not a data
-   relationship), ReportsView, PatternsView (what the user's own corrections
-   imply — review only, applies nothing; see "The Patterns tab" below).
+   CostingView (also carries an Equipment section — placed here originally
+   because equipment ended up without a tab of its own once StaffView
+   absorbed the rest of the old "Equipment & Staff" tab, and now doubly at
+   home here since equipment IS the cost centre, see "Costing: equipment is
+   the cost centre" below), ReportsView, PatternsView (what the user's own
+   corrections imply — review only, applies nothing; see "The Patterns tab"
+   below).
 9. **Modals** — JobModal, ImportJobsModal, TemplateModal, EquipmentModal, StaffModal.
 
 ## Importing jobs from a Business Central WIP export
@@ -1601,36 +1602,99 @@ visibly) rendered as a washed-out mid-grey box with its own text unreadable
 against it. Fixed by switching `Section` to `bg-slate-800/50` to match every
 other panel, rather than adding yet another one-off hex mapping.
 
-### Costing: cost centres and procedures (#61)
+### Costing: equipment is the cost centre
 
-`CostCentreEditor` (a machine's depreciation+interest rate) and
-`ProcedureEditor` (a weld/coat procedure's full hourly operating cost —
-powder, gas, electricity, spares, maintenance, consumables, labour, QA) are
-both dense, grid-of-inputs forms. Two things worth knowing if either grows:
+Procedures and equipment used to be entangled: a procedure picked exactly
+one "cost centre" (a separate record holding a machine's depreciation +
+interest rate), so the same procedure running on two different pieces of
+compatible equipment — or one machine's depreciation applying to several
+procedures — had no honest way to be represented. The only way around it
+was duplicating the whole procedure per machine, or pretending every
+machine that could run a process cost the same to own. Reported directly:
+*"make procedures independent of equipment/cost centres... consolidate the
+equipment templates and the cost centres as these are essentially the same
+thing."*
 
-- **Every column needs its own persistent header — a placeholder isn't
-  enough.** `ProcedureEditor`'s row sections used to label a field with only
-  its input `placeholder`, on the theory that "$/kg", "g/min" etc. would
-  read fine sitting in the empty box. That breaks in two ways: a placeholder
-  vanishes the instant the field has *any* value, including the department's
-  own typed-in figure, and every numeric column here defaults to a real `0`
-  (not an empty string), so those placeholders never rendered even once —
-  the user saw a bare `0` with nothing saying what it was. `sec()` — the
-  shared row-renderer behind gases/spares/maintenance/consumables/labour/qa
-  — now renders a small uppercase header row (`c.label`, one per column)
-  above the grid, always, matching the pattern `CostCentreEditor`'s capital
-  assets table already used. The hand-rolled Powder and Electricity blocks
-  (not built through `sec()`, since they're single fixed-shape rows rather
-  than an add/remove list) got the same header row added directly. Any new
-  section needs both a `placeholder` (a light hint of the expected format,
-  e.g. `"m³"`) **and** a `label` (what the column actually is) — they're
-  allowed to read the same, but don't rely on one to stand in for the other.
-- **`CostCentreEditor` opens `wide` (1024px), not the plain default
-  (448px).** Its capital-assets table is 4 real columns plus a delete
-  button; the old default squeezed all of that (and the interest
-  rate/annual hours row above it) into a modal barely wider than one long
-  asset name. Matches `ProcedureEditor`, which already opened `wide` for
-  the same reason.
+**Cost centres no longer exist as their own record.** `interestRate`,
+`annualHours` and `assets` (the capital-assets list) moved straight onto
+the equipment record — one machine, one depreciation profile, entered once
+where the machine itself already lives. `equipmentDepreciationPerHr(equipment)`
+(renamed from `costCentrePerHr`) is the exact same straight-line
+depreciation + average-capital-interest formula, just reading these fields
+off an equipment record instead of a separate one. `CostCentreEditor` and
+`CostCentreCopyPicker` are deleted; the capital-assets grid editor they
+used to own moved into `EquipmentModal`, which now opens `wide` (1024px)
+for the same reason `CostCentreEditor` used to — 4 real columns plus a
+delete button doesn't fit the plain default (448px).
+
+**A procedure's own `$/hr` (`procedureParts`/`procedureCost`) is now
+deliberately equipment-free** — material/gas, electricity, spares,
+maintenance, consumables, labour, QA, nothing else. No `costCentreId`
+field, no "Cost centre" select in `ProcedureEditor`. `CostingView` labels
+this figure "per hour, excl. equipment" everywhere it's shown, so it's
+never mistaken for the job's full rate.
+
+**A job's full rate adds the ACTUALLY ASSIGNED equipment's depreciation on
+top, automatically — never a manually picked cost centre.**
+`resolveJobEquipment(item, equipmentList)` reads `item.assignment.equipmentId`
+— the CONFIRMED placement, never `preferredEquipmentId`/`lockedEquipmentId`
+(those are constraints on where a job *might* land, not where it *is*) —
+and returns `null` for an unplaced job. `effectiveHourlyRate(procedure,
+equipment, costSettings)` folds `equipmentDepreciationPerHr(equipment)`
+into the procedure's own cost to get the "full" rate *before* the
+efficiency blend — the exact same treatment materials/gas always got, kept
+deliberately unchanged rather than redesigning the blend as a side effect
+of this reorg (see "Costing: efficiency and average labour cost" below for
+what the blend itself does). `jobCost`/`hourlyRate` now take an
+`equipment` list (not `costCentres`) and resolve it internally via
+`resolveJobEquipment` — every call site across `QualityView`, `ProjectsView`/
+`projectRollup`, `ReportsView` and `JobModal`'s own cost preview was
+updated to pass equipment instead. A split job's own top-level `assignment`
+is always `null` (each part has its own), so `jobCost()` on the split
+record as a whole gets no equipment/depreciation contribution — a known,
+accepted limitation, not an oversight, matching how this app already scopes
+split jobs out of other equipment-specific behaviour elsewhere.
+
+`JobModal`'s cost preview resolves equipment from `manualEquipId` (the
+modal's own Equipment field, defaulting to `job.assignment.equipmentId`)
+rather than reading the saved job — the same "actually placed on"
+resolution, just read live from the field so the preview updates as the
+user picks equipment, before Save.
+
+**`parseCostingImport`** (the external cost-calculator JSON format) no
+longer parses or returns the cost-centre-shaped half of that format at
+all — there was never a reliable way to auto-match an old cost-centre
+entry to one specific equipment record (that mismatch is exactly the
+problem this reorg fixes), so importing only ever touches procedures now.
+
+**Migrating existing data:** `wf_costcentres` in storage is left
+untouched, not deleted — just no longer read or written by any code — so
+nothing is silently lost. There's no reliable automatic way to map an old
+cost centre onto one specific machine (that link never existed honestly in
+the old model either), so a shop with real cost-centre data needs to
+manually re-enter each machine's interest rate, annual hours and capital
+assets on its own Equipment record, using the old cost-centre figures as
+reference.
+
+`ProcedureEditor`'s dense grid-of-inputs form has one more thing worth
+knowing if it grows further: **every column needs its own persistent
+header — a placeholder isn't enough.** Its row sections used to label a
+field with only its input `placeholder`, on the theory that "$/kg", "g/min"
+etc. would read fine sitting in the empty box. That breaks in two ways: a
+placeholder vanishes the instant the field has *any* value, including the
+department's own typed-in figure, and every numeric column here defaults
+to a real `0` (not an empty string), so those placeholders never rendered
+even once — the user saw a bare `0` with nothing saying what it was.
+`sec()` — the shared row-renderer behind gases/spares/maintenance/
+consumables/labour/qa — renders a small uppercase header row (`c.label`,
+one per column) above the grid, always, the same pattern the capital-assets
+table in `EquipmentModal` uses. The hand-rolled Powder and Electricity
+blocks (not built through `sec()`, since they're single fixed-shape rows
+rather than an add/remove list) got the same header row added directly.
+Any new section needs both a `placeholder` (a light hint of the expected
+format, e.g. `"m³"`) **and** a `label` (what the column actually is) —
+they're allowed to read the same, but don't rely on one to stand in for
+the other.
 
 ### Costing: wire feedstock alongside powder
 
@@ -1688,52 +1752,52 @@ as `normalizeStaff` defaulting absent fields elsewhere in this file.
 `parseCostingImport` (the external cost-calculator JSON format) gets the
 same default, since that calculator has only ever exported powder specs.
 
-### Duplicating a procedure/cost centre, and collapsible procedure groups
+### Duplicating a procedure, and collapsible procedure groups
 
-"New procedure"/"New cost centre" used to open `ProcedureEditor`/
-`CostCentreEditor` directly, always blank. Some equipment is similar enough
-to existing cost centres (and some procedures similar enough to existing
-ones) that retyping every field by hand — capital assets, gas flows, powder
-or wire feedstock, labour rows — was pure waste for what's really a small
-adjustment to something that already exists. Both buttons now open
-`CreateChoiceModal` first: **Create new** (unchanged — reaches the same
-blank editor) or **Create from existing** (expands the same modal in place
-with a picker — `CostCentreCopyPicker`, a flat list, or `ProcedureCopyPicker`,
-grouped by process — rather than closing and opening a second modal).
+"New procedure" used to open `ProcedureEditor` directly, always blank. Some
+procedures are similar enough to existing ones that retyping every field by
+hand — gas flows, powder or wire feedstock, labour rows — was pure waste
+for what's really a small adjustment to something that already exists. The
+button now opens `CreateChoiceModal` first: **Create new** (unchanged —
+reaches the same blank editor) or **Create from existing** (expands the
+same modal in place with `ProcedureCopyPicker`, grouped by process, rather
+than closing and opening a second modal).
 
-**Deliberately one shared modal component for both record types, not two.**
-The choice itself (blank vs. copy) and the back-and-forth between the choice
-screen and the picker is identical regardless of what's being created —
-only the picker content (`children`) differs, supplied by the caller.
+`CreateChoiceModal` is kept generic (`title`/`onClose`/`onCreateBlank`/
+`children`) rather than baked to procedures specifically — it used to also
+serve an identical cost-centre duplicate flow before cost centres were
+folded into equipment (see "Costing: equipment is the cost centre" above),
+and nothing about the choice itself (blank vs. copy) is procedure-specific,
+on the chance another record type wants the same flow later.
 
 **The duplicate is a genuinely new, unsaved record, not an edit of the
 source — this needed a real prop, not a trick with existing ones.**
-`isNew` in both editors has always derived from whether the record prop
-itself is present (`!procedure`/`!centre`), which governs the modal's
-title, whether Delete shows, and (for `ProcedureEditor`) the `materialMode`/
-`wire`/`powder` back-fill. Prefilling from a copy needs a **second, optional**
-prop — `seedFrom` — consulted only in the state initialiser and only when
-the "real" record prop is absent: `const source = procedure || seedFrom`
-supplies the initial field values, but `isNew` still reads `!procedure`
-alone, so a duplicate reads and behaves as new (title "New procedure", no
-Delete button) while starting from copied data. The new record also always
-gets a **fresh id** (`uid('proc')`/`uid('cc')`, generated again even though
-`seedFrom`'s own id gets deep-cloned in along with everything else) and the
-name gets `" (copy)"` appended, so it's obvious at a glance which record is
-the original — both edited freely from there, same as any other field.
+`ProcedureEditor`'s `isNew` has always derived from whether the record prop
+itself is present (`!procedure`), which governs the modal's title, whether
+Delete shows, and the `materialMode`/`wire`/`powder` back-fill. Prefilling
+from a copy needs a **second, optional** prop — `seedFrom` — consulted only
+in the state initialiser and only when the "real" record prop is absent:
+`const source = procedure || seedFrom` supplies the initial field values,
+but `isNew` still reads `!procedure` alone, so a duplicate reads and
+behaves as new (title "New procedure", no Delete button) while starting
+from copied data. The new record also always gets a **fresh id**
+(`uid('proc')`, generated again even though `seedFrom`'s own id gets
+deep-cloned in along with everything else) and the name gets `" (copy)"`
+appended, so it's obvious at a glance which record is the original — both
+edited freely from there, same as any other field.
 
 **State-wise, duplicating from picker to saved record is: pick → seed →
-open 'new'.** `procedureSeed`/`costCentreSeed` (main component state) hold
-the source record chosen in the picker; `onPick` sets the seed THEN sets
-`editingProcedure`/`editingCentre` to `'new'` (not to the source record
-itself — that would make `procedure`/`centre` non-null and flip `isNew` to
-false, exactly the bug this design avoids). The editor's `seedFrom` prop is
-only ever passed when `editingProcedure === 'new'`; editing an existing
-record ignores it entirely. Every entry point that sets `editingProcedure`/
-`editingCentre` — "Create new," a picker pick, "Edit" on an existing card,
-Save, Delete — also explicitly (re)sets or clears the matching seed, so a
-stale seed from a previous duplicate can never leak into an unrelated
-"blank new" or "edit existing" flow.
+open 'new'.** `procedureSeed` (main component state) holds the source
+record chosen in the picker; `onPick` sets the seed THEN sets
+`editingProcedure` to `'new'` (not to the source record itself — that
+would make `procedure` non-null and flip `isNew` to false, exactly the bug
+this design avoids). The editor's `seedFrom` prop is only ever passed when
+`editingProcedure === 'new'`; editing an existing record ignores it
+entirely. Every entry point that sets `editingProcedure` — "Create new," a
+picker pick, "Edit" on an existing card, Save, Delete — also explicitly
+(re)sets or clears `procedureSeed`, so a stale seed from a previous
+duplicate can never leak into an unrelated "blank new" or "edit existing"
+flow.
 
 **Procedures are grouped by process in the picker, collapsed by default —
 and `CostingView`'s own procedure listing now works exactly the same way,
@@ -1743,10 +1807,7 @@ is exactly the "one really long page to scroll through" problem once enough
 exist. Both use the same `Section` component (`defaultOpen={false}`) already
 established elsewhere in this file — collapsed by default is a deliberate
 choice here, not merely convenient: the point is to keep the page short by
-default, not just organised. `CostCentreCopyPicker` stays a flat list on
-purpose — cost centres map to physical shared capital (a robot cell, a spray
-booth), and there are only ever expected to be a handful, so grouping would
-be organisational overhead with nothing to organise.
+default, not just organised.
 
 ### Costing: efficiency and average labour cost
 
@@ -1766,9 +1827,11 @@ Asked of the user directly: individual pay rates are HR data and this app
 must not hold them, even indirectly via a per-person hourly cost field. One
 shared average is the ceiling of precision that's appropriate here.
 
-**`effectiveHourlyRate(procedure, costCentres, costSettings)`** is the one
-function this all runs through — `procedureCost() × efficiency% +
-avgLabourRate × (1 − efficiency%)`. Because cost is linear in hours, this
+**`effectiveHourlyRate(procedure, equipment, costSettings)`** is the one
+function this all runs through — `(procedureCost() + equipmentDepreciationPerHr(equipment)) × efficiency% +
+avgLabourRate × (1 − efficiency%)` (see "Costing: equipment is the cost
+centre" above for where the equipment term comes from). Because cost is
+linear in hours, this
 blended $/hr is correct to multiply by ANY hours figure, not just a job's
 full total: `0.75×H×rateA + 0.25×H×rateB` is algebraically identical to
 `H×(0.75×rateA + 0.25×rateB)` for every `H`. That's what lets both
@@ -1933,7 +1996,7 @@ worse than the mild indirection of a linked record.
 a rework job is scheduled, staffed, logged against (`wf_timelog`, same
 `TimeLogModal`/`loggedHours`) and completed (`toggleComplete`/
 `completeWithHours`) through exactly the same code paths as any other job.
-Its cost is `jobCost(rework, procedures, costCentres)` — the same helper
+Its cost is `jobCost(rework, procedures, equipment)` — the same helper
 every other job's cost goes through — so it's simply `$0`/`—` when the
 rework has no `procedureId`, no special-casing required. This mirrors the
 two-person-job decision just above: reuse the general machinery instead of
@@ -2295,7 +2358,7 @@ shape that:
   `toggleComplete`/`completeWithHours`) is a task-shaped copy of the job
   version, minus the `wf_actuals`/template-hours-averaging step, which has
   no task equivalent (no `templateId`).
-- Cost is `jobCost(task, procedures, costCentres)` — the same helper every
+- Cost is `jobCost(task, procedures, equipment)` — the same helper every
   job and every rework goes through — unmodified, because the task shape
   deliberately reuses the exact field names it reads
   (`procedureId`/`status`/`actualHours`/`hoursTotal`).
@@ -2387,7 +2450,7 @@ synthesised row from the item's own completion record
 all — which is what makes a backfilled entry (see above) show up in a
 report despite never having been logged day by day. Never both for the
 same item, so nothing is double-counted. Cost is priced **per row**, not
-per item: `hourlyRate(item, procedures, costCentres)` is `jobCost()`'s own
+per item: `hourlyRate(item, procedures, equipment)` is `jobCost()`'s own
 rate calculation with the hours term stripped back out, so each row's cost
 is `rate × that row's hours` — correct even when only part of an item's
 total hours fall inside the chosen range, which `jobCost()`'s own
@@ -2436,9 +2499,12 @@ reads false until it lands. That exact mistake made live sync silently never
 start.
 
 Data keys: `wf_equipment`, `wf_staff`, `wf_templates`, `wf_processes`,
-`wf_jobs`, `wf_costcentres`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`,
+`wf_jobs`, `wf_procedures`, `wf_actuals`, `wf_wipsettings`,
 `wf_wipparked`, `wf_categories`, `wf_timelog`, `wf_overrides`, `wf_projects`,
-`wf_tasks` (each a JSON blob).
+`wf_tasks` (each a JSON blob). `wf_costcentres` is no longer read or
+written — cost centres were folded into equipment (see "Costing: equipment
+is the cost centre") — but an existing deployment's key is left in storage
+untouched rather than deleted, orphaned but harmless.
 
 ### Live sync (shared mode)
 

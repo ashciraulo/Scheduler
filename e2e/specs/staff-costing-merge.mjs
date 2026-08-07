@@ -59,9 +59,16 @@ export default async function run({ page, check, errors, baseUrl }) {
   check('#20 Equipment section lists equipment cards',
         (await page.locator('h3', { hasText: 'Weld Robot 1' }).count()) > 0);
   const mainText = await page.locator('main').first().innerText();
-  check('#20 Equipment is above Cost centres',
+  // Cost centres no longer exist as their own section — equipment absorbed
+  // that role directly (interestRate/annualHours/assets live on the
+  // equipment record itself; see "Costing: equipment is the cost centre"
+  // in scheduler/CLAUDE.md) — so this now just checks Equipment sits above
+  // the Costing/Procedures section, same layout intent as before.
+  check('#20 Equipment is above Costing (procedures)',
         mainText.indexOf('Equipment') >= 0
-        && mainText.indexOf('Equipment') < mainText.toUpperCase().indexOf('COST CENTRES'));
+        && mainText.indexOf('Equipment') < mainText.indexOf('Costing'));
+  check('#20 no Cost centres section remains — equipment carries that data now',
+        !/Cost centres/i.test(mainText));
 
   const equipCountBefore = (await page.evaluate(() =>
     JSON.parse(localStorage.getItem('wf::wf_equipment') || '[]').length));

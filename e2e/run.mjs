@@ -40,10 +40,11 @@ import nestedModalScrollLock from './specs/nested-modal-scroll-lock.mjs';
 import jobProcedureDirect from './specs/job-procedure-direct.mjs';
 import scheduleZoomAndDueHighlight from './specs/schedule-zoom-and-due-highlight.mjs';
 import procedureWireFeedstock from './specs/procedure-wire-feedstock.mjs';
-import duplicateProcedureCostcentre from './specs/duplicate-procedure-costcentre.mjs';
+import duplicateProcedure from './specs/duplicate-procedure.mjs';
 import completeReopensJobmodal from './specs/complete-reopens-jobmodal.mjs';
 import actualHoursCostVisibility from './specs/actual-hours-cost-visibility.mjs';
 import effectiveCompletionDate from './specs/effective-completion-date.mjs';
+import equipmentIsCostCentre from './specs/equipment-is-costcentre.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -83,10 +84,11 @@ const SUITES = [
   ['job procedure — assignable directly, not only via a template', jobProcedureDirect],
   ['schedule zoom default + due-this-month highlight', scheduleZoomAndDueHighlight],
   ['procedure editor — wire feedstock alongside powder', procedureWireFeedstock],
-  ['duplicate a procedure or cost centre from an existing one', duplicateProcedureCostcentre],
+  ['duplicate a procedure from an existing one', duplicateProcedure],
   ['completing a job from inside JobModal reopens it (Mark for rework visible)', completeReopensJobmodal],
   ['actual hours visibility + cost calculated from actual hours once complete', actualHoursCostVisibility],
   ['Value Reports uses the effective completion date, not the mark-complete date', effectiveCompletionDate],
+  ['equipment is the cost centre — procedures independent of equipment, cost auto-links to the assigned machine', equipmentIsCostCentre],
 ];
 
 const only = process.argv[2]; // optional substring filter

@@ -24,7 +24,7 @@ export default async function run({ page, check, errors, baseUrl }) {
 
   // ---- a new procedure defaults to Powder, unchanged from before ----
   // "New procedure" opens CreateChoiceModal first (blank vs. copy an
-  // existing one — see duplicate-procedure-costcentre.mjs); "Create new"
+  // existing one — see duplicate-procedure.mjs); "Create new"
   // reaches the same blank ProcedureEditor this spec is about.
   await page.getByRole('button', { name: 'New procedure' }).click();
   await page.waitForSelector(modalSel);
@@ -93,7 +93,7 @@ export default async function run({ page, check, errors, baseUrl }) {
 
   await page.waitForTimeout(2200); // let the save toast fade — it also contains the procedure name
   // CostingView's procedure groups are collapsed by default (see
-  // "duplicate-procedure-costcentre.mjs") — the new procedure's group has
+  // "duplicate-procedure.mjs") — the new procedure's group has
   // to be expanded before its card is even in the DOM to look at.
   await page.locator('button', { hasText: new RegExp(`^${newProc.process.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(`) }).first().click();
   await page.waitForTimeout(200);
