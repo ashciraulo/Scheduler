@@ -1483,6 +1483,62 @@ See `e2e/specs/actual-hours-cost-visibility.mjs` for a worked example (a
 10h-estimated, 6h-actual job) proving the tile total and the row's own
 cost agree.
 
+**`effectiveCompletionDate(job)` — Value Reports' "Completed" basis filters
+on this, not the raw `job.completedDate`.** `completedDate` is stamped with
+`isoDate(new Date())` the moment someone clicks "Mark complete" in the app
+— which is when the paperwork happened, not necessarily when the job
+itself finished. A job physically done on a Friday but not marked complete
+until the following Wednesday used to pull it into whichever reporting
+period Wednesday falls in, rather than the one it actually wrapped up in —
+reported directly from testing.
+
+The job's own schedule already says when it was *planned* to finish
+(`assignment.days`, the day-by-day plan the scheduler committed to — see
+"Completing a job doesn't change the schedule…" above for how that stays
+intact after completion), and `actualHours` vs `hoursTotal` says how wrong
+that plan turned out to be. Combining the two:
+- **Finished early or on time** (`actualHours <= scheduled total`): walk
+  the *original* day-by-day plan cumulatively and stop at the day the
+  actual total is reached. This is the exact same "trim from the start"
+  the scheduler's own capacity replay already does when a job finishes
+  early (`complete.forEach` in `runScheduler`) — but that pass only
+  updates the capacity maps so the freed time becomes available to other
+  jobs, it never writes a trimmed date back onto the job's own
+  `assignment`, so nothing already exposes this date directly; it has to
+  be recomputed the same way here.
+- **Ran over** (`actualHours > scheduled total`): there's no extra
+  scheduled days to walk into, so extrapolate forward from the last
+  scheduled day using the plan's own average hours/calendar-day
+  (`totalScheduled / uniqueDayCount`) — an approximation, not a
+  re-simulation of the roster, which is the right amount of precision for
+  a reporting date rather than a scheduling decision.
+- **No day-by-day plan to compute from at all** (no `assignment`, e.g. a
+  split job — whose own `assignment` is always `null`, see "Splitting a
+  job" — or one with no `actualHours` yet): falls back to the raw
+  `completedDate` unchanged, so older or schedule-less records degrade to
+  exactly today's behaviour rather than showing no date at all.
+
+The "Contributing jobs" table's own "Completed" column (shown only for the
+Completed basis, since the other two bases don't filter on this date and
+most of their rows aren't complete anyway) shows this computed date, with
+an amber `*` and a tooltip naming both dates whenever it differs from the
+literal `completedDate` — so *why* a job landed in this period, or didn't,
+is checkable the same way the Hours/Cost columns already make the cost
+tiles checkable, not just asserted.
+
+See `e2e/specs/effective-completion-date.mjs` for three worked cases: an
+early finish (4h/day × 5 days scheduled, 12h actual → lands on day 3, not
+the mark-complete date a week later), an overrun (28h actual against a 20h/
+5-day plan → extrapolates 2 days past the last scheduled day), and a
+schedule-less record (falls back to `completedDate` and is correctly
+excluded from a range that only covers the schedule-window case).
+
+This is deliberately scoped to `ReportsView`'s "Completed" basis only, not
+retrofitted onto `QualityView`/`ReportModal` or anywhere else that reads
+`completedDate` — not asked for there, and extending it should be its own
+deliberate decision per call site rather than an assumed side effect of
+this fix.
+
 `TimeLogModal` opens on a date and lists the jobs the schedule expected that
 day, so the common case is confirming numbers rather than hunting for jobs;
 any other active job can be added for when reality differed from the plan.

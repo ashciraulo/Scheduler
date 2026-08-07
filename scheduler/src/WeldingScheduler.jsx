@@ -343,6 +343,59 @@ function procedureParts(p, costCentres) {
 const procedureCost = (p, costCentres) => procedureParts(p, costCentres).total;
 // Hours used to cost a job: actual once complete, otherwise the estimate.
 const jobHoursForCost = (j) => (j && j.status === 'complete' && Number(j.actualHours) > 0 ? Number(j.actualHours) : Number((j && j.hoursTotal) || 0));
+// `job.completedDate` is when someone clicked "Mark complete" in the app —
+// not necessarily when the job actually finished. A job physically done on
+// a Friday but not marked complete until the following Wednesday reads as
+// finishing on Wednesday, which pulls it into whichever reporting period
+// Wednesday falls in rather than the one it was really done in — reported
+// from testing against Value Reports' "Completed" basis specifically.
+//
+// The job's own schedule already says when it was PLANNED to finish
+// (`assignment.days`, the day-by-day plan the scheduler committed to), and
+// `actualHours` vs `hoursTotal` says how wrong that plan turned out to be.
+// Combining them gives a real estimate of when it actually wrapped up:
+//  - Finished in actualHours <= the scheduled total: walk the ORIGINAL
+//    day-by-day plan cumulatively and stop at the day the actual total is
+//    reached — the exact same "trim from the start" the scheduler itself
+//    already does to free up capacity when a job finishes early (see the
+//    "complete.forEach" replay in scheduler.js's runScheduler). That logic
+//    only ever adjusts capacity bookkeeping, never the job's own stored
+//    `assignment`, so nothing already gives this date directly — it has to
+//    be recomputed the same way here.
+//  - Took actualHours > the scheduled total (ran over): there's no extra
+//    scheduled days to walk into, so extrapolate forward from the last
+//    scheduled day using the plan's own average hours/calendar-day.
+// Falls back to `job.completedDate` whenever there's nothing to compute
+// from — no assignment (e.g. a split job, whose own `assignment` is always
+// null — see "Splitting a job"), no day-by-day plan, or no actualHours yet
+// — so an old or schedule-less record degrades to today's existing
+// behaviour rather than showing no date at all.
+function effectiveCompletionDate(job) {
+  if (!job || job.status !== 'complete') return job?.completedDate || null;
+  const plan = job.assignment?.days;
+  const actual = Number(job.actualHours);
+  if (!plan || !plan.length || !(actual > 0)) return job.completedDate || null;
+
+  const sorted = [...plan].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const totalScheduled = sorted.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+  const uniqueDays = [...new Set(sorted.map((e) => e.date))];
+  const lastDay = uniqueDays[uniqueDays.length - 1];
+
+  if (actual <= totalScheduled) {
+    let used = 0;
+    for (const entry of sorted) {
+      used += Number(entry.hours) || 0;
+      if (used >= actual - 0.001) return entry.date;
+    }
+    return lastDay;
+  }
+  // Ran over — push the date forward from the plan's own daily pace.
+  // uniqueDays.length is never 0 here (plan.length was checked above).
+  const avgPerDay = totalScheduled / uniqueDays.length;
+  if (!(avgPerDay > 0)) return job.completedDate || lastDay;
+  const extraDays = Math.ceil((actual - totalScheduled) / avgPerDay - 0.001);
+  return addDays(lastDay, extraDays);
+}
 // A job's SCHEDULED hours aren't all productive process time — some of
 // every job/task is setup and breakdown, which doesn't consume materials,
 // gas or machine time the way procedureCost's $/hr rate assumes, just a
@@ -8129,7 +8182,13 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
   const included = useMemo(() => {
     return jobs.filter((j) => {
       if (basis === 'completed') {
-        return j.status === 'complete' && j.completedDate && j.completedDate >= rangeStart && j.completedDate <= rangeEnd;
+        // effectiveCompletionDate, not the raw completedDate (when someone
+        // happened to click "Mark complete") — see its own comment. A job
+        // finished Friday but not marked complete until the following
+        // Wednesday used to land in Wednesday's reporting period; this
+        // places it back in the period it was actually finished in.
+        const ecd = effectiveCompletionDate(j);
+        return j.status === 'complete' && ecd && ecd >= rangeStart && ecd <= rangeEnd;
       }
       if (basis === 'scheduled') {
         return j.assignment && overlaps(j.assignment.startDate, j.assignment.endDate, rangeStart, rangeEnd);
@@ -8272,6 +8331,10 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
                   <th className="px-3 py-2 font-medium">Dept $</th>
                   <th className="px-3 py-2 font-medium">Hours</th>
                   <th className="px-3 py-2 font-medium">Cost</th>
+                  {/* Only meaningful for the Completed basis — the OTHER
+                      two bases don't filter on this date at all, and most
+                      rows there aren't complete yet to have one. */}
+                  {basis === 'completed' && <th className="px-3 py-2 font-medium">Completed</th>}
                 </tr>
               </thead>
               <tbody>
@@ -8279,6 +8342,7 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
                   const hrs = jobHoursForCost(j);
                   const isActualHrs = j.status === 'complete' && Number(j.actualHours) > 0;
                   const cost = jobCost(j, procedures, costCentres, costSettings);
+                  const ecd = basis === 'completed' ? effectiveCompletionDate(j) : null;
                   return (
                     <tr key={j.id} className="border-b border-slate-800/60">
                       <td className="px-3 py-1.5 text-slate-300">{j.name}</td>
@@ -8288,13 +8352,28 @@ function ReportsView({ jobs, equipment, staff, procedures = [], costCentres = []
                         {hrs}h <span className="text-slate-600">({isActualHrs ? 'actual' : 'est'})</span>
                       </td>
                       <td className="px-3 py-1.5 text-slate-300 font-mono">{cost != null ? fmtMoney(cost) : '—'}</td>
+                      {basis === 'completed' && (
+                        <td
+                          className="px-3 py-1.5 text-slate-400 font-mono whitespace-nowrap"
+                          title={ecd !== j.completedDate ? `Marked complete ${fmtDate(j.completedDate)} — this is when it actually finished, based on the schedule and actual hours` : 'Same as when it was marked complete'}
+                        >
+                          {fmtDate(ecd)}{ecd !== j.completedDate && <span className="text-amber-400"> *</span>}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
-                {included.length === 0 && <tr><td colSpan={5} className="px-3 py-6 text-center text-slate-600">Nothing here yet.</td></tr>}
+                {included.length === 0 && <tr><td colSpan={basis === 'completed' ? 6 : 5} className="px-3 py-6 text-center text-slate-600">Nothing here yet.</td></tr>}
               </tbody>
             </table>
           </div>
+          {basis === 'completed' && (
+            <p className="text-[10px] text-slate-600 mt-1.5">
+              Completed date is when the job actually finished — based on its schedule and actual vs. estimated hours — not
+              necessarily the day it was marked complete in the app. <span className="text-amber-400">*</span> flags a row where
+              the two differ; hover it for both dates.
+            </p>
+          )}
         </div>
       </div>
     </div>
