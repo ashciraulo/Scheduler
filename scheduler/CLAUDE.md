@@ -1436,6 +1436,44 @@ stored actual, then the estimate). The Backlog shows the running logged total
 against the estimate, amber-coloured once it exceeds it, so drift is visible
 before completion.
 
+**Completing with no day-by-day log at all used to leave `wf_timelog`
+completely untouched — reported directly as "no hours logged against the
+task or the project it is assigned to" in the R&D view.** Typing an actual-
+hours figure straight into `ActualHoursModal` (never having used the daily
+log for that job/task) correctly set `job.actualHours`/`task.actualHours` —
+so cost, which already falls back to it via `jobHoursForCost`, was always
+right — but every UI that reads "hours logged" from `wf_timelog` directly
+(the Backlog subtext above, `QualityView`, `ProjectsView`'s task table and
+`projectRollup`) stayed at 0h regardless, since nothing had ever written a
+row there. `logCompletionHours(timeLog, item, hours, secondHours)` fixes
+this the same way "Log past work" already does for a task with no schedule
+at all (`replaceTaskLogEntry`) — one synthesised row, dated the completion
+date — but per **person**, and **additive** rather than a full replace: a
+side (primary or training partner — see "Two-person jobs" below) that
+already has its own day-by-day entries keeps that granular record exactly
+as it is, the same "day-by-day log wins over a recalled total" principle
+the modal's own pre-fill already follows; a side that was never logged gets
+exactly one row. Runs from both `completeWithHours` (jobs) and
+`completeTaskWithHours` (tasks) — the same shared modal, same shared helper,
+for the same reason `ActualHoursModal` and the split-job-name round trip
+elsewhere in this file are shared rather than duplicated per entity type.
+
+**The training partner's hours had NOWHERE to go here at all before this —
+not silently dropped, structurally absent.** A job/task's own `actualHours`
+is a single scalar, and it deliberately stays the PRIMARY's figure only
+(the item's own scheduled duration was always based on the primary alone —
+see "Two-person jobs" below), so there was no field a partner's number
+could even be typed into short of misusing "Log past work" to create an
+unrelated, unlinked record for them. `ActualHoursModal` now shows a second
+"`<partner>`'s hours" field whenever `job.secondStaffId`/`task.secondStaffId`
+is set, pre-filled from their own logged total the same way the primary's
+is (`secondStaffLoggedHours`) — confirming writes their own `wf_timelog`
+entry (again, only if they don't already have day-by-day entries of their
+own), never touching the primary's figure or `actualHours` itself, which is
+what makes `loggedHours()`'s existing "sum both entries" reading (see
+"Two-person jobs" below) come out right without a `secondActualHours` field
+ever needing to exist.
+
 **`TimeLogModal` shows a "Job #" column (`bcJobNo`), ahead of "Job"** —
 reported directly: with several similarly-named jobs scheduled at once,
 the name alone wasn't always enough to tell them apart while logging

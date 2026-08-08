@@ -47,6 +47,7 @@ import effectiveCompletionDate from './specs/effective-completion-date.mjs';
 import equipmentIsCostCentre from './specs/equipment-is-costcentre.mjs';
 import qualityActions from './specs/quality-actions.mjs';
 import logHoursJobNumber from './specs/log-hours-job-number.mjs';
+import completionHoursLogging from './specs/completion-hours-logging.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -93,6 +94,7 @@ const SUITES = [
   ['equipment is the cost centre — procedures independent of equipment, cost auto-links to the assigned machine', equipmentIsCostCentre],
   ['quality actions — bundled with rework, or created directly', qualityActions],
   ['Log hours modal shows each job\'s job number', logHoursJobNumber],
+  ['completing a job/task with no day-by-day log writes its hours to wf_timelog, incl. a training partner\'s', completionHoursLogging],
 ];
 
 const only = process.argv[2]; // optional substring filter

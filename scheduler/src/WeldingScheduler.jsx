@@ -1086,20 +1086,46 @@ function ProcedureEditor({ procedure, seedFrom, processes, onClose, onSave, onDe
   );
 }
 
-function ActualHoursModal({ job, logged = 0, onCancel, onConfirm, kind = 'job' }) {
+function ActualHoursModal({ job, logged = 0, secondLogged = 0, staff = [], onCancel, onConfirm, kind = 'job' }) {
   // Prefer what was logged day by day over anything recalled now: that's the
   // whole point of the daily log. Fall back to a stored actual, then estimate.
   const [hours, setHours] = useState(String(logged > 0 ? logged : (job.actualHours ?? job.hoursTotal ?? '')));
+  // A training partner riding along (job.secondStaffId/task.secondStaffId —
+  // see "Two-person jobs" in scheduler/CLAUDE.md) has their own,
+  // separately-logged hours, same as the primary's above — offered here so
+  // completing a job/task is a real place to record them, not just the
+  // daily log. Reported directly: without this, the only way to get a
+  // partner's hours recorded at all was misusing "Log past work"
+  // (BackfillTaskModal), which has no pairing concept whatsoever.
+  const partner = job.secondStaffId ? staff.find((s) => s.id === job.secondStaffId) : null;
+  const primaryName = staff.find((s) => s.id === job.staffId)?.name;
+  const [secondHours, setSecondHours] = useState(String(secondLogged > 0 ? secondLogged : ''));
   return (
     <Modal title={`${kind === 'task' ? 'Task' : 'Job'} complete — record actual hours`} onClose={onCancel}>
       <p className="text-sm text-slate-300 mb-3"><span className="font-semibold text-slate-100">{job.name}</span> is being marked complete.</p>
-      <Field label={`Actual hours taken — estimated ${job.hoursTotal}h${job.quantity > 1 ? ` for ${job.quantity} units` : ''}`}>
+      <Field label={`Actual hours taken — estimated ${job.hoursTotal}h${job.quantity > 1 ? ` for ${job.quantity} units` : ''}${primaryName ? ` (${primaryName})` : ''}`}>
         <input type="number" min={0} step={0.25} className={inputCls} value={hours} onChange={(e) => setHours(e.target.value)} autoFocus />
       </Field>
       {logged > 0 && (
         <p className="text-xs text-emerald-400 -mt-2 mb-3">
           Pre-filled from {logged}h logged daily against this {kind}. Adjust if the log missed something.
         </p>
+      )}
+      {partner && (
+        <>
+          <Field label={`${partner.name}'s hours (training partner, optional)`}>
+            <input type="number" min={0} step={0.25} className={inputCls} value={secondHours} onChange={(e) => setSecondHours(e.target.value)} placeholder="e.g. 4" />
+          </Field>
+          {secondLogged > 0 ? (
+            <p className="text-xs text-emerald-400 -mt-2 mb-3">
+              Pre-filled from {secondLogged}h {partner.name} already logged daily. Adjust if the log missed something.
+            </p>
+          ) : (
+            <p className="text-xs text-slate-500 -mt-2 mb-3">
+              Logged separately from the hours above — {partner.name} rode along but may not have worked the whole thing. Leave blank if they didn't log any time on this.
+            </p>
+          )}
+        </>
       )}
       <p className="text-xs text-slate-500 mb-3">
         {kind === 'task'
@@ -1110,7 +1136,10 @@ function ActualHoursModal({ job, logged = 0, onCancel, onConfirm, kind = 'job' }
       </p>
       <div className="flex items-center justify-end gap-2">
         <button className={btnGhost} onClick={onCancel}>Cancel</button>
-        <button className={btnPrimary} onClick={() => onConfirm(Math.max(0, Number(hours) || 0) || job.hoursTotal)}>Save &amp; complete</button>
+        <button
+          className={btnPrimary}
+          onClick={() => onConfirm(Math.max(0, Number(hours) || 0) || job.hoursTotal, Math.max(0, Number(secondHours) || 0))}
+        >Save &amp; complete</button>
       </div>
     </Modal>
   );
@@ -2276,13 +2305,15 @@ export default function WeldingScheduler() {
       if (next.length !== arr.length) { await saveKey('wf_actuals', next); reaverageTemplate(job.templateId, next); }
     })();
   }
-  function completeWithHours(hours) {
+  function completeWithHours(hours, secondHours) {
     const job = pendingComplete;
     if (!job) return;
     const cd = isoDate(new Date());
     const updated = { ...job, status: 'complete', completedDate: cd, percentComplete: 100, actualHours: hours, updatedAt: new Date().toISOString() };
     const jobsResult = recompute(jobs.map((j) => (j.id === job.id ? updated : j)), equipment, staff);
     setPendingComplete(null);
+    const nextTimeLog = logCompletionHours(timeLog, updated, hours, secondHours);
+    if (nextTimeLog !== timeLog) { setTimeLog(nextTimeLog); saveKey(TIMELOG_KEY, nextTimeLog); }
     (async () => {
       const arr = (await loadKey('wf_actuals', [])).filter((r) => r.jobId !== job.id);
       arr.push({ jobId: job.id, templateId: job.templateId || null, name: job.name, process: job.process, quantity: job.quantity || 1, estHours: job.hoursTotal, actualHours: hours, completedDate: cd });
@@ -2512,7 +2543,7 @@ export default function WeldingScheduler() {
     const updated = { ...task, status: 'active', completedDate: null, updatedAt: new Date().toISOString() };
     recompute(jobs, equipment, staff, tasks.map((t) => (t.id === task.id ? updated : t)));
   }
-  function completeTaskWithHours(hours) {
+  function completeTaskWithHours(hours, secondHours) {
     const task = pendingTaskComplete;
     if (!task) return;
     const updated = {
@@ -2521,6 +2552,8 @@ export default function WeldingScheduler() {
     };
     recompute(jobs, equipment, staff, tasks.map((t) => (t.id === task.id ? updated : t)));
     setPendingTaskComplete(null);
+    const nextTimeLog = logCompletionHours(timeLog, updated, hours, secondHours);
+    if (nextTimeLog !== timeLog) { setTimeLog(nextTimeLog); saveKey(TIMELOG_KEY, nextTimeLog); }
     showToast(`${task.name} marked complete — ${hours}h recorded.`);
   }
   // Same reasoning as unpinJob: this IS the manual-placement mechanism, not
@@ -3450,6 +3483,8 @@ export default function WeldingScheduler() {
       {pendingComplete && (
         <ActualHoursModal
           logged={loggedHours(timeLog, pendingComplete.id)}
+          secondLogged={secondStaffLoggedHours(timeLog, pendingComplete)}
+          staff={staff}
           job={pendingComplete}
           onCancel={() => {
             // Cancelling out of "how many hours" is "never mind, I wasn't
@@ -3472,6 +3507,8 @@ export default function WeldingScheduler() {
         <ActualHoursModal
           kind="task"
           logged={loggedHours(timeLog, pendingTaskComplete.id)}
+          secondLogged={secondStaffLoggedHours(timeLog, pendingTaskComplete)}
+          staff={staff}
           job={pendingTaskComplete}
           onCancel={() => setPendingTaskComplete(null)}
           onConfirm={completeTaskWithHours}
@@ -7004,6 +7041,52 @@ function loggedHours(timeLog, jobId) {
   return Math.round(
     (timeLog || []).filter((e) => e.jobId === jobId).reduce((s, e) => s + (Number(e.hours) || 0), 0) * 100
   ) / 100;
+}
+
+// The training partner's own share of "hours logged so far" (see
+// "Two-person jobs" below) — entries keyed to item.secondStaffId
+// specifically, the same split TimeLogModal uses to tell the two people's
+// rows apart on reopen. 0 whenever there's no pairing at all.
+function secondStaffLoggedHours(timeLog, item) {
+  if (!item?.secondStaffId) return 0;
+  return Math.round(
+    (timeLog || []).filter((e) => e.jobId === item.id && e.staffId === item.secondStaffId)
+      .reduce((s, e) => s + (Number(e.hours) || 0), 0) * 100
+  ) / 100;
+}
+
+// Completing a job/task with actual hours typed straight into
+// ActualHoursModal — never logged day by day first — used to leave
+// wf_timelog completely untouched: the job/task's own `actualHours` got
+// set (so cost, which already falls back to it via jobHoursForCost, was
+// always correct) but "hours logged" everywhere that reads wf_timelog
+// directly (the Backlog subtext, QualityView, ProjectsView's task table
+// and project rollup) stayed at 0h regardless — reported directly as "no
+// hours logged against the task or the project". A training partner's
+// hours had nowhere to go here at all, short of misusing "Log past work"
+// (BackfillTaskModal), which has no pairing concept whatsoever.
+//
+// Mirrors "Log past work"'s own one-entry-from-a-total approach
+// (replaceTaskLogEntry) but per PERSON and additive, not a full replace: a
+// side that already has its own day-by-day entries keeps that granular
+// record exactly as it is — the same "day-by-day log wins over a recalled
+// total" principle ActualHoursModal's own pre-fill already follows, see
+// "The daily hours log" in scheduler/CLAUDE.md — and a side that was never
+// logged gets exactly one row, dated the completion date, so it isn't
+// silently absent from a report that reads wf_timelog directly.
+function logCompletionHours(currentTimeLog, item, hours, secondHours) {
+  const secondStaffId = item.secondStaffId || null;
+  const hasPrimary = currentTimeLog.some((e) => e.jobId === item.id && e.staffId !== secondStaffId);
+  const hasSecond = secondStaffId ? currentTimeLog.some((e) => e.jobId === item.id && e.staffId === secondStaffId) : false;
+  const date = item.completedDate || isoDate(new Date());
+  const entries = [];
+  if (!hasPrimary && Number(hours) > 0) {
+    entries.push({ id: uid('tl'), jobId: item.id, date, hours: Math.round(Number(hours) * 100) / 100, staffId: item.staffId || '', note: '' });
+  }
+  if (secondStaffId && !hasSecond && Number(secondHours) > 0) {
+    entries.push({ id: uid('tl'), jobId: item.id, date, hours: Math.round(Number(secondHours) * 100) / 100, staffId: secondStaffId, note: '' });
+  }
+  return entries.length ? [...currentTimeLog, ...entries] : currentTimeLog;
 }
 
 /* ============================================================
