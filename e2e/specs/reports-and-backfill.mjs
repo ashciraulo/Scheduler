@@ -61,6 +61,13 @@ export default async function run({ page, check, errors, baseUrl }) {
   await reportBtn().click();
   await page.waitForSelector(modalSel);
   await page.waitForTimeout(400);
+  // ReportModal defaults "To" to the REAL today; the seeded entry's date
+  // (anchorIso) lands after today whenever today itself falls on a weekend
+  // (nextWeekday pushes forward to the following Monday) — same mismatch
+  // fixed in second-person-hours.mjs. Widen "To" explicitly so the entry
+  // falls inside the default range.
+  await modal().locator('label:has-text("To") input[type=date]').fill(anchorIso);
+  await page.waitForTimeout(300);
   check('the Quality report lists the logged rework entry', (await modal().locator('td', { hasText: 'Bracket Weld — Rework' }).count()) === 1);
   check('...with its job number', (await modal().locator('td', { hasText: 'J00120' }).count()) === 1);
   check('...its reason for rework', (await modal().locator('td', { hasText: 'Porosity on inspection' }).count()) === 1);

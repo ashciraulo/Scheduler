@@ -161,8 +161,13 @@ export default async function run({ page, check, errors, baseUrl }) {
   // drag's drop coordinates aren't pixel-precise about which day column
   // they land on, only which equipment (see the job-drag suite's own
   // tolerance for the same reason) — so read its actual planned date back
-  // rather than assuming it's still "today", and check the standalone task
-  // (untouched by the drag, still planned for today) on its own date.
+  // rather than assuming it's still "today". The standalone task is subject
+  // to the same caveat for a different reason: it was created with a
+  // planned start date of real "today", but the scheduler still pushes a
+  // pinned placement off a day its assigned staff isn't rostered (st_1
+  // works Mon-Fri only) — whenever "today" itself falls on a weekend, its
+  // actual assignment.startDate lands on the following Monday, not today.
+  // Read both back rather than assuming either matches a computed date.
   const draggedDate = (await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_tasks') || '[]').find((t) => t.id === 'task_1'))).assignment.startDate;
   await page.click('button:has-text("Log hours")'); // opens on today by default
   await page.waitForSelector(modalSel);
@@ -171,9 +176,10 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.waitForTimeout(300);
   check('the daily hours log lists the project-linked task, planned for its actual day',
         (await modal().locator('tr', { hasText: 'Trial spray run' }).count()) === 1);
-  await modal().locator('input[type=date]').fill(isoDate(new Date()));
+  const standaloneDate = (await page.evaluate(() => JSON.parse(localStorage.getItem('wf::wf_tasks') || '[]').find((t) => t.name === 'Robot calibration check'))).assignment.startDate;
+  await modal().locator('input[type=date]').fill(standaloneDate);
   await page.waitForTimeout(300);
-  check('...and the standalone task, planned for today, shows on its own day too',
+  check('...and the standalone task, planned for its actual day, shows there too',
         (await modal().locator('tr', { hasText: 'Robot calibration check' }).count()) === 1);
   // Editing the date field left the modal "dirty" (any onChange does, per
   // Modal's tracking — see the DirtyContext comment in WeldingScheduler.jsx),

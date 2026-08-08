@@ -72,8 +72,13 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.waitForTimeout(500);
 
   // ---- open the daily log; a paired task shows two hours inputs ----
+  // "Log hours" always opens on the REAL today, not `anchorIso` — those
+  // only coincide when today itself happens to be a weekday. Navigate to
+  // the actual anchor date explicitly rather than relying on that match.
   await page.click('button:has-text("Log hours")');
   await page.waitForSelector(modalSel);
+  await page.waitForTimeout(300);
+  await modal().locator('input[type=date]').fill(anchorIso);
   await page.waitForTimeout(300);
 
   const pairedRow = modal().locator('tr', { hasText: 'Paired task' });
@@ -104,10 +109,16 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.click('button:has-text("Log hours")');
   await page.waitForSelector(modalSel);
   await page.waitForTimeout(300);
+  await modal().locator('input[type=date]').fill(anchorIso);
+  await page.waitForTimeout(300);
   const reopened = modal().locator('tr', { hasText: 'Paired task' }).locator('input[type=number]');
   check('reopened: primary hours still 20', (await reopened.nth(0).inputValue()) === '20');
   check('reopened: training partner hours still 4, not swapped with the primary\'s', (await reopened.nth(1).inputValue()) === '4');
-  await modal().locator('button').first().click();
+  // "Cancel", not the header ✕ — changing the Date field above marks the
+  // modal dirty (its body wraps a catch-all onChange), so the ✕ would
+  // raise the confirm-before-close dialog instead of closing outright;
+  // "Cancel" is always an unambiguous discard, dirty or not (#19).
+  await modal().getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.waitForSelector(modalSel, { state: 'detached' });
   await page.waitForTimeout(300);
 
@@ -117,6 +128,12 @@ export default async function run({ page, check, errors, baseUrl }) {
   await page.getByRole('button', { name: 'Report', exact: true }).click();
   await page.waitForSelector(modalSel);
   await page.waitForTimeout(400);
+  // ReportModal's own default range ends on the REAL today, same mismatch
+  // as "Log hours" above — the entry logged against anchorIso needs an
+  // explicit "To" past it whenever anchorIso lands after today (i.e.
+  // today itself fell on a weekend).
+  await modal().locator('label:has-text("To") input[type=date]').fill(anchorIso);
+  await page.waitForTimeout(300);
   const reportRows = await modal().locator('tbody tr', { hasText: 'Paired task' }).allInnerTexts();
   check('the report has exactly two rows for the paired task — one per person', reportRows.length === 2, JSON.stringify(reportRows));
   const alexRow = reportRows.find((r) => r.includes('Alex'));
