@@ -46,6 +46,7 @@ import actualHoursCostVisibility from './specs/actual-hours-cost-visibility.mjs'
 import effectiveCompletionDate from './specs/effective-completion-date.mjs';
 import equipmentIsCostCentre from './specs/equipment-is-costcentre.mjs';
 import qualityActions from './specs/quality-actions.mjs';
+import logHoursJobNumber from './specs/log-hours-job-number.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = join(HERE, 'artifacts');
@@ -91,6 +92,7 @@ const SUITES = [
   ['Value Reports uses the effective completion date, not the mark-complete date', effectiveCompletionDate],
   ['equipment is the cost centre — procedures independent of equipment, cost auto-links to the assigned machine', equipmentIsCostCentre],
   ['quality actions — bundled with rework, or created directly', qualityActions],
+  ['Log hours modal shows each job\'s job number', logHoursJobNumber],
 ];
 
 const only = process.argv[2]; // optional substring filter

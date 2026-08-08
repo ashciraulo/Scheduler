@@ -1242,6 +1242,13 @@ function ReworkModal({ job, staff = [], onCancel, onConfirm }) {
    Who the second person IS isn't editable here — that's the pairing set
    on the job/task itself (JobModal/TaskModal); this only ever asks how
    many of the primary's hours they were actually part of.
+
+   The "Job #" column (bcJobNo) — reported directly, since with several
+   similarly-named jobs on the go the name alone wasn't always enough to
+   tell them apart when logging hours. Same field/formatting the Backlog's
+   own "Job #" column and the Schedule view's tooltips already use, `—`
+   when a job has none. Also shown in the "Also worked on" picker's own
+   option labels below, for the same reason.
    ============================================================ */
 
 function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
@@ -1286,6 +1293,10 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
       return {
         jobId,
         name: job ? job.name : '(deleted job)',
+        // Job-level, unsplit (see "Splitting a job" in scheduler/CLAUDE.md)
+        // — `job` here is always the parent, never a part, so this is
+        // right regardless of whether the job is split.
+        bcJobNo: job ? job.bcJobNo : '',
         planned: Math.round(planned * 10) / 10,
         hours: e ? String(e.hours) : '',
         staffId: e ? (e.staffId || '') : '',
@@ -1317,6 +1328,7 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
         <table className="w-full text-sm min-w-[720px]">
           <thead className="sticky top-0 bg-slate-900 z-10">
             <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+              <th className="px-3 py-2 font-medium">Job #</th>
               <th className="px-3 py-2 font-medium">Job</th>
               <th className="px-3 py-2 font-medium">Planned</th>
               <th className="px-3 py-2 font-medium">Hours worked</th>
@@ -1326,12 +1338,13 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={5} className="px-3 py-8 text-center text-slate-500 text-xs">
+              <tr><td colSpan={6} className="px-3 py-8 text-center text-slate-500 text-xs">
                 Nothing was scheduled on this day. Add a job below if work happened anyway.
               </td></tr>
             )}
             {rows.map((r) => (
               <tr key={r.jobId} className="border-b border-slate-800/60">
+                <td className="px-3 py-2 font-mono text-xs text-slate-400 whitespace-nowrap">{r.bcJobNo || '—'}</td>
                 <td className="px-3 py-2 text-slate-200 max-w-[260px] truncate" title={r.name}>{r.name}</td>
                 <td className="px-3 py-2 text-slate-500 text-xs whitespace-nowrap">{r.planned ? `${r.planned}h` : '—'}</td>
                 <td className="px-3 py-2">
@@ -1399,7 +1412,7 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
             onChange={(e) => setAddId(e.target.value)}
           >
             <option value="">Choose a job…</option>
-            {addable.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+            {addable.map((j) => <option key={j.id} value={j.id}>{j.bcJobNo ? `${j.bcJobNo} — ${j.name}` : j.name}</option>)}
           </select>
           <button
             type="button"
@@ -1410,7 +1423,7 @@ function TimeLogModal({ date, jobs, staff, entries, onClose, onSave }) {
               if (!j) return;
               const secondStaffId = !Array.isArray(j.parts) ? j.secondStaffId : null;
               setRows((rs) => [...rs, {
-                jobId: j.id, name: j.name, planned: 0, hours: '', staffId: '', note: '', id: uid('tl'),
+                jobId: j.id, name: j.name, bcJobNo: j.bcJobNo, planned: 0, hours: '', staffId: '', note: '', id: uid('tl'),
                 secondStaffId, secondHours: '', secondId: uid('tl'),
               }]);
               setAddId('');
@@ -6478,8 +6491,26 @@ function JobModal({ job, templates, processes, staff, equipment = [], procedures
                 Shown for any existing job, active or complete, not hidden
                 at 0h the way the Backlog's subtext is: the point here is
                 confirming the log is working, which is exactly the case
-                where "nothing shows" is most confusing. */}
-            {!parts && !isNew && (
+                where "nothing shows" is most confusing.
+
+                Also shown for a SPLIT job, unlike the fields above it —
+                reported directly as an inconsistency ("visible for jobs
+                split during import, not for jobs split after"), traced to
+                this field alone being gated on `!parts` along with fields
+                that genuinely don't apply to a split job as a whole (%
+                complete, training partner — those are per-part). Hours
+                logged is different: TimeLogModal always logs against the
+                PARENT job's id (see its own "Jobs the plan put on this
+                day" pass), never a part's, whether or not the job is
+                split — so `loggedHours(timeLog, job.id)` is exactly as
+                meaningful here as for an unsplit job, and is in fact the
+                ONLY actual-hours record a split job has at all: parts
+                track `percentComplete`/`status` but never their own
+                actualHours (see "Splitting a job" in scheduler/CLAUDE.md),
+                so this field can't fall back to job.actualHours the way
+                the unsplit case sometimes does — it just doesn't apply
+                here, and the plain "day-by-day" line still shows. */}
+            {!isNew && (
               <Field label="Hours logged">
                 {(() => {
                   const lg = loggedHours(timeLog, job.id);

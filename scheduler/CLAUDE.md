@@ -1436,6 +1436,17 @@ stored actual, then the estimate). The Backlog shows the running logged total
 against the estimate, amber-coloured once it exceeds it, so drift is visible
 before completion.
 
+**`TimeLogModal` shows a "Job #" column (`bcJobNo`), ahead of "Job"** —
+reported directly: with several similarly-named jobs scheduled at once,
+the name alone wasn't always enough to tell them apart while logging
+hours. Same field/formatting the Backlog's own "Job #" column and the
+Schedule view's tooltips already use (`—` when a job has none), so nothing
+new to learn. Every row carries a top-level job's own `bcJobNo` — even a
+split job's, since a row here is always keyed by the PARENT job's id, see
+below — and the "Also worked on" picker's own option labels are prefixed
+with it too (`"J00456 — Bracket Weld Job"`), for the same disambiguation
+reason.
+
 **`JobModal` itself shows a "Hours logged" field for any existing job**
 (`loggedHours(timeLog, job.id)`, next to the % complete slider) — reported
 from testing that logging hours day-by-day had nowhere it showed up again:
@@ -1449,6 +1460,26 @@ completed job it also states outright which hours the cost below is
 actually calculated from (see the next paragraph) — `job.actualHours` when
 it differs from the day-by-day total, since that's the one that survived
 into `jobCost()`.
+
+**Also shown for a SPLIT job (`job.parts` set), unlike the fields around
+it** — reported directly as an inconsistency: visible for a job split at
+WIP-import time, missing for one split afterward via "Split job into two
+parts." Those are two unrelated mechanisms (import-time splitting
+produces two independent flat jobs, neither with `.parts` at all — see
+"Importing jobs from a Business Central WIP export" above — while "Split
+job into two parts" produces one job with `job.parts`), so the
+"inconsistency" was really just this
+field being gated on `!parts` alongside genuinely per-part fields (%
+complete, training partner) that don't apply to a split job as a whole.
+`loggedHours(timeLog, job.id)` is exactly as meaningful for a split job,
+though: `TimeLogModal` always logs against the PARENT job's id, never a
+part's (see "Jobs the plan put on this day" in its own comment), so this
+is in fact the ONLY actual-hours record a split job has — parts track
+`percentComplete`/`status` but never their own `actualHours` (see
+"Splitting a job" below), so a split job can't fall back to
+`job.actualHours` the way an unsplit one sometimes does; the plain
+day-by-day line just shows on its own. See
+`e2e/specs/split-job-parts.mjs`.
 
 **Cost figures that read a job directly — not just `jobCost()`'s own
 call sites — have to route through the SAME actual-vs-estimated hours
