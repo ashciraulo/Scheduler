@@ -1149,7 +1149,7 @@ function ReworkModal({ job, staff = [], onCancel, onConfirm }) {
   const [actionDueDate, setActionDueDate] = useState('');
   const canCreate = Number(hoursTotal) > 0 && details.trim().length > 0 && !!operatorId;
   return (
-    <Modal title="Mark for rework" onClose={onCancel}>
+    <Modal title="Mark for rework" onClose={onCancel} size="lg">
       <p className="text-sm text-slate-300 mb-3">
         Creates a new job, linked back to <span className="font-semibold text-slate-100">{job.name}</span> — its
         own record, completion date and actual hours stay exactly as they are. The rework gets its own hours,
@@ -4650,32 +4650,34 @@ function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, on
   const canSave = details.trim().length > 0;
 
   return (
-    <Modal title={isNew ? 'New quality action' : 'Edit quality action'} onClose={onClose}>
+    <Modal title={isNew ? 'New quality action' : 'Edit quality action'} onClose={onClose} size="lg">
       <Field label="Details">
         <textarea
           className={inputCls} rows={3} value={details} onChange={(e) => setDetails(e.target.value)}
           autoFocus placeholder="What happened, and why this needs an action"
         />
       </Field>
-      <Field label="Operator (optional)">
-        <select className={inputCls} value={operatorId} onChange={(e) => setOperatorId(e.target.value)}>
-          <option value="">Not tied to one person</option>
-          {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          {operatorId && !staff.some((s) => s.id === operatorId) && (
-            <option value={operatorId}>Former staff member</option>
-          )}
-        </select>
-      </Field>
-      <Field label="Job this relates to (optional)">
-        <select className={inputCls} value={jobId} onChange={(e) => setJobId(e.target.value)}>
-          <option value="">Not linked to a specific job</option>
-          {jobs.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
-          {jobId && !jobs.some((j) => j.id === jobId) && (
-            <option value={jobId}>Deleted job</option>
-          )}
-        </select>
-        <p className="text-xs text-slate-500 mt-1">For an issue that needs a corrective action but doesn't need the job itself reworked — use "Mark for rework" on the job instead when it does.</p>
-      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Operator (optional)">
+          <select className={inputCls} value={operatorId} onChange={(e) => setOperatorId(e.target.value)}>
+            <option value="">Not tied to one person</option>
+            {staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            {operatorId && !staff.some((s) => s.id === operatorId) && (
+              <option value={operatorId}>Former staff member</option>
+            )}
+          </select>
+        </Field>
+        <Field label="Job this relates to (optional)">
+          <select className={inputCls} value={jobId} onChange={(e) => setJobId(e.target.value)}>
+            <option value="">Not linked to a specific job</option>
+            {jobs.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+            {jobId && !jobs.some((j) => j.id === jobId) && (
+              <option value={jobId}>Deleted job</option>
+            )}
+          </select>
+        </Field>
+      </div>
+      <p className="text-xs text-slate-500 -mt-2 mb-3">For an issue that needs a corrective action but doesn't need the job itself reworked — use "Mark for rework" on the job instead when it does.</p>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Category (optional)">
           <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
@@ -4687,30 +4689,39 @@ function QualityActionModal({ action, jobs = [], staff = [], onClose, onSave, on
           <input type="date" className={inputCls} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
         </Field>
       </div>
-      <Field label="Proposed solution (optional)">
-        <textarea
-          className={inputCls} rows={2} value={proposedSolution} onChange={(e) => setProposedSolution(e.target.value)}
-          placeholder="Can be filled in once an investigation determines one"
-        />
-      </Field>
       {/* Neither offered at creation — a brand new action has nothing to
           report progress on yet, and is open by definition, nothing to
           mark complete yet either. */}
-      {!isNew && (
-        <>
+      {isNew ? (
+        <Field label="Proposed solution (optional)">
+          <textarea
+            className={inputCls} rows={2} value={proposedSolution} onChange={(e) => setProposedSolution(e.target.value)}
+            placeholder="Can be filled in once an investigation determines one"
+          />
+        </Field>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Proposed solution (optional)">
+            <textarea
+              className={inputCls} rows={3} value={proposedSolution} onChange={(e) => setProposedSolution(e.target.value)}
+              placeholder="Can be filled in once an investigation determines one"
+            />
+          </Field>
           <Field label="Progress notes (optional)">
             <textarea
-              className={inputCls} rows={2} value={progressNotes} onChange={(e) => setProgressNotes(e.target.value)}
+              className={inputCls} rows={3} value={progressNotes} onChange={(e) => setProgressNotes(e.target.value)}
               placeholder="What's been done so far, or what's blocking it"
             />
           </Field>
-          <Field label="Status">
-            <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value)}>
-              <option value="open">Open</option>
-              <option value="complete">Complete</option>
-            </select>
-          </Field>
-        </>
+        </div>
+      )}
+      {!isNew && (
+        <Field label="Status">
+          <select className={`${inputCls} max-w-xs`} value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="open">Open</option>
+            <option value="complete">Complete</option>
+          </select>
+        </Field>
       )}
       <div className="flex items-center justify-between pt-2 border-t border-slate-800 mt-2">
         {onDelete ? <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button> : <span />}
@@ -4945,19 +4956,23 @@ function ProjectModal({ project, onClose, onSave, onDelete }) {
   const [status, setStatus] = useState(project?.status || 'active');
   const canSave = name.trim().length > 0;
   return (
-    <Modal title={isNew ? 'New R&D project' : 'Edit project'} onClose={onClose}>
-      <Field label="Project name">
-        <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-      </Field>
+    <Modal title={isNew ? 'New R&D project' : 'Edit project'} onClose={onClose} size="lg">
+      <div className="grid grid-cols-3 gap-3">
+        <div className="col-span-2">
+          <Field label="Project name">
+            <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          </Field>
+        </div>
+        <Field label="Status">
+          <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="active">Active</option>
+            <option value="onhold">On hold</option>
+            <option value="complete">Complete</option>
+          </select>
+        </Field>
+      </div>
       <Field label="Description (optional)">
-        <textarea className={inputCls} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
-      </Field>
-      <Field label="Status">
-        <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="active">Active</option>
-          <option value="onhold">On hold</option>
-          <option value="complete">Complete</option>
-        </select>
+        <textarea className={inputCls} rows={5} value={description} onChange={(e) => setDescription(e.target.value)} />
       </Field>
       <div className="flex items-center justify-between pt-2 border-t border-slate-800 mt-2">
         {onDelete ? <button className={btnDanger} onClick={onDelete}><Trash2 size={14} /> Delete</button> : <span />}
@@ -5046,7 +5061,7 @@ function TaskModal({ task, processes, staff, equipment = [], procedures = [], pr
   }
 
   return (
-    <Modal title={isNew ? 'New task' : 'Edit task'} onClose={onClose}>
+    <Modal title={isNew ? 'New task' : 'Edit task'} onClose={onClose} size="lg">
       <Field label="Task description">
         <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} autoFocus />
       </Field>
@@ -5187,7 +5202,7 @@ function BackfillTaskModal({ task, processes, staff, procedures = [], projects =
   }
 
   return (
-    <Modal title={isNew ? 'Log past work' : 'Edit logged entry'} onClose={onClose}>
+    <Modal title={isNew ? 'Log past work' : 'Edit logged entry'} onClose={onClose} size="lg">
       <p className="text-sm text-slate-300 mb-3">
         For work that's already done and was never put on the schedule — fills in the R&D list and report directly,
         with no equipment or start date to pin.
@@ -8147,46 +8162,52 @@ function TemplateModal({ template, equipment, processes, procedures = [], allTag
   const categoryOptions = [...new Set([...categorySuggestions, ...(category ? [category] : [])])].sort();
 
   return (
-    <Modal title={isNew ? 'New template' : 'Edit template'} onClose={onClose}>
-      <Field label="Template name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
-      <Field label="Category">
-        <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
-          <option value="">— Uncategorised —</option>
-          {categoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
-        {category && !categorySuggestions.includes(category) && (
-          <p className="text-xs text-amber-400 mt-1">“{category}” isn’t in the category list any more — pick another, or re-add it under Templates.</p>
-        )}
-        {categorySuggestions.length === 0 && (
-          <p className="text-xs text-slate-500 mt-1">Define categories in the Templates tab to group templates here.</p>
-        )}
-      </Field>
-      <Field label="Process">
-        <select className={inputCls} value={process} onChange={(e) => {
-          const nv = e.target.value; setProcess(nv);
-          const fm = procedures.filter((p) => p.process === nv);
-          setProcedureId(fm.some((p) => p.id === procedureId) ? procedureId : (fm[0] ? fm[0].id : ''));
-        }}>
-          {processes.map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
-      </Field>
-      <Field label="Procedure (sets hourly cost)">
-        <select className={inputCls} value={procedureId} onChange={(e) => setProcedureId(e.target.value)}>
-          <option value="">— none —</option>
-          {procsForProcess.map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p))}/hr</option>)}
-        </select>
-      </Field>
-      <Field label="Efficiency (%) — productive share of scheduled hours">
-        <input type="number" min={0} max={100} step={1} className={inputCls} value={efficiency} onChange={(e) => setEfficiency(e.target.value)} />
-        <p className="text-xs text-slate-500 mt-1">
-          Not every scheduled hour runs the process — some is setup/pack-down, or a cooldown pause this procedure needs. This much is costed at the procedure's own rate; the rest at the average labour cost (Costing tab). A starting point for jobs made from this template — still editable per job.
-        </p>
-      </Field>
+    <Modal title={isNew ? 'New template' : 'Edit template'} onClose={onClose} size="lg">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Template name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field label="Category">
+          <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
+            <option value="">— Uncategorised —</option>
+            {categoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          {category && !categorySuggestions.includes(category) && (
+            <p className="text-xs text-amber-400 mt-1">“{category}” isn’t in the category list any more — pick another, or re-add it under Templates.</p>
+          )}
+          {categorySuggestions.length === 0 && (
+            <p className="text-xs text-slate-500 mt-1">Define categories in the Templates tab to group templates here.</p>
+          )}
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Process">
+          <select className={inputCls} value={process} onChange={(e) => {
+            const nv = e.target.value; setProcess(nv);
+            const fm = procedures.filter((p) => p.process === nv);
+            setProcedureId(fm.some((p) => p.id === procedureId) ? procedureId : (fm[0] ? fm[0].id : ''));
+          }}>
+            {processes.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </Field>
+        <Field label="Procedure (sets hourly cost)">
+          <select className={inputCls} value={procedureId} onChange={(e) => setProcedureId(e.target.value)}>
+            <option value="">— none —</option>
+            {procsForProcess.map((p) => <option key={p.id} value={p.id}>{p.name} · {fmtMoney(procedureCost(p))}/hr</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Efficiency (%) — productive share of scheduled hours">
+          <input type="number" min={0} max={100} step={1} className={inputCls} value={efficiency} onChange={(e) => setEfficiency(e.target.value)} />
+          <p className="text-xs text-slate-500 mt-1">
+            Not every scheduled hour runs the process — some is setup/pack-down, or a cooldown pause this procedure needs. This much is costed at the procedure's own rate; the rest at the average labour cost (Costing tab). A starting point for jobs made from this template — still editable per job.
+          </p>
+        </Field>
+        <Field label="Hours per unit"><input type="number" min={0.1} step={0.1} className={inputCls} value={hoursPerUnit} onChange={(e) => setHoursPerUnit(e.target.value)} /></Field>
+      </div>
       <Field label="Capability requirements (optional)">
         <TagEditor value={tags} onChange={setTags} suggestions={allTags} />
         <p className="text-xs text-slate-500 mt-1">Jobs from this template only schedule on equipment carrying every tag — e.g. a positioner load rating.</p>
       </Field>
-      <Field label="Hours per unit"><input type="number" min={0.1} step={0.1} className={inputCls} value={hoursPerUnit} onChange={(e) => setHoursPerUnit(e.target.value)} /></Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Total value per unit ($, optional)">
           <input type="number" min={0} step={1} className={inputCls} value={totalValuePerUnit} onChange={(e) => setTotalValuePerUnit(e.target.value)} placeholder="e.g. 120" />
@@ -8836,8 +8857,13 @@ function StaffModal({ item, processes, onClose, onSave }) {
   const [color, setColor] = useState(item?.color || '');
 
   return (
-    <Modal title={isNew ? 'Add staff member' : 'Edit staff member'} onClose={onClose}>
-      <Field label="Name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+    <Modal title={isNew ? 'Add staff member' : 'Edit staff member'} onClose={onClose} size="lg">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field label="Business Central Resource No. (optional)">
+          <input className={inputCls} value={bcResourceNo} onChange={(e) => setBcResourceNo(e.target.value)} placeholder="e.g. RES-0042" />
+        </Field>
+      </div>
       <Field label="Certified / competent processes">
         <MultiCheck options={processes} value={procs} onChange={setProcs} showOrphans />
       </Field>
@@ -8858,9 +8884,6 @@ function StaffModal({ item, processes, onClose, onSave }) {
           >Automatic</DirtyButton>
         </div>
         <p className="text-xs text-slate-500 mt-1">Shown as this person's colour on the Schedule view. Automatic assigns one from the palette based on staff order.</p>
-      </Field>
-      <Field label="Business Central Resource No. (optional)">
-        <input className={inputCls} value={bcResourceNo} onChange={(e) => setBcResourceNo(e.target.value)} placeholder="e.g. RES-0042" />
       </Field>
       <div className="flex justify-end gap-2 pt-2 border-t border-slate-800 mt-3">
         <button className={btnGhost} onClick={onClose}>Cancel</button>

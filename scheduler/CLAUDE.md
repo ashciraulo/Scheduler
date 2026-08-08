@@ -2764,6 +2764,35 @@ fields exist so a future sync layer has a clean contract.
   pair it with `truncate w-0 min-w-full` on the cell's inner div (needs a
   bounded width to actually clip against; a bare `max-w-[Npx]` cap just moves
   the wasted space inside the column instead of removing it).
+- **Several more modals moved from the default `md` to `size="lg"` (#69),
+  same fix as JobModal's own #33 for the same reason: reported directly as
+  unnecessarily narrow given how much screen space a desktop/shop-floor
+  monitor actually has.** `TemplateModal`, `TaskModal`, `BackfillTaskModal`
+  ("Log past work"/"Edit logged entry"), `QualityActionModal`, `ReworkModal`
+  ("Mark for rework") and `StaffModal` all went from `md` to `lg` — every one
+  of them already had (or, for `QualityActionModal`, gained) `grid-cols-2`
+  field pairs that were genuinely cramped at 448px, half that per column once
+  the grid gap is subtracted. `ProjectModal` is the one case with no dense
+  grid to unclamp — it moved to `lg` too (a 2:1 name/status grid up top, and
+  the description textarea grew from 3 rows to 5) purely so a very short form
+  doesn't look like an accident of a width nobody chose on purpose, not
+  because anything in it was actually unreadable. `StaffModal`'s certified-
+  processes `MultiCheck` chip row benefits the same way `EquipmentModal`'s
+  capital-assets grid already did (its own `wide` predates this pass) — more
+  chips fit per row before wrapping, less vertical scroll for a shop with a
+  handful of processes.
+  `QualityActionModal` also got a light reflow, not just a width bump: Operator
+  and Job (previously two stacked full-width `Field`s) now sit side by side,
+  and edit mode's Proposed solution/Progress notes/Status — previously always
+  full-width, stacked — pair the two textareas into one row with Status below
+  as its own `max-w-xs` select (a Complete/Open toggle has no business being
+  as wide as the dialog). Creation mode keeps Proposed solution full-width
+  alone, since Progress notes and Status aren't offered until edit — no
+  awkward single-cell "grid" for a lone field.
+  Left alone, deliberately: the absence/leave modal and the various short
+  confirm/conflict dialogs (delete, parallel-conflict, manual-assign-conflict,
+  equipment-lock-conflict) — genuinely brief content that reads fine at the
+  default width, not narrowness with nothing gained by fixing it.
 - The three chip/tag input widgets (`TagEditor`, `KeywordChips`, `ComboChips`)
   commit on blur, not just on Enter/Add. Typing a value and clicking straight
   to Save — a completely natural thing to do — used to discard it silently:
